@@ -81,24 +81,33 @@
 
 ### 2. LazyTensor Engine Implementation (R1)
 - [ ] 2.1 Implement PyTorch device and dispatcher integration
-  - Register custom "remote_accelerator" device with PyTorch using DispatchKey.PrivateUse1
-  - Implement dispatcher hooks to intercept all aten:: operations with <10μs overhead per call
-  - Create operation interception mechanism covering >95% of standard PyTorch operations
-  - Implement device-specific memory management integration with PyTorch's allocator system
-  - Add support for autograd and backward pass interception for training workloads
-  - Write comprehensive unit tests for device registration and operation capture
-  - Implement fallback mechanism for unsupported operations with logging
+  - [ ] 2.1.1 Register custom device ("remote_accelerator") using DispatchKey.PrivateUse1
+    - Minimal device registration and index management
+    - Unit test: device create/list/str representation
+  - [ ] 2.1.2 Basic dispatcher hook (torch.empty only)
+    - Measure interception overhead (<10μs p95)
+    - Micro-benchmark added
+  - [ ] 2.1.3 Math op coverage (add, mul, matmul)
+    - Operation registry + fallback path
+    - Forward-pass smoke test on tiny model
+  - [ ] 2.1.4 Autograd interception
+    - Backward pass interception and gradients
+    - Correctness vs eager baseline
+  - [ ] 2.1.5 95% aten coverage + in-place/view ops
+    - Compatibility matrix and docs
   - _Requirements: R1.1_
 
-- [ ] 2.2 Create LazyTensor core abstraction
-  - Implement LazyTensor class with deferred execution maintaining full PyTorch Tensor API compatibility
-  - Design SemanticMetadata accumulator with extensible schema and versioning support
-  - Create tensor proxy system with lazy evaluation and automatic materialization detection
-  - Implement metadata collection for operation types, tensor properties, dependencies with <1% memory overhead
-  - Add support for tensor slicing, indexing, and view operations in lazy mode
-  - Implement reference counting and memory management for lazy tensors
-  - Create serialization/deserialization for LazyTensor objects for distributed execution
-  - Write performance tests ensuring <1% overhead for metadata accumulation
+- [ ] 2.2 Create LazyTensor core abstraction (split for tractability)
+  - [ ] 2.2.1 API surface (no autograd)
+    - Core storage + metadata getters; basic arithmetic passthrough; explicit materialize()
+  - [ ] 2.2.2 Views and indexing
+    - Slice/view ops, alias rules, in-place semantics doc and tests
+  - [ ] 2.2.3 Autograd support
+    - Backward graph capture, grad accumulation, parity tests vs eager
+  - [ ] 2.2.4 Serialization & wire schema
+    - Stable schema version; round-trip tests; size/perf budget
+  - [ ] 2.2.5 Overhead guardrails
+    - Benchmarks to enforce <1% metadata overhead
   - _Requirements: R1.2, R1.5_
 
 - [ ] 2.3 Build computation graph construction
@@ -132,10 +141,15 @@
 
 ### 4. Advanced Semantic Capture (R1)
 - [ ] 4.1 Integrate PyTorch FX for static analysis
-  - Implement FX tracer integration for model architecture analysis (R1.3)
-  - Create static graph analysis for identifying high-level components
-  - Develop component boundary detection algorithms
-  - Write tests for FX integration with various model architectures
+  - [ ] 4.1.1 Create FX-compatible symbolic tracing
+    - Control-flow handling, dynamic shapes, fallback recording
+    - Tests across 10 common architectures
+  - [ ] 4.1.2 Build FX graph analyzer
+    - Module boundary extraction, subgraph pattern ID, traversal utilities
+  - [ ] 4.1.3 Integrate FX with LazyTensor
+    - Map FX nodes↔Lazy ops; preserve metadata; round-trip fidelity tests
+  - [ ] 4.1.4 Handle FX limitations
+    - Detect/report untraceable paths; hybrid tracing; coverage docs
   - _Requirements: R1.3_
 
 - [ ] 4.2 Implement hook-based semantic enhancement
@@ -192,12 +206,32 @@
 ## Phase 3: Optimization Engine (Months 3-4)
 
 ### 7. Semantic-Guided Optimization (R4)
-- [ ] 7.1 Implement pattern-based workload classification
-  - Create automatic workload classification via pattern matching (R4.1)
-  - Implement confidence scoring for classification decisions
-  - Develop multi-pattern fusion for complex workloads
-  - Write tests for classification accuracy across workload types
+- [ ] 7.1 Implement pattern-based workload classification (split into shippable slices)
+  - [ ] 7.1.1 Subgraph matcher MVP
+    - Bounded isomorphism on DAGs, cache by graph fingerprint
+  - [ ] 7.1.2 Conflict resolution
+    - Priority rules + confidence weighting; explainability logs
+  - [ ] 7.1.3 Fusion rules
+    - Merge overlapping patterns; tests for multi-pattern graphs
+  - [ ] 7.1.4 Classification pipeline + SLA
+    - End-to-end latency budget <100ms; telemetry exports
   - _Requirements: R4.1, R2.5_
+
+### 6.5 Integration Testing Between Components
+- [ ] 6.5.1 LazyTensor ↔ Semantic Analyzer integration
+  - Validate GraphHandoff and metadata preservation; measure overhead
+- [ ] 6.5.2 Optimization Engine ↔ Scheduler integration
+  - Validate schedule generation, dependencies, parallel groups
+- [ ] 6.5.3 Transfer Manager ↔ Remote Runtime integration
+  - Validate transfer protocol, tensor locations, recovery paths
+  - _Requirements: R1, R2, R3, R4, R7_
+
+### 8.5 State Management Implementation
+- [ ] 8.5.1 Distributed State Manager
+  - Checkpointing, atomic updates, consistency validation, recovery tests
+- [ ] 8.5.2 Operation state tracking
+  - Lifecycle states, transition validation, notifications, concurrency tests
+  - _Requirements: R5, R6_
 
 - [ ] 7.2 Build LLM-specific optimizations
   - Implement KV cache co-location strategies (R4.2)
@@ -238,17 +272,32 @@
 ## Phase 4: Zero-Copy Runtime (Months 4-5)
 
 ### 9. DPDK Memory Management (R3)
-- [ ] 9.1 Implement DPDK-integrated allocator
-  - Create DPDKAllocator as custom PyTorch allocator with huge page support (2MB/1GB pages)
-  - Implement pre-registered DMA-capable memory pools with configurable sizes (64K-2GB buffers)
-  - Support both host-pinned memory and GPU device memory allocation via gpudev
-  - Implement memory pool auto-sizing based on workload characteristics
-  - Add memory alignment support for optimal DMA performance (64-byte, 4KB alignment)
-  - Create memory pool statistics and monitoring with real-time fragmentation tracking
-  - Implement memory pool defragmentation and compaction algorithms
-  - Write comprehensive unit tests for allocator functionality including edge cases
-  - Add performance benchmarks ensuring <100μs allocation time for typical tensors
+- [ ] 9.1 Implement DPDK-integrated allocator (finer granularity)
+  - [ ] 9.1.1 EAL init + probe
+    - 2-core config, hugepages (2MB) set-up, version/capability smoke
+  - [ ] 9.1.2 Mempool MVP
+    - Single 256MB pool; alloc/free; stats; <100μs typical alloc
+  - [ ] 9.1.3 PyTorch CPU shim
+    - Replace CPU allocator with DPDK-backed slabs for pinned host memory
+  - [ ] 9.1.4 CUDA pathway
+    - Register CUDA buffers; expose gpudev registration
+  - [ ] 9.1.5 Multi-pool + size classes
+    - Fragmentation monitoring; compaction trigger and tests
   - _Requirements: R3.1, R3.5_
+
+### 2.5 Graph Serialization and Caching (R1, R4, R6)
+- [ ] 2.5.1 Graph serialization format and versioning
+  - Protobuf/JSON schema, compression, round-trip tests
+- [ ] 2.5.2 Graph fingerprinting and cache with TTL
+  - Invalidation rules and hit/miss metrics
+  - _Requirements: R1.5, R4.5, R6.1_
+
+### 3.5 Telemetry and Tracing (R5)
+- [ ] 3.5.1 MetricsCollector (low overhead)
+  - Per-op latencies, bytes moved, counters export (Prometheus)
+- [ ] 3.5.2 Distributed tracing (OpenTelemetry)
+  - Client↔remote correlation, sampling, viz hooks
+  - _Requirements: R5.1, R6_
 
 - [ ] 9.2 Build proactive network integration
   - Implement tensor creation in network-ready memory with automatic DPDK registration
@@ -263,11 +312,12 @@
   - _Requirements: R3.5_
 
 ### 10. Zero-Copy Data Transfer (R3)
-- [ ] 10.1 Implement DMA transfer system
-  - Create TransferManager for DMA operations (R3.2)
-  - Implement batch transfer optimization
-  - Develop transfer scheduling and prioritization
-  - Write performance tests for DMA transfers
+- [ ] 10.1 Implement DMA transfer system (with explicit contracts)
+  - Create TransferManager for DMA ops returning TransferFuture
+  - Define DMAHandle {iova,lkey,rkey?,pool_id} and on-wire schema
+  - Implement batch transfer optimization; progress() reporting
+  - Develop transfer scheduling and prioritization; cancellation
+  - Write performance and reliability tests; TransferError + ErrorContext path
   - _Requirements: R3.2_
 
 - [ ] 10.2 Build GPU-NIC integration layer
@@ -283,17 +333,20 @@
   - Develop automatic fallback detection and switching
   - Validate RDMA-core inbox path and host-pinned staging fallbacks
   - Write tests for fallback behavior and performance impact
-  - _Requirements: R3.4_
+  - Add optional checksum verification and CompressionManager hooks
+  - _Requirements: R3.3, R3.4_
 
 ## Phase 5: Remote Execution (Months 5-6)
 
 ### 11. CPU-Minimal Remote Runtime (R7)
-- [ ] 11.1 Implement thin runtime for remote execution
-  - Create minimal PyTorch runtime for accelerator nodes (R7.1)
-  - Implement operation execution with minimal CPU usage
-  - Develop resource usage monitoring and reporting (R7.3)
+- [ ] 11.1 Implement thin runtime for remote execution (split by plane)
+  - [ ] 11.1.1 Control plane (gRPC or QUIC)
+    - Single channel; auth; version negotiation; heartbeat(interval_ms)
+  - [ ] 11.1.2 Data plane
+    - Kernel launcher + tensor registry; DMAHandle ingestion
+  - [ ] 11.1.3 Telemetry plane
+    - Bounded CPU (<2ms p95) and memory (<256MB/plan); metrics export
   - Write tests for CPU and memory footprint validation
-  - Enforce single control/telemetry channel; bound per-request CPU (<2ms p95) and memory (<256MB per plan)
   - _Requirements: R7.1, R7.3_
 
 - [ ] 11.2 Validate high accelerator-to-CPU ratios
@@ -430,3 +483,37 @@
   - Create community engagement plan
   - Write project roadmap for future development
   - _Requirements: All requirements_
+
+## Short Priority Guide
+
+Weeks 1–2 (MVP path): 2.1.1, 2.1.2, simplified 2.2, minimal 2.3, 3.5.1
+
+Weeks 3–4 (Core): 2.1.3–2.1.4, 2.5.1, 3.1–3.2, error handling hooks
+
+Weeks 5–6 (Semantic): 4.1, 5.1–5.2, Synchronization + Version negotiation
+
+Weeks 7–8 (Optimization): 7.1, 8.1, 2.5.2
+
+## Failure Injection Testing Plan
+
+Purpose: Validate resilience, observability, and graceful degradation under realistic faults. Each test must emit telemetry and meet recovery/penalty budgets from requirements.
+
+### Network Faults (R3.4, R5.1, R7.3)
+- Packet loss/burst drops: Introduce 1–5% random loss and 100ms burst loss; verify throughput degradation is tracked and retries occur; ensure no deadlocks.
+- Latency spikes/jitter: Inject p95 latency +2× for 10s; verify overlap scheduling maintains progress; end-to-end SLA hit ≤15%.
+- Partition and heal: Drop connectivity for 5s; confirm fallback to local or queued execution and recovery within 5s with no data corruption.
+
+### Resource Exhaustion (R3.1, R3.5, R7.1)
+- DPDK pool exhaustion: Cap pools to trigger fragmentation/exhaustion at 80–95% utilization; verify compaction triggers and spill strategies; no crashes.
+- GPU OOM: Force reduced memory limits; validate recomputation/offload engages; report recovery with ≤30% slowdown.
+- CPU pressure on remote: Saturate 1 core; ensure control/telemetry channel still meets p95 <2ms; backpressure applied to planner.
+
+### Pattern/System Semantics (R2, R4, R8)
+- Low-confidence patterns: Force classifier confidence <70%; verify conservative path is selected, telemetry logged, and results match within 1e-5.
+- FX tracer failure: Disable FX on selected models; hooks-only capture must still function with overhead ≤1%.
+- Recompute vs transfer: Inject inaccurate cost hints and ensure guardrails bound overhead increase to ≤5% vs. baseline plan.
+
+Artifacts
+- Fault profiles checked into repo (yaml/json) with seeds for reproducibility.
+- CI job “resilience” runs nightly on smallest matrix; weekly on full matrix.
+- Dashboards include failure-rate, MTTR, fallback-usage, and penalty metrics.

@@ -71,6 +71,14 @@ Acceptance criteria:
 5. Memory management: Integrate registration at tensor creation; avoid post-hoc registration.
 6. Batching: Aggregate small transfers to a ≥1MB average.
 
+ Additional interface/contract criteria:
+ 7. TransferManager MUST expose a TransferFuture supporting: result(), done(), cancel(), add_done_callback(fn), and progress()->[0.0–1.0].
+ 8. DPDKAllocator.register() MUST return a DMAHandle {iova:int, lkey:int, rkey?:int, pool_id:str} usable by the data plane; boolean return is insufficient.
+ 9. TransferRequest MAY specify checksum:sha256; receivers MUST validate when present and emit TransferError with ErrorContext on mismatch.
+ 10. If allow_compression is true, a CompressionManager MUST be used with on-wire metadata {codec, orig_len}; decompression MUST be transparent to the executor.
+ 11. ThinRuntime MUST implement heartbeat(interval_ms) RPC; client failure detection target <2s (configurable) with backoff and jitter.
+ 12. DR scope MUST include schema_version and feature_flags snapshot to permit safe restore across versions.
+
 ### R4. Semantic-Guided Optimization & Scheduling
 
 User story: As a scheduler designer, I want Genie to use semantics for placement, recomputation vs. transfer, and overlap decisions.

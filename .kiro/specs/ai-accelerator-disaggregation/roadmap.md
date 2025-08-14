@@ -51,6 +51,7 @@ gantt
 - ✅ <10μs operation overhead, <1% memory overhead
  - 🔄 Observability baseline (latency, bytes moved, overlap %, util) with dashboards
  - 🔄 Resilience basics (retries, idempotent plan steps)
+ - 🔄 Contracts finalized for ExecutionPlan, TransferFuture, and DMAHandle
 **Key Deliverables**:
 - Functional prototype demonstrating core concepts
 - Basic performance benchmarks
@@ -73,6 +74,7 @@ gantt
 - Performance optimization engine
 - Developer documentation and examples
  - Idempotent execution plan steps and retry policies
+ - Control plane with heartbeat(interval_ms) implemented; failure detection <2s
 **Risk Assessment**: 🟡 Medium Risk
 - DPDK integration complexity
 - Multi-GPU coordination challenges
@@ -97,6 +99,14 @@ gantt
 - Focus on polish, documentation, and validation
 
 ## Detailed Phase Breakdown
+
+### Week 0: Implementation Kickoff Checklist
+- Environment: Python 3.10.x, CUDA 12.1, PyTorch 2.1.2 installed; NVIDIA driver 535.129; DPDK 23.11 prerequisites and hugepages configured.
+- Repository: Project skeleton created (genie/{core,patterns,runtime,tests,examples}); pyproject.toml; coding standards and pre-commit hooks.
+- CI: GitHub Actions matrix (CPU-only/CUDA 12.1; DPDK on/off); version validator job green; lock files published as artifacts.
+- Docs: requirements.md, architecture.md, design.md, version.md, tasks.md, roadmap.md approved; success metrics visible.
+- First PR targets: device registration stub, LazyTensor skeleton, MetricsCollector scaffolding, and smoke tests.
+- Success gate: “hello tensor” demo runs end-to-end with interception counter > 0 and tests pass.
 
 ### Phase 1: Foundation (Months 1-2)
 **Objective**: Establish core infrastructure and prove feasibility

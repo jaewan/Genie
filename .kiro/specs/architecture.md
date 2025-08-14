@@ -415,3 +415,11 @@ class GeniePlugin(ABC):
 ## Conclusion
 
 This architecture enables Genie to bridge the semantic translation gap by operating at the ML framework level, capturing rich application context through lazy execution, and leveraging this understanding to orchestrate efficient execution across disaggregated accelerators. The combination of semantic awareness and zero-copy data paths makes practical what was previously impossible: general-purpose, performant AI accelerator disaggregation.
+
+## Interface alignment summary
+
+- Planner→Scheduler: single artifact named ExecutionPlan with feature_flags; no separate "ExecutionSchedule" term.
+- IDs: UUIDv4 strings for TensorID/NodeId/op_id; dtype is torch.dtype in-process and canonical string on-wire.
+- Transfer path: DPDKAllocator.register()->DMAHandle {iova,lkey,rkey?,pool_id}; TransferManager returns TransferFuture with progress and callbacks.
+- Optional paths: CompressionManager and checksum validation; enable via feature_flags.
+- Remote runtime lifecycle: single control channel with heartbeat(interval_ms), bounded CPU p95 <2ms; telemetry plane is separate but multiplexed over control channel where feasible.

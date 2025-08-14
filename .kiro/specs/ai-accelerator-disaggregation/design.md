@@ -120,6 +120,73 @@ graph TB
 - `MaterializationTracker`: Detects explicit and implicit materialization triggers
 
 **Performance Characteristics**:
+
+### Interface Contracts and Data Types (Cross-Cutting)
+
+This section defines canonical interfaces and types to ensure harmonious integration across components.
+
+1. Naming and top-level contracts
+     - Execution Plan: Single term for the optimizer output and scheduler input. We do not use a separate "ExecutionSchedule" to avoid drift.
+         - type: ExecutionPlan
+         - fields:
+             - plan_id: UUIDv4 string
+             - feature_flags: Dict[str, bool] (negotiated with remote runtime)
+             - ops: List[ScheduledOperation]
+     - ScheduledOperation
+         - op_id: UUIDv4 string (opaque, stable)
+         - op_type: str (aten/op name or composite)
+         - inputs: List[TensorID]
+         - outputs: List[TensorID]
+         - device: RemoteAccelerator
+         - metadata: SemanticMetadata
+     - RemoteExecutionRequest
+         - plan_id: str
+         - op_id: str (MUST equal ScheduledOperation.op_id)
+         - tensors: List[TensorDescriptor] (zero-copy descriptors when possible)
+
+2. IDs and dtype representation
+     - TensorID, NodeId, op_id: UUIDv4 strings. Charset: [0-9a-f-]. Case-insensitive.
+     - dtype in-process: torch.dtype
+     - dtype on-wire (JSON/RPC): canonical string (e.g., "float16", "int64"). Lossless round-trip required.
+     - Shapes: List[int], with -1 permitted for symbolic dims during planning.
+
+3. RemoteAccelerator identity and hashing
+     - RemoteAccelerator
+         - fields: {cluster: str, node: str, gpu_id: int}
+         - equality/hash: tuple(cluster, node, gpu_id) for dict/set keys
+
+4. Transfer path primitives
+     - DPDKAllocator.register() -> DMAHandle
+         - DMAHandle: {iova: int, lkey: int, rkey: Optional[int], pool_id: str}
+         - Rationale: TransferManager requires keys, not just a bool
+     - TransferRequest
+         - src: TensorID | DMAHandle
+         - dst: RemoteAccelerator | DMAHandle
+         - allow_compression: bool
+         - checksum: Optional[str] (sha256 hex) for end-to-end verification
+     - TransferFuture
+         - methods: result(timeout), done(), cancel(), add_done_callback(fn), progress() -> float [0.0–1.0]
+     - TransferError
+         - fields: {code: str, message: str, op_id: Optional[str], context: ErrorContext}
+     - ErrorContext
+         - fields: {plan_id: str, op_id: Optional[str], attempt: int, node: Optional[str]}
+
+5. CompressionManager (optional path)
+     - API: compress(Buffer) -> Buffer, decompress(Buffer) -> Buffer
+     - Selection: driven by feature_flags and tensor metadata (e.g., dtype, entropy hints)
+
+6. Materialization & graph feedback
+     - MaterializationTracker integrates with ComputationGraph via update_frontier(materialized: Set[TensorID])
+     - Implicit triggers (control flow, .item(), .cpu()) emit events recorded in the graph for analysis and replay.
+
+7. Heartbeat & lifecycle
+     - ThinRuntime Heartbeat RPC: heartbeat(interval_ms) -> HeartbeatAck {timestamp, health}
+     - Target: client-side death detection < 2s (configurable)
+     - StateManager.checkpoint_state() includes schema_version: str and feature_flags snapshot.
+
+8. Correctness hooks
+     - Optional per-tensor checksum verification on receipt at remote/local boundary when enabled.
+     - Determinism gates: fixed seeds are propagated in ExecutionPlan.feature_flags.
 - LazyTensor creation: <10μs per operation
 - Metadata accumulation: <1% memory overhead
 - Graph construction: O(n) complexity for n operations
@@ -438,7 +505,367 @@ class PerformanceValidator:
     def verify_correctness(self, tolerance: float = 1e-5) -> CorrectnessReport  # R5.6
 ```
 
+## Component Interface Contracts
+
+### PyTorch Dispatcher ↔ LazyTensor Contract (R1)
+
+- Coverage: Intercept ≥95% of aten operations invoked by supported models; unsupported ops must pass through to native execution with a warning tag (op_name, reason, callsite) and preserve autograd semantics.
+- Overhead: p95 ≤ 10 μs/op and p99 ≤ 25 μs/op for interception+enqueue on a 3.5GHz core with PyTorch 2.1.2, CUDA 12.1.
+- Materialization semantics:
+    - Explicit triggers: .item(), .numpy(), .cpu(), .detach(), printing/logging of tensor data, cross-device ops.
+    - Implicit triggers: graph barriers, control-flow boundaries, sync points (torch.cuda.synchronize), unsafe aliasing.
+    - Contract: When a trigger fires, LazyTensor must materialize only the minimal frontier required and update graph dependencies; no silent global flushes.
+- Determinism: With fixed seeds and deterministic flags, LazyTensor execution must be bitwise-stable where PyTorch is; otherwise within 1e-5 tolerance.
+- Thread-safety and reentrancy: Interception path is reentrant and safe under autograd+TorchScript execution; no global mutable state without locking.
+- Failure handling: On interceptor failure, materialize-and-forward must provide correct results and emit a telemetry event (category=fail_safe, severity=warning) with opaque error code.
+- Introspection: Expose counters (ops_intercepted, ops_fallback, enqueue_latency_p95, graph_nodes) via MetricsCollector.
+
+Conformance tests:
+- Golden models (ResNet-18, GPT-2 small) achieve ≥95% interception with 0 correctness diffs beyond tolerance.
+- Stress tests with concurrent dataloading maintain p95 overhead bound.
+
+### DPDK/gpudev ↔ TransferManager Contract (R3)
+
+- Capability negotiation: At init, report features {hugepage_sizes, max_mtu, max_q_pairs, gpudirect_supported, rdma_core_inbox_path}.
+- Alignment and MTU: All DMA buffers 64B-aligned and page-aligned; MTU respected (default 1500B, jumbo 9000B when enabled).
+- Setup latency: p95 ≤ 50 μs per DMA descriptor setup; steady-state throughput ≥90% of link-rate for 4–16MB batches at queue_depth=64.
+- Backpressure: TransferManager must surface queue_depth and occupancy; on saturation it must apply fair queueing and expose drop/deferral metrics.
+- Retry and timeouts: Exponential backoff starting at 200 μs, max 5 retries; hard timeout budget per transfer = 2 × RTT estimate or 50 ms, whichever is larger.
+- Fallback modes: If gpudirect_supported=false or registration fails, use host-pinned staging; measured penalty must be ≤20% vs optimal on 4–64MB transfers.
+- Observability: Emit per-path metrics (setup_us, bytes, gbps, retries, fallbacks, cq_latency_us); expose pool stats and fragmentation from DPDKAllocator.
+- Safety: Zero-copy registration/unregistration must be idempotent; cancellation semantics defined (cancel returns False if already completed or not found).
+
+Conformance tests:
+- Link-utilization tests achieve ≥90% of theoretical bandwidth with jumbo frames on.
+- RDMA-core inbox fallback passes parity and stays within the ≤20% penalty budget.
+
+## Critical Data Flow Contracts
+
+### LazyTensor → Semantic Analyzer
+
+```python
+@dataclass
+class GraphHandoff:
+    """Data passed from LazyTensor to Semantic Analyzer"""
+    graph: ComputationGraph
+    lazy_tensors: Dict[NodeId, LazyTensor]  # Node → tensor mapping
+    materialization_frontier: Set[NodeId]   # Current materialization points
+    metadata_version: str = "1.0"
+    
+    def validate(self) -> bool:
+        """Ensure graph consistency before analysis"""
+        # All nodes have corresponding tensors
+        # No dangling references
+        # Metadata schema matches version
+        ...
+
+@dataclass
+class AnalysisResult:
+    """Result from Semantic Analyzer to Optimization Engine"""
+    workload_profile: WorkloadProfile
+    identified_patterns: List[IdentifiedPattern]
+    semantic_regions: List[SemanticRegion]
+    confidence_scores: Dict[str, float]  # Pattern → confidence
+    fallback_required: bool
+    analysis_time_ms: float
+```
+
+### Optimization Engine → Transfer Manager
+
+```python
+@dataclass
+class TransferRequest:
+    tensor_id: TensorID
+    source_location: DeviceLocation  # CPU/GPU memory address
+    target_accelerator: RemoteAccelerator
+    size_bytes: int
+    priority: int  # 0-9
+    deadline_ms: Optional[float]
+    allow_compression: bool
+    allow_fallback: bool
+
+@dataclass
+class TransferBatch:
+    requests: List[TransferRequest]
+    dependency_graph: Dict[TensorID, Set[TensorID]]  # Ordering constraints
+    overlap_windows: List[Tuple[float, float]]  # Time windows for overlap
+    total_bytes: int
+    
+    def validate_batch_size(self) -> bool:
+        return self.total_bytes >= 1_048_576  # 1MB minimum
+```
+
+### Remote Runtime → Client Result Return
+
+```python
+@dataclass
+class TensorMetadata:
+    shape: Tuple[int, ...]
+    dtype: torch.dtype
+    device: str
+    memory_address: int  # For zero-copy retrieval
+    checksum: Optional[int]
+
+@dataclass
+class RemoteExecutionResult:
+    request_id: str
+    output_tensors: Dict[TensorID, TensorMetadata]
+    execution_time_ms: float
+    gpu_utilization: float
+    memory_peak_mb: float
+    error: Optional[RemoteError]
+```
+
+## Error Types and Recovery Protocols
+
+```python
+class GenieError(Exception):
+    error_code: str
+    severity: str  # "fatal", "recoverable", "warning"
+    telemetry_data: Dict[str, Any]
+
+class InterceptionError(GenieError):
+    operation: str
+    fallback_available: bool
+
+class PatternMatchError(GenieError):
+    confidence: float
+    patterns_tried: List[str]
+
+class TransferError(GenieError):
+    retry_count: int
+    fallback_strategy: str
+
+class RemoteExecutionError(GenieError):
+    node_id: str
+    gpu_id: int
+    can_redistribute: bool
+
+class RecoveryAction(Enum):
+    RETRY_WITH_BACKOFF = "retry"
+    USE_STAGED_COPY = "staged_copy"
+    FALLBACK_TO_EAGER = "eager"
+    EXECUTE_LOCALLY = "local"
+    ABORT_WITH_ERROR = "abort"
+
+class RecoveryProtocol:
+    @staticmethod
+    def handle_interception_error(err: InterceptionError) -> RecoveryAction:
+        if err.fallback_available:
+            return RecoveryAction.FALLBACK_TO_EAGER
+        return RecoveryAction.ABORT_WITH_ERROR
+    
+    @staticmethod
+    def handle_transfer_error(err: TransferError) -> RecoveryAction:
+        if err.retry_count < 3:
+            return RecoveryAction.RETRY_WITH_BACKOFF
+        if err.fallback_strategy == "staged":
+            return RecoveryAction.USE_STAGED_COPY
+        return RecoveryAction.EXECUTE_LOCALLY
+```
+
+## Synchronization Protocol
+
+```python
+class SynchronizationManager:
+    """Manages synchronization between client and remote nodes"""
+    
+    def create_barrier(self, participants: List[RemoteAccelerator]) -> str:  # BarrierId
+        ...
+    
+    def wait_for_completion(self, tensor_ids: List[TensorID], timeout_ms: float = 5000) -> bool:
+        ...
+    
+    def register_callback(self, tensor_id: TensorID, callback: Callable[[TensorMetadata], None]):
+        ...
+
+class ConsistencyProtocol:
+    def validate_tensor_state(self, tensor: LazyTensor) -> "ConsistencyStatus":
+        ...
+    
+    def force_synchronization(self, graph: ComputationGraph):
+        ...
+```
+
+## Version Compatibility Protocol
+
+```python
+@dataclass
+class ComponentVersion:
+    component: str  # "lazy_tensor", "semantic_analyzer", etc.
+    version: str    # "1.0.0"
+    capabilities: Set[str]
+    
+class VersionNegotiator:
+    def negotiate_protocol(self, client: ComponentVersion, server: ComponentVersion) -> "ProtocolVersion":
+        ...
+    
+    def check_compatibility(self, required: List[str], available: List[str]) -> bool:
+        ...
+    
+    def get_feature_flags(self) -> Dict[str, bool]:
+        return {
+            "gpudirect": True,
+            "compression": False,
+            "fx_tracing": True,
+        }
+```
+
+## Optimization Engine → Execution Scheduler Contract
+
+```python
+@dataclass
+class ScheduledOperation:
+    operation_id: str
+    node_id: NodeId
+    assigned_device: RemoteAccelerator
+    scheduled_time: float  # ms (relative)
+    dependencies: List[str]
+    estimated_duration: float
+    priority: int
+    can_preempt: bool = False
+
+@dataclass
+class ExecutionSchedule:
+    operations: List[ScheduledOperation]
+    critical_path: List[str]
+    parallel_groups: List[List[str]]
+    estimated_makespan: float
+    resource_utilization: Dict[str, float]  # RemoteAccelerator.node_id:gpu_id → utilization
+    
+    def validate_dependencies(self) -> bool:
+        # Validate DAG via topo-sort (no cycles)
+        ...
+    
+    def get_ready_operations(self, completed: Set[str]) -> List[ScheduledOperation]:
+        return [op for op in self.operations if all(d in completed for d in op.dependencies)]
+```
+
+## Execution Scheduler → Remote Runtime Contract
+
+```python
+@dataclass
+class TensorSpec:
+    shape: Tuple[int, ...]
+    dtype: str
+    device: str
+    preallocated_address: Optional[int] = None
+
+@dataclass
+class TensorLocation:
+    device: str
+    memory_address: int
+    size_bytes: int
+    is_ready: bool
+    transfer_handle: Optional[str] = None
+
+@dataclass
+class RemoteExecutionRequest:
+    request_id: str
+    operation: str  # serialized op or IR
+    input_tensors: Dict[str, TensorLocation]
+    output_specs: Dict[str, TensorSpec]
+    execution_hints: Dict[str, Any]
+    timeout_ms: float
+    checkpoint: Optional[bytes] = None
+```
+
+## State Management Protocol
+
+```python
+class OperationState(Enum):
+    PENDING = "pending"
+    SCHEDULED = "scheduled"
+    TRANSFERRING = "transferring"
+    EXECUTING = "executing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    RETRYING = "retrying"
+
+@dataclass
+class SystemState:
+    active_graphs: Dict[str, ComputationGraph]
+    pending_transfers: Dict[str, TransferRequest]
+    executing_operations: Dict[str, RemoteExecutionRequest]
+    resource_allocations: Dict[str, List[str]]  # accelerator → op_ids
+    metrics_snapshot: Dict[str, float]
+    timestamp: float
+
+class StateManager:
+    def checkpoint_state(self) -> bytes:
+        ...
+    def restore_from_checkpoint(self, checkpoint: bytes) -> SystemState:
+        ...
+    def get_operation_state(self, op_id: str) -> OperationState:
+        ...
+    def update_operation_state(self, op_id: str, state: OperationState):
+        ...
+```
+
+## Component Initialization Order
+
+```python
+class ComponentInitializer:
+    def __init__(self):
+        # Level 0
+        self.state_manager = StateManager()
+        # Level 1
+        self.lazy_tensor = LazyTensor  # placeholder for engine init
+        self.pattern_registry = PatternRegistry()
+        # Level 2
+        self.semantic_analyzer = SemanticAnalyzer(self.pattern_registry)
+        self.memory_manager = DPDKAllocator()
+        # Level 3
+        self.optimization_engine = OptimizationEngine()
+        self.transfer_manager = TransferManager()
+        # Level 4
+        self.execution_scheduler = None  # provided by runtime
+        self.remote_runtime = None       # remote component
+```
+
+## Error Propagation Chain
+
+```python
+class ErrorContext:
+    def __init__(self):
+        self.error_chain: List[GenieError] = []
+        self.component_trace: List[str] = []
+        self.recovery_attempts: int = 0
+    
+    def add_error(self, error: GenieError, component: str):
+        self.error_chain.append(error)
+        self.component_trace.append(component)
+    
+    def should_propagate(self) -> bool:
+        return self.recovery_attempts >= 3 or any(e.severity == "fatal" for e in self.error_chain)
+```
+
 ## Data Models
+
+### Type Aliases
+
+```python
+# Lightweight aliases/stubs used across interfaces
+TensorID = str
+NodeId = str
+
+@dataclass
+class DeviceLocation:
+    device: str  # e.g., "cpu:0", "cuda:0"
+    addr: int    # pointer/handle when applicable
+
+@dataclass
+class RemoteAccelerator:
+    node_id: str
+    gpu_id: int
+    nic_id: Optional[str] = None
+
+@dataclass
+class RemoteError:
+    code: str
+    message: str
+    retriable: bool = True
+```
 
 ### Computation Graph Representation
 
