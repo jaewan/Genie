@@ -187,6 +187,16 @@ This section defines canonical interfaces and types to ensure harmonious integra
 8. Correctness hooks
      - Optional per-tensor checksum verification on receipt at remote/local boundary when enabled.
      - Determinism gates: fixed seeds are propagated in ExecutionPlan.feature_flags.
+
+9. TransferFuture progress semantics
+    - progress() returns a monotonic [0.0–1.0] fraction of bytes committed to NIC/GPU DMA engines.
+    - add_done_callback(fn) is invoked exactly-once per successful completion; on errors, callback is invoked with TransferError.
+    - Recommended update cadence: emit progress events at ≥50ms or ≥1MB increments (whichever first) to bound overhead.
+
+10. Feature negotiation and propagation
+    - Version/feature negotiation occurs during session setup: client↔runtime exchange supported capabilities.
+    - The agreed feature_flags are bound into ExecutionPlan.feature_flags and logged for replay/debugging.
+    - Executors and transfer/compression paths must branch only on feature_flags, not on ad-hoc probes, to ensure reproducibility.
 - LazyTensor creation: <10μs per operation
 - Metadata accumulation: <1% memory overhead
 - Graph construction: O(n) complexity for n operations

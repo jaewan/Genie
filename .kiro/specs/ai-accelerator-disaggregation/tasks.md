@@ -79,6 +79,12 @@
   - Add matrix for CPU-only vs. CUDA 12.1; DPDK present vs. absent
   - _Requirements: R5.1, R5.5, R5.6_
 
+### 0.5 Test Infrastructure Prereqs
+- [ ] 0.5.1 DPDK test environment bootstrap (hugepages, IOMMU on, permissions)
+- [ ] 0.5.2 Mock RemoteAccelerator service for unit/integration tests
+- [ ] 0.5.3 Deterministic graph generator fixtures
+- [ ] 0.5.4 Telemetry sink for CI (Prometheus pushgateway or file-based)
+
 ### 2. LazyTensor Engine Implementation (R1)
 - [ ] 2.1 Implement PyTorch device and dispatcher integration
   - [ ] 2.1.1 Register custom device ("remote_accelerator") using DispatchKey.PrivateUse1
@@ -234,10 +240,10 @@
   - _Requirements: R5, R6_
 
 - [ ] 7.2 Build LLM-specific optimizations
-  - Implement KV cache co-location strategies (R4.2)
-  - Create adaptive token generation batching
-  - Develop prefill/decode scheduling optimization
-  - Write performance tests for LLM optimization strategies
+  - [ ] 7.2.1 KV cache locality analysis and placement
+  - [ ] 7.2.2 Adaptive token generation batching
+  - [ ] 7.2.3 Prefill/decode scheduling optimization
+  - [ ] 7.2.4 Integration + performance validation
   - _Requirements: R4.2_
 
 - [ ] 7.3 Build CNN-specific optimizations
@@ -256,10 +262,10 @@
 
 ### 8. Execution Planning and Scheduling (R4)
 - [ ] 8.1 Build execution plan generation
-  - Implement optimized plan generation for disaggregated resources (R4.5)
-  - Create resource allocation strategies
-  - Develop operation scheduling with dependency awareness
-  - Write tests for plan generation correctness
+  - [ ] 8.1.1 DAG scheduler core
+  - [ ] 8.1.2 Resource allocation algorithm
+  - [ ] 8.1.3 Dependency resolver
+  - [ ] 8.1.4 Plan serialization/deserialization
   - _Requirements: R4.5_
 
 - [ ] 8.2 Implement communication-computation overlap
@@ -298,6 +304,12 @@
 - [ ] 3.5.2 Distributed tracing (OpenTelemetry)
   - Client↔remote correlation, sampling, viz hooks
   - _Requirements: R5.1, R6_
+
+### 6.5 Integration Checkpoints
+- [ ] 6.5.1 LazyTensor ↔ Semantic Analyzer integration validation
+- [ ] 6.5.2 Transfer Manager ↔ Remote Runtime handshake validation (DMAHandle ingestion)
+- [ ] 6.5.3 Optimizer/Scheduler ↔ Plan executor contract validation
+  - _Requirements: R1, R3, R4, R7_
 
 - [ ] 9.2 Build proactive network integration
   - Implement tensor creation in network-ready memory with automatic DPDK registration
@@ -365,10 +377,10 @@
 
 ### 12. Multi-Accelerator Orchestration
 - [ ] 12.1 Implement multi-accelerator execution
-  - Create distributed execution coordinator
-  - Implement synchronization primitives for remote execution
-  - Develop failure handling and recovery mechanisms
-  - Write tests for multi-accelerator scenarios
+  - [ ] 12.1.1 Distributed coordinator service
+  - [ ] 12.1.2 Synchronization primitives (barriers, collectives)
+  - [ ] 12.1.3 Failure detection and recovery
+  - [ ] 12.1.4 Multi-GPU integration tests
   - _Requirements: R4.5, R7.2_
 
 - [ ] 12.2 Build resource monitoring system
@@ -404,6 +416,18 @@
   - Add cost-performance analysis comparing TCO across different approaches
   - Implement benchmark result validation and reproducibility checks
   - Create benchmark result database for historical comparison and trend analysis
+
+- [ ] 13.5 Automated performance gates
+  - 13.5.1 Establish baselines per scenario
+  - 13.5.2 Significance testing & thresholds
+  - 13.5.3 CI regression alerts for >5% degradation
+  - 13.5.4 Trend tracking dashboards
+
+### 8.6 Checkpoint/Restore
+- [ ] 8.6.1 Versioned plan serialization schema
+- [ ] 8.6.2 In-flight transfer checkpointing
+- [ ] 8.6.3 Restore with migration paths
+- [ ] 8.6.4 Crash recovery tests
   - _Requirements: R5.2_
 
 - [ ] 13.3 Validate workload diversity

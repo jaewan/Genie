@@ -56,6 +56,7 @@ gantt
 - Functional prototype demonstrating core concepts
 - Basic performance benchmarks
  - ⏳ Compatibility validated for GPUDirect on/off and RDMA-core inbox drivers
+ - ⏳ Session negotiation prototype (version + feature flags) with logging for replay
 **Risk Assessment**: 🟡 Medium Risk
 - PyTorch dispatcher integration complexity
 - Performance overhead concerns
@@ -75,6 +76,7 @@ gantt
 - Developer documentation and examples
  - Idempotent execution plan steps and retry policies
  - Control plane with heartbeat(interval_ms) implemented; failure detection <2s
+ - Integration checkpoints: LazyTensor↔Analyzer, TransferManager↔Runtime, Optimizer/Scheduler↔Executor
 **Risk Assessment**: 🟡 Medium Risk
 - DPDK integration complexity
 - Multi-GPU coordination challenges

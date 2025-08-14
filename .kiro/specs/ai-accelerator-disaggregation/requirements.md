@@ -79,6 +79,15 @@ Acceptance criteria:
  11. ThinRuntime MUST implement heartbeat(interval_ms) RPC; client failure detection target <2s (configurable) with backoff and jitter.
  12. DR scope MUST include schema_version and feature_flags snapshot to permit safe restore across versions.
 
+	13. Progress semantics: progress() represents fraction of bytes enqueued to DMA; update cadence SHOULD be ≥50ms or ≥1MB increments to cap overhead.
+
+### R7.1 Session Negotiation and Feature Flags
+
+Acceptance criteria:
+1. During session setup, client and ThinRuntime SHALL negotiate version and capabilities with a stable, versioned schema.
+2. The resulting feature_flags SHALL be embedded in ExecutionPlan.feature_flags and persisted in logs/telemetry for replay.
+3. Executors and data paths SHALL make behavior decisions exclusively via feature_flags for reproducibility; ad-hoc probing is prohibited in production.
+
 ### R4. Semantic-Guided Optimization & Scheduling
 
 User story: As a scheduler designer, I want Genie to use semantics for placement, recomputation vs. transfer, and overlap decisions.
