@@ -1,0 +1,278 @@
+\newcommand{\sys}{Genie\xspace}
+\newcommand{\SemanticFlow}{\textsc{SemanticFlow}}
+\newcommand{\lazytensor}{Lazy Tensor\xspace}
+
+\title{Lost in Translation: The Search for Meaning in Network-Attached AI Accelerator Disaggregation}
+
+\begin{abstract}
+Datacenters often underutilize expensive AI accelerators (GPUs, TPUs, etc).
+A natural solution is disaggregation, where servers borrow network-attached accelerators on demand.
+However, current approaches to disaggregation
+suffer from a \emph{semantic translation gap}: as computation descends the software stack, critical application knowledge---like model structure or execution phases---is lost.
+This forces an undesirable choice between low-level, general-purpose systems that are semantically-blind and inefficient, and high-level, single-workload systems that are efficient but not general.
+
+We argue that disaggregation at the machine learning framework layer 
+can bridge this gap.
+It preserves application semantics while providing the generality to support diverse workloads.
+We introduce \sys, a disaggregation framework for PyTorch built around a \textit{lazy tensor} abstraction that transparently captures an application’s computational intent.
+By deferring execution, \sys automatically builds a semantically-rich compute graph, enabling it to apply workload-specific optimizations and orchestrate a zero-copy data path for remote execution.
+\sys demonstrates a new path toward AI infrastructure that is at once general, semantically-aware, and efficient.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:introduction}
+In 2023, cloud providers invested over \$150 billion in accelerators as a result of ongoing advancements in AI~\cite{datacenter-accelerators-2024}. 
+Yet, 
+these investments have not always been used prudently.
+Telemetry from the hyperscale fleets reveals that on average, GPUs remain idle 55--60\% of the time~\cite{register-gpu-utilization-2024} despite their high cost.
+This severe underutilization is a consequence of today's coarse-grained resource allocation mechanisms and tightly-coupled server-accelerator architectures, both of which strand expensive AI accelerators for applications with fluctuating demands or disproportionate resource requirements.
+
+
+A natural strategy to avoid this wasted capacity is resource disaggregation, 
+which decouples AI accelerators into network-attached, shareable pools~\cite{logos,federated_coherence,lim2012system,gimbal}.
+Applications can then claim dynamically
+  the exact type and count of accelerators, for the duration they need them.
+
+There are some proposals for GPU disaggregation, but these ideas 
+attempt to follow the state of the art in other disaggregation contexts.
+For example, one approach is to hand explicit control over remote resources to the applications themselves~\cite{distserve-2024,prism-2025}.
+These solutions, while efficient, necessitate extensive hand-tuning or are
+  tailored for individual workloads and model architectures.
+The other common approach is to emulate the successes of storage disaggregation and operate at low levels of the stack
+  (PCIe or driver-call replay).
+These schemes are more general and backward compatible, but they are
+blind to semantic information from the application (e.g., phase boundaries, data dependencies, and variances in latency sensitivity), resulting in 
+poor performance.
+For instance, a network appliance that sees only DMA bursts cannot tell a reusable model weight from a one-off activation; 
+a driver shim cannot identify the difference between an LLM's prefill phase (which is compute-bound and should be parallelized as much as possible) and its decode phase (which is memory-bound and should be co-located with a remote KV cache).
+
+In this paper, we argue that machine learning (ML) begs for a different approach---one that leverages ML frameworks as an ideal \emph{narrow waist} for AI accelerator disaggregation.
+ML frameworks are an attractive choice for implementing disaggregation
+  as they simultaneously satisfy two critical requirements.
+First, they offer the generality to support a vast and diverse range of AI models and hardware backends.
+Second, they have visibility into the overall intent and structure of the workload---its \textit{semantics}---including model structure, data dependencies, and execution phases.
+Our thesis is that this semantic information enables a wide range of scheduling decisions and optimizations, making
+AI accelerator disaggregation practical.
+
+As a proof of concept, we propose \sys\footnote{freeing accelerators from the lamp of one server, to unleash their potential.}, 
+a framework-level disaggregation scheme that 
+  bridges the semantic translation gap while preserving generality.
+\sys transparently intercepts framework operations to construct a seman\-tically rich computation graph, capturing an application's intent without requiring code changes. 
+For example, consider a multi-modal query to ViT-based model~\cite{vit} that uses both image and text.
+By inspecting the graph, \sys can identify the two distinct pipelines that input data can take, the sizes and structures of each of their sub-components, as well as the sub-components that are shared between the two pipelines.
+This insight allows it to orchestrate parallel execution on heterogeneous remote accelerators---placing the vision backbone on a memory-bandwidth-optimized GPU 
+and the language model on another---while scheduling the network transfer of their outputs just in time for fusion.
+Runtime metadata and profiling can further inform how the requests should be routed, and how to allocate resources.
+
+Our long-term vision is a cluster-wide, semantics-aware resource manager where developers write stock PyTorch and the infrastructure decides 
+\emph{what}, \emph{where}, and \emph{when} to run.  
+This paper sketches the design of the semantic layer that makes such a system feasible and outlines the research questions it brings---automatic semantic inference, multi-tenant scheduling at scale, and verifiable remote execution.
+
+\section{The Semantic Translation Gap}
+\label{sec:translation}
+
+To disaggregate, we need to pick a layer of 
+  the software stack to break apart the user from the remote
+  accelerator, by redirecting local invocations to remote
+  invocations.
+On one hand, to hide the overheads of disaggregation,
+  we need to pick a
+  layer that preserves application semantics, to enable
+  optimizations that hide latency.
+But, as we move down the stack, we lose application semantics---something
+  we call the \emph{semantic translation gap}---this calls for picking
+  a high layer for disaggregation.
+On the other hand, picking too high a layer makes it hard to find
+  a general approach to disaggregation because invocations at
+  high layers are application specific.
+We give concrete examples of this trade-off below.
+
+\subsection{A Tour of the Disaggregation Landscape}
+\label{sec:motiv:disagg-stack}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.99\linewidth]{Figures/ai-gpu-stack.pdf}
+    \caption{ML Framework provides general support to applications and unifies heterogeneous hardware.
+    }
+    \label{fig:sys-stack}
+\end{figure}
+
+Modern AI software is multilayered (Fig.~\ref{fig:sys-stack}).
+We summarize three candidates for disaggregation points and the semantics they would \emph{lose}.
+
+\heading{PCIe-level disaggregation} 
+(e.g., DxPU~\cite{dxpu-2023}) operates at the hardware interface, forwarding PCIe transactions over the network. This approach offers full application transparency but is semantically blind.
+Without application context, it cannot distinguish a critical-path tensor from an ephemeral one, nor can it differentiate latency-sensitive KV cache access from a bulk weight transfer in an LLM.
+This inability to understand workload intent prevents intelligent scheduling and data management. 
+Furthermore, the PCIe protocol is ill-suited for higher-latency networking;
+for instance, posted writes can quickly exhaust the limited pool of transaction tags, severely throttling throughput.
+
+
+\heading{Driver-level disaggregation} 
+(e.g., rCUDA~\cite{rcuda}, bitfusion~\cite{vmware-bitfusion-eol-2025}, DGSF~\cite{dgsf}, Mosaic~\cite{mosaic}) intercepts GPU driver APIs like CUDA and routes them over the network.
+While this approach avoids the need for specialized hardware for disaggregation,
+it still misses significant context, e.g., every copy looks urgent, and every kernel looks equal.
+Another issue is that driver APIs such as CUDA are rapidly changing, which requires constant re-implementation of the disaggregation layer.
+
+\heading{Application-specific disaggregation}
+At the highest level of the stack, it is possible for programmers to effectively use remote accelerators by leveraging deep, workload-specific knowledge to integrate orchestration and control operations directly into the applications themselves, albeit at the steep price of generality.
+This typically manifests in one of two different approaches.
+
+The first is through bespoke systems like DistServe~\cite{distserve-2024} and Prism~\cite{prism-2025}. These systems are architecturally tailored for a specific workload class, such as LLM inference or recommendation models.
+Prism, for instance, leverages DLRM semantics to co-design data layout and execution for that model only.
+Their deep semantic integration yields high efficiency but cannot be repurposed for other model types.
+
+\begin{table*}[t]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabularx}{\linewidth}{@{} X l l l @{}}
+\toprule
+\textbf{Workload} & \textbf{Computation Pattern} & \textbf{Memory Access} & \textbf{Key Optimization} \\
+\midrule
+LLM Serving     & Sequential, phased (prefill/decode) & Streaming KV cache       & Phase-aware allocation \\
+Computer Vision & Layer-parallel, regular             & Predictable feature maps & Pipeline parallelism \\
+Recommendation  & Sparse + dense mix                  & Hot/cold embeddings      & Intelligent data tiering \\
+Multi-modal     & Cross-modal fusion                  & Heterogeneous patterns   & Modality-aware placement \\
+\bottomrule
+\end{tabularx}
+\caption{Semantic characteristics of representative AI workloads reveal diverse optimization opportunities inaccessible to semantically-blind systems.}
+\label{tab:workload-characteristics}
+\end{table*}
+
+The second form relies on manual developer optimization using toolkits like PyTorch RPC~\cite{pytorchRPC}.
+Although the library is part of the PyTorch framework, effectively using it requires application-specific engineering.
+Developers must manually refactor code, decide which functions to execute remotely, manage state, and reason about data locality for their particular application.
+As every application is different, this process can be time-consuming and difficult to get right.
+
+\subsection{Consequences of the Translation Gap}
+\label{sec:motiv:semantics-gap}
+
+Existing general-purpose disaggregation systems operate at too low level,
+  losing application semantics and optimization opportunities.
+For example, consider an LLM.
+Code structure and/or profiling results reveal distinct phases with distinct properties, e.g., prefill (compute-bound; parallelizable) and decode (memory-bound; sequential; dependencies on KV cache).
+A naive, semantically-blind approach might treat each GPU operation as independent and identical, for example, by spreading each request across available GPU resources with a round-robin or least-loaded policy.
+The result would be excessive data transfers due to repeated moves of large KV caches.
+One could do slightly better by considering the data movement costs of each placement and scheduling decision, i.e., treating operations as independent but not necessarily identical.
+This might save data transfer costs by ensuring that all subsequent calls are scheduled on the same GPUs;
+however, it would still entirely miss the potential benefits of PD disaggregation~\cite{patel2023splitwise}.
+In the end, many potential optimizations are only possible with a broad and deep understanding of the general application structure.
+
+The above limitations will only become more salient as modern AI clusters increasingly serve diverse workloads with fundamentally different characteristics.
+At a low level, these workloads can vary in the models they use, the size of the requested models, their modalities, their SLO expectations (on-demand vs batch), and their reasoning requirements.
+More broadly, AI has found its way into a wide range of applications, a small selection of which are illustrated in Table~\ref{tab:workload-characteristics}.
+LLMs exhibit sequential dependencies and phase-based computation, computer vision models have regular data flow with layer-wise parallelism, and recommendation systems combine sparse embedding lookups with dense neural computation. 
+Generic disaggregation policies cannot optimize for this diversity without a semantic understanding of each workload's unique characteristics.
+
+\heading{The framework layer as the narrow waist.}
+These challenges and missed opportunities across the stack point to a single conclusion: the ideal layer for disaggregation must be both semantically rich and sufficiently general.
+The \emph{machine-learning framework} is the only layer that satisfies both criteria.
+In fact, its richness is already captured in part by compute graph representations such as PyTorch's FX~\cite{torchfx}, and its generality already lends itself to extension to remote accelerators as custom backends.
+The framework layer has the additional benefit that the ecosystem has largely coalesced behind a single primary framework, PyTorch, which now accounts for over 70\% of recent AI research and has become a key priority for hardware vendors to support.
+
+\section{The \sys Platform}
+\label{sec:framework}
+
+We introduce \sys, a GPU disaggregation scheme that operates at the level of the ML framework (PyTorch) to exploit its narrow waist and provide efficient accelerator disaggregation.
+\sys transparently captures an application's intent to orchestrate efficient execution across disaggregated accelerators.
+To illustrate its design, we use a Visual Question Answering (VQA) model as a running example. Such a model must reason over an image (e.g., with a ViT) and a text query (e.g., with BERT) before fusing the results to produce an answer, typifying the complexity of modern workloads that semantically-blind systems cannot optimize.
+
+\sys's architecture is founded on two core principles: (1) deferred execution via \emph{lazy tensors} to construct a semantically-rich computation graph, and (2) a user-space, zero-copy data path to execute the resulting optimized plan with minimal overhead.
+
+\subsection{Capturing Intent with the \lazytensor}
+\label{ssec:lazy_tensor}
+
+The core abstraction in \sys is the \emph{\lazytensor}.
+When an application targets our custom \texttt{remote\_accelerator} device, PyTorch's dispatcher redirects operations to our backend.
+Instead of executing immediately, the backend returns a \lazytensor---a symbolic proxy encapsulating the pending computation and its associated semantic metadata. 
+This deferred execution model transforms a stream of isolated operations into a rich computation graph, enabling global, context-aware optimization before a single byte is sent to a remote accelerator.
+
+For example, a standard tensor representation might only store `\texttt{{op: 'matmul', inputs: [t1, t2]}}'.
+In contrast, our \lazytensor for the VQA model captures far richer context:
+
+{\small\begin{verbatim}
+{op: 'matmul',
+ inputs: [lazy_t_vision, lazy_t_text],
+ metadata: {
+    semantic_role: 'cross_attention_projection',
+    model_module: 'VQA.fusion_block.attention',
+    execution_phase: 'multi_modal_fusion',
+    data_lineage: {
+        source_vision: 'ViT.encoder.layer_11.output',
+        source_text: 'BERT.encoder.layer_5.output'
+    }}}
+\end{verbatim}
+}
+
+\noindent
+This rich context is gathered through the following three-tiered mechanism.
+
+\heading{The \lazytensor graph.} 
+At a high level, the \lazytensor{}s describe a computation graph in which each \emph{node} represents an operator invocation that materializes a tensor, 
+and each \emph{edge} captures an explicit data dependency (a tensor consumed by a subsequent operator). 
+Three capture tiers progressively refine this graph: 
+(1) the dispatcher enumerates all fine-grained nodes and edges; 
+(2) the FX pass groups related nodes into higher-level modules, revealing structural boundaries; and 
+(3) hooks annotate nodes and edges with execution-phase and modality metadata (e.g.,~prefill vs.~decode, vision vs.~text), unlocking parallelism-aware scheduling decisions.
+
+    \subheading{(1) Dispatcher-level interception.} We hook into 
+    PyTorch's \emph{unified dispatcher}---the central indirection layer that routes every tensor operator call (e.g.,\ \texttt{aten::matmul}) to the correct backend implementation (CUDA, CPU, XLA, etc). 
+    Intercepting at this layer yields an exact, fine-grained stream of dynamic operations, including control-flow-dependent paths and runtime tensor shapes, before any kernel is launched.
+
+    \subheading{(2) Static analysis (FX).} Before execution, \sys uses PyTorch FX to symbolically trace the model's architecture. This static pass provides an architectural blueprint, identifying the high-level `nn.Module` components. For our VQA model, FX analysis reveals the distinct `ViT`, `BERT`, and `Fusion` modules, allowing \sys to partition the graph along these semantic boundaries from the outset.
+
+    \subheading{(3) Hook-based semantic enhancement.} Low-level operations often obscure high-level intent. To recover this lost context, \sys injects lightweight hooks at `nn.Module` boundaries. For our VQA model, a hook on the attention module can distinguish self-attention (where query and key tensors originate from the same modality) from the crucial cross-attention in the fusion block (where the inputs originate from the vision and language backbones, respectively). These hooks transform a raw graph of operations into a high-level narrative of the model's behavior.
+
+\subsection{Semantics-Driven Optimizations}
+\label{ssec:optimization}
+Building on the \lazytensor{} graph, the \sys{} runtime can apply a range of concrete, semantics-driven optimizations to minimize remote-execution overhead for a given workload. The optimizations are automatically selected by a cost model, not hard-coded. Key examples include:
+
+\begin{itemize}[left=0pt]
+    \item \textbf{LLM decode co-location.} By identifying the sequential, KV-cache-dependent nature of the decode phase from the graph, \sys{} ensures the cache and the decoder layers are pinned to the same remote GPU. This eliminates repeated, costly transfers of the entire cache state.
+    \item \textbf{Pipelined CNN inference.} For vision workloads, the graph reveals consecutive convolutional stages. \sys{} can automatically fuse these stages and schedule them as a pipeline across multiple accelerators, effectively overlapping communication and computation.
+    \item \textbf{Dynamic recomputation.} By analyzing the graph and querying network conditions, \sys{} can make intelligent trade-offs. When network contention is high, it can opt to recompute an inexpensive intermediate tensor on the remote device instead of waiting to fetch it across the congested wire.
+\end{itemize}
+
+These examples illustrate how a single runtime can derive and apply workload-specific speed-ups once rich semantics are available.
+
+\subsection{Runtime and the Zero-Copy Data Path}
+\label{ssec:zerocopy}
+
+Supporting the \lazytensor{}s is a robust runtime architecture that makes remote accelerator usage efficient. A critical source of overhead in accelerator disaggregation is redundant data movement. 
+PyTorch's existing \texttt{pin\_memory()} optimization partially addresses this issue (within a single server) by explicitly allocating pinned memory buffers.
+However, it is fundamentally reactive: developers must explicitly invoke \texttt{pin\_memory()} after tensor creation, incurring the overhead of copying data from the original pageable buffer into the newly allocated pinned buffer.
+
+
+In contrast, \sys proactively integrates tensor allocation with a user-space networking stack (DPDK) from the outset. 
+Specifically, when an application creates a tensor, \sys intercepts this operation and directly allocates the tensor in pinned, network-ready host memory managed by DPDK. 
+This proactive approach completely eliminates the initial copy overhead associated with reactive pinning.
+
+To achieve a true zero-copy data path between GPUs and NICs, \sys leverages DPDK's \texttt{gpudev} abstraction, which provides a vendor-agnostic interface for GPU memory management and data transfers.
+Under the hood, \texttt{gpudev} integrates vendor-specific technologies such as NVIDIA GPUDirect RDMA, enabling NICs to directly DMA data into GPU memory without intermediate CPU involvement.
+Importantly, this capability relies on vendor-supported GPU-NIC integration mechanisms and appropriate OS-level configurations (e.g., IOMMU settings, PCIe ACS configurations).
+
+By proactively allocating tensors into network-ready buff\-ers at the framework level, we eliminate redundant data copies and significantly reduce CPU overhead, unlocking efficient disaggregation on commodity hardware.
+This proactive integration of semantic-driven memory management with existing GPU-NIC zero-copy mechanisms is uniquely enabled by our framework-level approach. 
+It provides a critical performance advantage over traditional reactive pinning strategies, significantly reducing the overhead of remote execution and making general-purpose accelerator disaggregation practical on commodity hardware.
+
+
+\subsection{Future Vision: Semantics-Aware Global Scheduling}
+\label{ssec:global_scheduling}
+
+The semantic-rich computation graph constructed by \sys is not merely a local optimization tool---it is the foundational building block for a broader vision of autonomous, semantics-aware resource management at datacenter scale. In this vision, \sys instances act as clients to a global scheduler, providing it with semantic graphs as a rich, first-class description of workload requirements.
+
+Armed with this fleet-wide semantic context, the global scheduler can make resource allocation decisions that are impossible for systems that are blind to application intent. It can determine \textit{where}, \textit{when}, and \textit{how} each operation should execute across thousands of tenants:
+
+\begin{itemize}[left=0pt]
+    \item \textbf{Where (Heterogeneous Placement):} The scheduler mo\-ves beyond simple co-location to perform true heterogeneous placement. It can analyze the semantic graphs to identify workload classes, placing all vision-transformer jobs on memory-bandwidth-optimized GPUs while scheduling recommendation models on accelerators with different characteristics, globally optimizing for hardware affinity.
+    
+    \item \textbf{When (Elastic Scaling):} Leveraging semantic phase annotations (e.g., prefill vs. decode) from the graph, the scheduler can dynamically provision and release resources as a workload's needs evolve in real-time. It can scale out accelerators for a burst of parallelizable prefill tasks and scale them back during the sequential decode phase.
+    
+    \item \textbf{How (Cross-Workload Orchestration):} The scheduler can use semantic metadata to orchestrate execution \textit{across} tenants. For example, it could identify two separate user requests that use the same public LLM and automatically batch their decode steps together to improve throughput, or prioritize interactive, latency-sensitive VQA queries over long-running batch training jobs.
+\end{itemize}
+
+This interactive, semantics-driven negotiation between \sys and the global scheduler enables unprecedented elasticity and efficiency. 
+Unlike static, compiler-based approaches, this dynamic co-adaptation continuously optimizes resource allocation and execution strategies in response to evolving workloads, network conditions, and resource availability. 
+Our current implementation of \sys lays the critical groundwork for this ambitious vision, demonstrating the feasibility and performance potential of semantic-driven disaggregation at scale.
