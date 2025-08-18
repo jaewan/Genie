@@ -14,8 +14,10 @@ This forces an undesirable choice between low-level, general-purpose systems tha
 We argue that disaggregation at the machine learning framework layer 
 can bridge this gap.
 It preserves application semantics while providing the generality to support diverse workloads.
-We introduce \sys, a disaggregation framework for PyTorch built around a \textit{lazy tensor} abstraction that transparently captures an application’s computational intent.
-By deferring execution, \sys automatically builds a semantically-rich compute graph, enabling it to apply workload-specific optimizations and orchestrate a zero-copy data path for remote execution.
+We introduce \sys, a disaggregation framework for PyTorch built around a \textit{lazy tensor} abstraction that transparently captures an application’s computational intent
+By deferring execution, \sys automatically builds a semantically-rich compute graph. 
+This graph serves as the standardized interface in a decoupled architecture that separates framework-specific intent capture from infrastructure-specific execution. 
+This enables \sys to apply workload-specific optimizations and orchestrate a zero-copy data path for remote execution.
 \sys demonstrates a new path toward AI infrastructure that is at once general, semantically-aware, and efficient.
 \end{abstract}
 
@@ -53,6 +55,7 @@ First, they offer the generality to support a vast and diverse range of AI model
 Second, they have visibility into the overall intent and structure of the workload---its \textit{semantics}---including model structure, data dependencies, and execution phases.
 Our thesis is that this semantic information enables a wide range of scheduling decisions and optimizations, making
 AI accelerator disaggregation practical.
+To realize this, \sys introduces a pluggable architecture centered on this semantic graph, cleanly separating the 'what' (application intent) from the 'how' and 'where' (execution logistics). 
 
 As a proof of concept, we propose \sys\footnote{freeing accelerators from the lamp of one server, to unleash their potential.}, 
 a framework-level disaggregation scheme that 
@@ -176,17 +179,27 @@ The framework layer has the additional benefit that the ecosystem has largely co
 \label{sec:framework}
 
 We introduce \sys, a GPU disaggregation scheme that operates at the level of the ML framework (PyTorch) to exploit its narrow waist and provide efficient accelerator disaggregation.
+Genie's key innovation is its decoupled, pluggable architecture, designed around a standardized interface we call the Semantically-Rich Graph (SRG). 
+This architecture is composed of three distinct components: 
+(1) Frontends, which translate framework-specific operations into the SRG; 
+(2) a Core Scheduler, which optimizes the SRG based on its semantic annotations; and 
+(3) Backends, which execute the optimized graph on specific remote infrastructure.
+
+This separation of concerns is the practical embodiment of the "narrow waist" principle, allowing Genie to be both general and semantically aware. For our proof-of-concept, we implement a PyTorch frontend and a high-performance RDMA backend.
+
+(Here you would add a figure showing the architecture: [PyTorch] -> Frontend -> SRG -> Scheduler -> Annotated SRG -> Backend -> [Remote GPU])
+
 \sys transparently captures an application's intent to orchestrate efficient execution across disaggregated accelerators.
 To illustrate its design, we use a Visual Question Answering (VQA) model as a running example. Such a model must reason over an image (e.g., with a ViT) and a text query (e.g., with BERT) before fusing the results to produce an answer, typifying the complexity of modern workloads that semantically-blind systems cannot optimize.
 
 \sys's architecture is founded on two core principles: (1) deferred execution via \emph{lazy tensors} to construct a semantically-rich computation graph, and (2) a user-space, zero-copy data path to execute the resulting optimized plan with minimal overhead.
 
-\subsection{Capturing Intent with the \lazytensor}
+\subsection{The Pytorch Frontend: Capturing Intent with the \lazytensor}
 \label{ssec:lazy_tensor}
 
-The core abstraction in \sys is the \emph{\lazytensor}.
-When an application targets our custom \texttt{remote\_accelerator} device, PyTorch's dispatcher redirects operations to our backend.
-Instead of executing immediately, the backend returns a \lazytensor---a symbolic proxy encapsulating the pending computation and its associated semantic metadata. 
+The core responsibility of a Genie frontend is to capture application intent. Our PyTorch frontend achieves this through the \lazytensor. When an application targets our custom remote_accelerator device, PyTorch's dispatcher redirects operations to our backend. 
+Instead of executing immediately, the backend returns a \lazytensor—a symbolic proxy that builds a node in our SRG
+,encapsulating the pending computation and its associated semantic metadata. 
 This deferred execution model transforms a stream of isolated operations into a rich computation graph, enabling global, context-aware optimization before a single byte is sent to a remote accelerator.
 
 For example, a standard tensor representation might only store `\texttt{{op: 'matmul', inputs: [t1, t2]}}'.
@@ -209,7 +222,7 @@ In contrast, our \lazytensor for the VQA model captures far richer context:
 \noindent
 This rich context is gathered through the following three-tiered mechanism.
 
-\heading{The \lazytensor graph.} 
+\heading{The SRG} 
 At a high level, the \lazytensor{}s describe a computation graph in which each \emph{node} represents an operator invocation that materializes a tensor, 
 and each \emph{edge} captures an explicit data dependency (a tensor consumed by a subsequent operator). 
 Three capture tiers progressively refine this graph: 
@@ -225,9 +238,10 @@ Three capture tiers progressively refine this graph:
 
     \subheading{(3) Hook-based semantic enhancement.} Low-level operations often obscure high-level intent. To recover this lost context, \sys injects lightweight hooks at `nn.Module` boundaries. For our VQA model, a hook on the attention module can distinguish self-attention (where query and key tensors originate from the same modality) from the crucial cross-attention in the fusion block (where the inputs originate from the vision and language backbones, respectively). These hooks transform a raw graph of operations into a high-level narrative of the model's behavior.
 
-\subsection{Semantics-Driven Optimizations}
+\subsection{The Core Scheduler: Applying Semantics-Driven Optimizations}
 \label{ssec:optimization}
-Building on the \lazytensor{} graph, the \sys{} runtime can apply a range of concrete, semantics-driven optimizations to minimize remote-execution overhead for a given workload. The optimizations are automatically selected by a cost model, not hard-coded. Key examples include:
+Building on the SRG, the \sys{} runtime can apply a range of concrete, semantics-driven optimizations to minimize remote-execution overhead for a given workload. 
+The optimizations are automatically selected by a cost model, not hard-coded. Key examples include:
 
 \begin{itemize}[left=0pt]
     \item \textbf{LLM decode co-location.} By identifying the sequential, KV-cache-dependent nature of the decode phase from the graph, \sys{} ensures the cache and the decoder layers are pinned to the same remote GPU. This eliminates repeated, costly transfers of the entire cache state.
@@ -236,9 +250,11 @@ Building on the \lazytensor{} graph, the \sys{} runtime can apply a range of con
 \end{itemize}
 
 These examples illustrate how a single runtime can derive and apply workload-specific speed-ups once rich semantics are available.
+The output of the scheduler is an annotated SRG, where each subgraph has been assigned to a target remote resource. This annotated graph is then passed to an execution backend.
 
-\subsection{Runtime and the Zero-Copy Data Path}
+\subsection{Execution Backends: The Zero-Copy Data Path}
 \label{ssec:zerocopy}
+Genie's backends are responsible for executing an annotated SRG on a specific target infrastructure. For our initial prototype, we developed a high-performance backend that utilizes a user-space networking stack (DPDK) to achieve a true zero-copy data path to remote GPUs.
 
 Supporting the \lazytensor{}s is a robust runtime architecture that makes remote accelerator usage efficient. A critical source of overhead in accelerator disaggregation is redundant data movement. 
 PyTorch's existing \texttt{pin\_memory()} optimization partially addresses this issue (within a single server) by explicitly allocating pinned memory buffers.
