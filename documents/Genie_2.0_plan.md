@@ -84,10 +84,42 @@ Genie 2.0 refactors the monolithic research prototype into a production-ready, m
   * **Implicit Scheduling:** The direct, internal calls between graph building and execution in 1.0 are replaced by the explicit production and consumption of the `ExecutionPlan`. The scheduler no longer directly drives execution; it produces a plan that a backend can consume.
 
 In essence, the transition moves Genie from a system where all components are aware of each other to one where they only need to understand a single, common language: the `ExecutionPlan`.
+-----
+
+## 4\. Targeted Improvements
+
+
+###  Addressing the "Oracle" and "Monolithic" Problems
+
+The Genie 2.0 architecture solves these two issues with distinct, targeted design changes:
+
+1.  **From Oracle to Co-Pilot:** The problem of the "oracle" scheduler, which was expected to magically know the optimal execution plan, is solved by making the scheduler interactive and data-driven.
+    * **Profile-Guided Optimization (PGO) Engine:** This new component in the **Core Scheduler** moves away from relying solely on static heuristics. It grounds scheduling decisions in **empirical performance data** gathered by actually running parts of the model on the target hardware.
+    * **Tunable Policies:** The architecture explicitly includes an interface for developers to provide hints or override the scheduler's decisions. This gives the user an "escape hatch," transforming the scheduler from an opaque, brittle authority into a powerful assistant that the developer ultimately controls.
+
+2.  **From Monolithic Framework to Decoupled Architecture:** The problem of the monolithic, tightly-coupled system is solved by refactoring the entire architecture around a central, standardized artifact: the **`ExecutionPlan`**.
+    * Genie 1.0 is a single, integrated system. Genie 2.0 is broken into three independent component types: **Frontends**, the **Core Scheduler**, and **Backends**.
+    * This modularity means the `genie-pytorch` frontend can evolve independently of the `Zero-Copy RDMA` backend. This design is crucial for encouraging community contributions, as a developer can build a new backend without needing to understand the complexities of the PyTorch frontend, and vice-versa.
+
+---
+
+### How the Standardized Graph Mitigates Brittleness
+
+The standardized `ExecutionPlan` (or Semantically-Rich Graph, SRG) is the key to mitigating the brittleness of the semantic analysis layer (FX static analysis, lazy tensor capture, hooks). It achieves this by introducing a crucial layer of **abstraction and validation**.
+
+Think of the `ExecutionPlan` as being analogous to a compiler's Intermediate Representation (IR) like LLVM IR. The process works like this:
+
+1.  **Encapsulation of Brittle Logic:** All the potentially brittle capture logic is now confined to the **Frontend**. The `genie-pytorch` frontend is solely responsible for translating the dynamic world of PyTorch—with all its FX graph quirks and changing APIs—into the stable, well-defined `ExecutionPlan` format. If a new PyTorch version breaks the FX tracing, only the frontend needs to be updated. The Core Scheduler and all the Backends remain completely unaffected because they only consume the standardized plan. This contains the "blast radius" of any single point of failure.
+
+2.  **Introduction of a Validation Layer:** Because the `ExecutionPlan` is a formal, standardized artifact, it can be validated. After a frontend produces a plan, it can be passed through a validation step to check for correctness (e.g., graph is a valid DAG, tensor shapes are consistent, metadata is well-formed) *before* it is sent to the complex scheduler or expensive hardware. This catches errors early, preventing a faulty graph from causing difficult-to-debug failures during remote execution.
+
+3.  **Simplifies the Capture Goal:** The goal of the semantic capture layer is no longer to produce a perfect, directly executable plan. Its goal is now simpler: to produce a **correct and valid `ExecutionPlan`**. The much more complex task of *optimizing* and *executing* that plan is handled by different components (the Core Scheduler and Backends), which can now rely on receiving a well-structured, predictable input.
+
+In short, the standardized graph decouples the **"messy act of semantic capture"** from the **"structured act of scheduling and execution."** This separation makes the system more robust, easier to debug, and far more extensible than the original monolithic design.
 
 -----
 
-## 4\. Phased Transition and Open-Source Plan
+## 5\. Phased Transition and Open-Source Plan
 
 The transition will occur in four distinct phases.
 
@@ -119,6 +151,6 @@ The transition will occur in four distinct phases.
 
 -----
 
-## 5\. Conclusion
+## 6\. Conclusion
 
 Genie 1.0 is poised to make a significant academic impact by demonstrating what is possible. The Genie 2.0 plan provides a clear and strategic path to translate that possibility into a practical, powerful, and community-driven reality. By prioritizing developer experience, modularity, and verifiability, we can build a system that not only optimizes resource utilization but also empowers the next generation of AI development.
