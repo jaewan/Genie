@@ -4,7 +4,7 @@
 **Genie** is a semantic-driven framework-level disaggregation system for AI accelerators that bridges the "semantic translation gap" by operating at the PyTorch framework level - the ML ecosystem's "narrow waist."
 
 ## Core Innovation
-Unlike existing disaggregation approaches that operate at low levels (PCIe/driver) and lose semantic context, or high levels (application-specific) and lose generality, Genie captures rich semantic information at the framework level while maintaining generality across diverse AI workloads.
+Unlike low-level approaches (driver/PCIe) that lose semantic context or high-level, application-specific approaches that lose generality, Genie captures rich semantic information at the framework level while maintaining generality across diverse AI workloads.
 
 ## Key Technical Concepts
 
@@ -14,24 +14,31 @@ Unlike existing disaggregation approaches that operate at low levels (PCIe/drive
 
 ### 2. Lazy Tensor Abstraction
 - Intercepts PyTorch operations on `remote_accelerator` device
-- Defers execution while building semantically-rich computation graph
+- Primary capture via PyTorch `__torch_function__` protocol (>95% op coverage); factory interception for creation ops
+- Defers execution while building a semantically-rich computation graph
 - Captures operation type, tensor properties, module context, and execution phase
 
 ### 3. Pluggable Architecture
 ```
-Frontend (PyTorch) → SRG (Semantic Graph) → Scheduler → Backend (RDMA)
+Frontend (PyTorch) → SRG (Semantic Graph) → Scheduler → Backend (Transport/Runtime)
 ```
 - **Frontend**: Captures intent via LazyTensor
-- **Scheduler**: Applies semantic optimizations
-- **Backend**: Executes on remote GPUs with zero-copy
+- **Scheduler**: Applies semantic optimizations, emits execution plans
+- **Backend**: Executes plans locally or remotely; evolves to zero-copy transport
 
-### 4. Zero-Copy Data Path
-- Proactive DPDK integration (allocate tensors in network-ready memory)
-- GPU-NIC direct DMA (GPUDirect RDMA)
-- Eliminates CPU involvement in data transfers
+### 4. Execution Modes (Phased)
+- `local` (Phase 1): Materialize on CPU via eager PyTorch fallback; force device to CPU during execution
+- `local_remote` (Phase 2): In-process/subprocess C++ runtime using LibTorch; control-plane loopback; shared/pinned memory
+- `remote` (Phase 3): Remote runtime over TCP pinned memory; same protocol artifacts
+- `remote_zero_copy` (Phase 4): DPDK mempools + gpudev, GPUDirect RDMA; overlap comm/compute, batching
 
-### 5. CPU-Minimal Remote Nodes
-- 2 CPU cores, 8GB RAM per node with 4-8 GPUs
+### 5. Zero-Copy Data Path
+- Proactive DPDK integration (hugepages, mempools)
+- GPU-NIC direct DMA (GPUDirect RDMA) when available
+- Pinned-memory/TCP fallback path remains available
+
+### 6. CPU-Minimal Remote Nodes
+- 2 CPU cores, 8GB RAM per node with 4–8 GPUs
 - Thin runtime executes plans without full framework
 - 8:1 GPU-to-CPU ratio (vs traditional 1:1)
 
@@ -43,18 +50,16 @@ Frontend (PyTorch) → SRG (Semantic Graph) → Scheduler → Backend (RDMA)
 model = VQAModel().to("remote_accelerator")
 answer = model(image, text_query)
 
-# What Genie sees:
-# 1. Vision encoder operations (ViT)
-# 2. Language encoder operations (BERT)  
+# Genie observes:
+# 1. Vision encoder ops (ViT)
+# 2. Language encoder ops (BERT)
 # 3. Cross-attention fusion
-# → Schedules vision on memory-optimized GPU
-# → Schedules language on compute-optimized GPU
-# → Transfers outputs just-in-time for fusion
+# → Places stages, overlaps transfers (Phase 3+), co-locates fused regions
 ```
 
 ### LLM Serving
 - Identifies prefill (compute-bound) vs decode (memory-bound) phases
-- Co-locates decode with KV cache to eliminate transfers
+- Co-locates decode with KV cache to eliminate transfers (Phase 3+)
 - Adaptive batching based on phase
 
 ### Vision Models
@@ -65,7 +70,7 @@ answer = model(image, text_query)
 ## Performance Targets
 - **30% reduction** in network traffic (via semantic optimization)
 - **15% reduction** in end-to-end latency
-- **>90%** network bandwidth utilization
+- **>90%** network bandwidth utilization (Phase 4)
 - **<5%** total system overhead
 
 ## Development Principles
@@ -74,27 +79,28 @@ answer = model(image, text_query)
 3. **Efficiency**: Minimize CPU usage at remote nodes
 4. **Extensibility**: Plugin system for new patterns
 5. **Correctness**: Numerical parity within 1e-5
+6. **Pragmatism**: Phased execution from local to zero-copy remote
 
 ## Critical Success Factors
-1. **Semantic Capture**: Rich metadata without performance impact
+1. **Semantic Capture**: Rich metadata without performance impact (overhead <10µs/op)
 2. **Pattern Recognition**: >85% accuracy in workload classification
-3. **Zero-Copy Path**: True end-to-end DMA transfers
-4. **Graceful Degradation**: Fallback when patterns unknown
+3. **Zero-Copy Path**: End-to-end DMA transfers (Phase 4)
+4. **Graceful Degradation**: Fallback when patterns unknown or transport unavailable
 5. **Production Stability**: >99% uptime, automatic recovery
 
 ## Technology Stack
 - **Python**: 3.10.x (stable PyTorch support)
-- **PyTorch**: 2.1.2 (LTS with stable dispatcher API)
+- **PyTorch**: 2.1.2 (stable dispatcher and `__torch_function__`)
 - **CUDA**: 12.1 (H100 support)
-- **DPDK**: 23.11 LTS (stable gpudev)
+- **DPDK**: 23.11 LTS (gpudev)
 - **Network**: RDMA/RoCE (200Gbps+)
 
 ## Architecture Layers
-1. **PyTorch Integration**: Device registration, dispatcher hooks
-2. **LazyTensor Engine**: Graph construction, metadata accumulation
-3. **Semantic Analyzer**: Pattern recognition, workload classification
+1. **PyTorch Integration**: Device registration, `__torch_function__`, factory hooks
+2. **LazyTensor Engine**: Graph construction, metadata accumulation, materialization triggers
+3. **Semantic Analyzer**: Pattern recognition, workload classification, plan generation
 4. **Optimization Engine**: Placement decisions, scheduling
-5. **Zero-Copy Runtime**: DPDK memory, DMA transfers
+5. **Runtime & Transport**: Compatibility mode (TCP/pinned) → Zero-copy (DPDK/RDMA)
 6. **Remote Execution**: Thin runtime, GPU orchestration
 
 This context document provides the essential understanding needed for implementing any component of Genie. Refer to component-specific documents for detailed interfaces and implementation guidance.

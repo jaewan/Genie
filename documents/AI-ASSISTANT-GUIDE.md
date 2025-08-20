@@ -7,7 +7,7 @@ This guide explains how to leverage the Genie documentation for efficient AI-ass
 ## Document Structure Overview
 
 ```
-📁 .kiro/specs/
+📁 documents/
 ├── 📄 genie-context.md              # Start here - overall project understanding
 ├── 📄 interface-contracts.md        # Component boundaries and data flow
 ├── 📁 components/
@@ -23,7 +23,7 @@ This guide explains how to leverage the Genie documentation for efficient AI-ass
 ### Step 1: Initial Context (Always Include)
 **Always provide `genie-context.md` first** to give the AI assistant the big picture:
 ```
-"I'm working on the Genie project. Here's the context: [paste genie-context.md]"
+rm P     [paste genie-context.md]"
 ```
 
 ### Step 2: Component-Specific Work

@@ -54,8 +54,8 @@ class WorkloadProfile:
     confidence: float  # 0.0 to 1.0
     
     # Semantic metadata
-    phases: Dict[str, List[NodeId]]  # e.g., {'prefill': [...], 'decode': [...]}
-    modalities: Dict[str, Subgraph]  # e.g., {'vision': ..., 'text': ...}
+    phases: Dict[str, List[NodeId]]  # e.g., {'prefill': [...], 'decode': [...]} (optional Phase 2+)
+    modalities: Dict[str, Subgraph]
     dependencies: List[DataDependency]
     
     # Resource hints
@@ -90,8 +90,8 @@ class ExecutionPlan:
     """Optimized execution plan (single unified term)"""
     plan_id: str  # UUIDv4
     feature_flags: Dict[str, bool]  # Negotiated capabilities
-    operations: List[ScheduledOperation]
-    resource_allocation: ResourceAllocation
+    fragments: List[PlanFragment]   # Executable subgraphs
+    placement: Dict[str, DevicePlacement]  # fragment_id -> device/node
     communication_plan: CommunicationPlan
     
     # Execution metadata
@@ -101,26 +101,29 @@ class ExecutionPlan:
     
     def validate_dependencies(self) -> bool:
         # Ensure no cycles and all dependencies satisfied
-        return validate_dag(self.operations)
+        return validate_dag(self.fragments)
+
+@dataclass
+class PlanFragment:
+    fragment_id: str
+    subgraph: ComputationGraph
+    inputs: List[TensorHandle]
+    outputs: List[TensorHandle]
 ```
 
-### ScheduledOperation Format
+### ScheduledOperation (Optional, if not using fragments)
 ```python
 @dataclass
 class ScheduledOperation:
-    op_id: str  # UUIDv4, must match plan operation
+    op_id: str
     op_type: str  # aten operation or composite
     inputs: List[TensorID]
     outputs: List[TensorID]
     device: RemoteAccelerator
-    
-    # Scheduling metadata
-    scheduled_time: float  # Relative time in ms
-    dependencies: List[str]  # op_ids that must complete first
-    estimated_duration: float  # ms
-    priority: int  # 0-9, higher = more important
-    
-    # Semantic metadata preserved
+    scheduled_time: float
+    dependencies: List[str]
+    estimated_duration: float
+    priority: int
     metadata: SemanticMetadata
 ```
 
@@ -130,35 +133,16 @@ class ScheduledOperation:
 ```python
 @dataclass
 class RemoteExecutionRequest:
-    """Request to execute operation on remote accelerator"""
-    request_id: str  # UUIDv4
-    plan_id: str  # References ExecutionPlan
-    op_id: str  # Must equal ScheduledOperation.op_id
-    
-    # Operation details
-    operation: str  # Serialized operation or IR
-    input_tensors: List[TensorDescriptor]
-    output_specs: List[TensorSpec]
+    """Request to execute fragment on remote accelerator"""
+    request_id: str
+    plan_id: str
+    fragment_id: str
+    fragment: PlanFragment
     
     # Execution hints
     execution_hints: Dict[str, Any]
     timeout_ms: float
     checkpoint: Optional[bytes] = None
-
-@dataclass
-class TensorDescriptor:
-    """Descriptor for tensor location and access"""
-    tensor_id: TensorID
-    location: TensorLocation
-    dma_handle: Optional[DMAHandle]
-    
-@dataclass
-class TensorLocation:
-    device: str  # e.g., "cuda:0", "cpu"
-    memory_address: int
-    size_bytes: int
-    is_ready: bool
-    transfer_handle: Optional[str]
 ```
 
 ### DMA Handle Contract
@@ -166,10 +150,10 @@ class TensorLocation:
 @dataclass
 class DMAHandle:
     """Handle for direct memory access"""
-    iova: int  # IO virtual address
-    lkey: int  # Local key for RDMA
-    rkey: Optional[int]  # Remote key (if registered)
-    pool_id: str  # Memory pool identifier
+    iova: int
+    lkey: int
+    rkey: Optional[int]
+    pool_id: str
     
     def is_valid(self) -> bool:
         return self.iova != 0 and self.lkey != 0
@@ -181,17 +165,12 @@ class DMAHandle:
 ```python
 @dataclass
 class TransferRequest:
-    """Request to transfer tensor between devices"""
     src: Union[TensorID, DMAHandle]
     dst: Union[RemoteAccelerator, DMAHandle]
     size_bytes: int
-    
-    # Optional features
     allow_compression: bool = False
-    checksum: Optional[str] = None  # SHA256 hex
-    priority: int = 0  # 0-9
-    
-    # Metadata
+    checksum: Optional[str] = None
+    priority: int = 0
     tensor_metadata: TensorMetadata
     transfer_id: str = field(default_factory=lambda: str(uuid4()))
 ```
@@ -199,25 +178,51 @@ class TransferRequest:
 ### TransferFuture Contract
 ```python
 class TransferFuture:
-    """Async handle for transfer completion"""
-    
-    def result(self, timeout: Optional[float] = None) -> TransferResult:
-        """Block until transfer completes or timeout"""
-        
-    def done(self) -> bool:
-        """Check if transfer is complete"""
-        
-    def cancel(self) -> bool:
-        """Attempt to cancel transfer"""
-        
-    def add_done_callback(self, fn: Callable) -> None:
-        """Add completion callback"""
-        
-    def progress(self) -> float:
-        """Return progress [0.0, 1.0]"""
+    def result(self, timeout: Optional[float] = None) -> TransferResult: ...
+    def done(self) -> bool: ...
+    def cancel(self) -> bool: ...
+    def add_done_callback(self, fn: Callable) -> None: ...
+    def progress(self) -> float: ...
 ```
 
-## 6. Error Handling
+## 6. Execution Service API (Runtime)
+```python
+class ExecutionService(ABC):
+    @abstractmethod
+    def run_subgraph(self, plan_fragment: PlanFragment) -> List[TensorHandle]:
+        """Execute a PlanFragment and return result handles."""
+
+    @abstractmethod
+    def fetch_result(self, tensor_id: str) -> MemoryView: ...
+
+    @abstractmethod
+    def cancel(self, plan_id: str) -> None: ...
+
+    @abstractmethod
+    def health(self) -> HealthStatus: ...
+```
+
+## 7. Type Definitions
+
+### Core Types
+```python
+TensorID = str  # UUIDv4 string
+NodeId = str    # UUIDv4 string
+OpId = str      # UUIDv4 string
+```
+
+### Data Type Representation
+```python
+# In-process dtype representation
+dtype: torch.dtype  # Native PyTorch dtype
+
+# On-wire dtype representation (JSON/RPC)
+dtype_string: str  # Canonical string: "float16", "float32", "int64", etc.
+
+# Conversion functions (unchanged)
+```
+
+## 8. Error Handling
 
 ### Error Context Contract
 ```python
@@ -240,7 +245,7 @@ class TransferError(Exception):
     retriable: bool = True
 ```
 
-## 7. Feature Negotiation
+## 9. Session & Feature Negotiation
 
 ### Session Setup Contract
 ```python
@@ -264,7 +269,7 @@ class SessionCapabilities:
         }
 ```
 
-## 8. Heartbeat Protocol
+## 10. Heartbeat Protocol
 
 ### Heartbeat Contract
 ```python
@@ -283,112 +288,6 @@ class HeartbeatResponse:
     gpu_utilization: List[float]  # Per GPU
     memory_available: int  # Bytes
     active_operations: int
-```
-
-## 9. Type Definitions
-
-### Core Types
-```python
-# Type aliases
-TensorID = str  # UUIDv4 string
-NodeId = str    # UUIDv4 string
-OpId = str      # UUIDv4 string
-
-# Enums
-class WorkloadType(Enum):
-    LLM = "llm"
-    VISION = "vision"
-    MULTIMODAL = "multimodal"
-    RECSYS = "recsys"
-    UNKNOWN = "unknown"
-
-class OperationState(Enum):
-    PENDING = "pending"
-    SCHEDULED = "scheduled"
-    TRANSFERRING = "transferring"
-    EXECUTING = "executing"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    RETRYING = "retrying"
-
-# Device specification
-@dataclass
-class RemoteAccelerator:
-    cluster: str  # Cluster identifier
-    node: str     # Node identifier
-    gpu_id: int   # GPU index on node
-    
-    def __hash__(self):
-        return hash((self.cluster, self.node, self.gpu_id))
-```
-
-### Data Type Representation
-```python
-# In-process dtype representation
-dtype: torch.dtype  # Native PyTorch dtype
-
-# On-wire dtype representation (JSON/RPC)
-dtype_string: str  # Canonical string: "float16", "float32", "int64", etc.
-
-# Conversion functions
-def dtype_to_string(dt: torch.dtype) -> str:
-    mapping = {
-        torch.float16: "float16",
-        torch.float32: "float32",
-        torch.float64: "float64",
-        torch.int8: "int8",
-        torch.int16: "int16",
-        torch.int32: "int32",
-        torch.int64: "int64",
-        torch.bool: "bool",
-    }
-    return mapping[dt]
-
-def string_to_dtype(s: str) -> torch.dtype:
-    mapping = {
-        "float16": torch.float16,
-        "float32": torch.float32,
-        "float64": torch.float64,
-        "int8": torch.int8,
-        "int16": torch.int16,
-        "int32": torch.int32,
-        "int64": torch.int64,
-        "bool": torch.bool,
-    }
-    return mapping[s]
-```
-
-## 10. Validation Requirements
-
-### Contract Validation
-All components must validate contracts at boundaries:
-
-```python
-def validate_contract(data: Any, contract_type: Type) -> bool:
-    """Validate data conforms to contract"""
-    if not isinstance(data, contract_type):
-        return False
-    
-    # Type-specific validation
-    if hasattr(data, 'validate'):
-        return data.validate()
-    
-    # Field validation
-    for field in dataclasses.fields(contract_type):
-        if not hasattr(data, field.name):
-            return False
-        # Validate field types recursively
-        
-    return True
-```
-
-### Version Compatibility
-```python
-def check_version_compatibility(client_version: str, server_version: str) -> bool:
-    """Check if versions are compatible"""
-    client_major = int(client_version.split('.')[0])
-    server_major = int(server_version.split('.')[0])
-    return client_major == server_major  # Major version must match
 ```
 
 ## Usage Guidelines

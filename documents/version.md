@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-This document defines the comprehensive dependency management strategy for the Genie AI accelerator disaggregation system. Given the complex interaction between PyTorch, CUDA, DPDK, and system-level components, precise version management is critical for reproducible builds, stable operation, and optimal performance.
+Genie is a semantic-driven framework-level disaggregation system for AI accelerators that operates at the PyTorch level to bridge the "semantic translation gap" in current disaggregation approaches. By transforming PyTorch's eager execution into a semantically-aware lazy execution model, Genie captures rich application context and orchestrates efficient execution across disaggregated GPU pools with minimal CPU requirements at remote nodes.
 
 ## Dependency Management Strategy
 
@@ -32,7 +32,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Find specific versions
-find_package(Torch 2.1.0 REQUIRED)
+find_package(Torch 2.1.2 REQUIRED)
 ```
 
 ### 2. **Critical Version Decisions for Genie**
@@ -118,6 +118,17 @@ mypy==1.8.0
 pre-commit==3.6.0
 ````
 
+### 4.1 **Execution Modes and Optional Dependencies**
+
+- `GENIE_EXECUTION_MODE=local` (default): CPU-only materialization; no CUDA/DPDK required.
+- `GENIE_EXECUTION_MODE=local_remote`: Requires LibTorch C++ runtime; loopback TCP and pinned memory recommended.
+- `GENIE_EXECUTION_MODE=remote`: Remote service over TCP; CUDA optional on client, required on server if executing on GPU.
+- `GENIE_EXECUTION_MODE=remote_zero_copy`: Requires DPDK 23.11+, RDMA (MLNX_OFED 23.10+), gpudev (when using GPUDirect).
+
+Notes:
+- DPDK and RDMA are optional in development; enable progressively.
+- CPU-only wheels (e.g., `torch==2.1.2+cpu`) are supported for local mode and CI.
+
 ### 5. **Docker-Based Version Management**
 
 ````dockerfile
@@ -202,13 +213,6 @@ setup-env:
 	./venv/bin/pip install torch==$(TORCH_VERSION)+cu121 \
 		--index-url https://download.pytorch.org/whl/cu121
 	./venv/bin/pip install -r requirements-lock.txt
-
-.PHONY: verify-versions
-verify-versions:
-	@echo "Checking dependency versions..."
-	@$(PYTHON) -c "import torch; assert torch.__version__.startswith('$(TORCH_VERSION)')"
-	@nvcc --version | grep -q "$(CUDA_VERSION)"
-	@pkg-config --modversion libdpdk | grep -q "$(DPDK_VERSION)"
 ````
 
 ### 9. **CI/CD Version Matrix**
@@ -251,28 +255,6 @@ jobs:
 - DPDK: 23.11 LTS (for zero-copy networking)
 - NVIDIA Driver: 535.129+ (for H100)
 - RDMA: MLNX_OFED 23.10+ or inbox drivers
-
-## Why These Versions?
-
-1. **PyTorch 2.1.x**: 
-   - Stable dispatcher API we rely on
-   - Good custom device support
-   - LTS with long support window
-
-2. **Python 3.10**:
-   - Best PyTorch binary compatibility
-   - Stable ecosystem support
-   - Modern enough for type hints
-
-3. **DPDK 23.11**:
-   - LTS release (2-year support)
-   - Stable gpudev abstraction
-   - Good CUDA integration
-
-4. **CUDA 12.1**:
-   - H100 Hopper architecture support
-   - Stable PyTorch integration
-   - Good DPDK gpudev support
 ````
 
 ## Deployment and Production Considerations
@@ -651,8 +633,6 @@ jobs:
 8. **Use container-based deployment** for consistent environments across development and production
 9. **Monitor dependency updates** and test compatibility before upgrading in production
 10. **Maintain fallback strategies** for optional dependencies (DPDK, CUDA) to ensure graceful degradation
-##
- Compatibility Testing Matrix
 
 ### Test Configuration Matrix
 

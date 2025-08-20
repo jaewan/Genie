@@ -12,6 +12,12 @@ setup(
 			["genie/csrc/device.cpp"],
 			extra_compile_args=["-std=c++17"],
 		)
+		,
+		CppExtension(
+			"genie._runtime",
+			["genie/csrc/runtime.cpp"],
+			extra_compile_args=["-std=c++17", "-Wno-unknown-pragmas"],
+		)
 	],
 	cmdclass={"build_ext": BuildExtension},
 	install_requires=[

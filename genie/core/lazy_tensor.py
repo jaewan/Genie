@@ -36,21 +36,32 @@ class LazyTensor:
 
 	def __init__(self, operation: str, inputs: List[Any], kwargs: Optional[Dict[str, Any]] = None) -> None:
 		self.id = f"lt_{next(self._id_counter)}"
-		self.operation = operation
+		self.operation = self._normalize_aten_name(operation)
 		self.inputs = inputs
 		self.kwargs = kwargs or {}
 
-		# Infer tensor properties cheaply first
-		self.shape = self._infer_shape()
-		self.dtype = self._infer_dtype()
-		self.device = self._infer_device()
-		# Optional meta inference if unknown
-		if (self.shape is None or self.dtype is None) and os.getenv("GENIE_ENABLE_META_INFER", "1") == "1":
-			meta_shape, meta_dtype = infer_via_meta(operation, inputs, self.kwargs)
-			if self.shape is None:
-				self.shape = meta_shape
-			if self.dtype is None:
-				self.dtype = meta_dtype
+		# Fast path for common element-wise ops to minimize per-op overhead
+		self.shape = None
+		self.dtype = None
+		self.device = "remote_accelerator:0"
+		if self.operation in ("aten::add", "aten::sub", "aten::mul", "aten::div") and inputs:
+			first = inputs[0]
+			# Avoid function calls; copy from first input when available
+			self.shape = getattr(first, "shape", None)
+			self.dtype = getattr(first, "dtype", None)
+			self.device = getattr(first, "device", self.device)
+		else:
+			# Infer tensor properties (still lightweight for non-elementwise ops)
+			self.shape = self._infer_shape()
+			self.dtype = self._infer_dtype()
+			self.device = self._infer_device()
+			# Optional meta inference if unknown
+			if (self.shape is None or self.dtype is None) and os.getenv("GENIE_ENABLE_META_INFER", "1") == "1":
+				meta_shape, meta_dtype = infer_via_meta(operation, inputs, self.kwargs)
+				if self.shape is None:
+					self.shape = meta_shape
+				if self.dtype is None:
+					self.dtype = meta_dtype
 		
 		# Lazy init metadata to avoid upfront object allocation
 		self._metadata = None
@@ -222,7 +233,11 @@ class LazyTensor:
 		"""Estimate memory footprint in bytes."""
 		if self.shape and self.dtype:
 			element_size = torch.tensor([], dtype=self.dtype).element_size()
-			return int(torch.prod(torch.tensor(self.shape)).item()) * element_size
+			try:
+				from math import prod
+				return int(prod(self.shape)) * element_size
+			except Exception:
+				return int(torch.prod(torch.tensor(self.shape)).item()) * element_size
 		return 0
 
 	def is_materialized(self) -> bool:
@@ -240,6 +255,16 @@ class LazyTensor:
 
 	def to(self, *args, **kwargs) -> torch.Tensor:
 		"""Convert tensor type/device (triggers materialization)."""
+		# Special handling for remote_accelerator device to prevent allocation errors
+		if args and isinstance(args[0], (str, torch.device)):
+			device = args[0]
+			if (isinstance(device, str) and device.startswith("remote_accelerator")) or \
+			   (isinstance(device, torch.device) and device.type == "remote_accelerator"):
+				# For remote_accelerator, just return self (no actual device change)
+				# The actual device change will happen during materialization
+				return self
+		
+		# For other devices, proceed normally
 		return self.materialize().to(*args, **kwargs)
 
 	def item(self):  # noqa: ANN201
@@ -272,7 +297,11 @@ class LazyTensor:
 	def numel(self) -> int:
 		"""Get total number of elements."""
 		if self.shape is not None:
-			return int(torch.prod(torch.tensor(self.shape)).item())
+			try:
+				from math import prod
+				return int(prod(self.shape))
+			except Exception:
+				return int(torch.prod(torch.tensor(self.shape)).item())
 		return self.materialize().numel()
 
 	# Arithmetic operators
@@ -413,6 +442,8 @@ class LazyTensor:
 		else:
 			# Fallback to function name
 			op_name = f"aten::{func_name}" if not func_name.startswith("aten::") else func_name
+		# Normalize to canonical aten::op
+		op_name = cls._normalize_aten_name(op_name)
 		
 		# Check if any arguments are LazyTensors
 		has_lazy = any(isinstance(arg, cls) for arg in args) or any(isinstance(v, cls) for v in kwargs.values())
@@ -423,5 +454,34 @@ class LazyTensor:
 		else:
 			# No LazyTensors involved, execute normally
 			return func(*args, **kwargs)
+
+	@staticmethod
+	def _normalize_aten_name(full_op: str) -> str:
+		"""Normalize aten op names by stripping overload suffixes.
+
+		Example: "aten::add.Tensor" -> "aten::add"
+		         "aten::softmax.int" -> "aten::softmax"
+		         "matmul" -> "aten::matmul"
+		"""
+		try:
+			if not full_op:
+				return full_op
+			if not full_op.startswith("aten::"):
+				full_op = f"aten::{full_op}"
+			_, name = full_op.split("::", 1)
+			base = name.split(".", 1)[0]
+			return f"aten::{base}"
+		except Exception:
+			return full_op
+
+	@staticmethod
+	def lift(tensor: torch.Tensor) -> "LazyTensor":
+		"""Create a LazyTensor that aliases a concrete CPU tensor without allocating on remote.
+
+		This wraps the tensor using a no-op alias op, enabling graphs that start from
+		concrete tensors (for correctness comparisons) while still flowing through the
+		lazy pipeline.
+		"""
+		return LazyTensor("aten::alias", [tensor], {})
 
 

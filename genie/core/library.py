@@ -5,6 +5,7 @@ This module defines operations using PyTorch's structured library approach,
 replacing the manual dispatcher registration with proper torch.library integration.
 """
 import logging
+import os
 from typing import Any, Optional, List, Union
 
 import torch
@@ -63,6 +64,13 @@ def create_lazy_tensor(op_name: str, *args, **kwargs):
     return LazyTensor(operation=normalized, inputs=list(args), kwargs=kwargs)
 
 
+def _impl_capable() -> bool:
+    try:
+        return callable(getattr(torch.library, "impl", None))
+    except Exception:
+        return False
+
+
 def register_operation_impl(op_name: str):
     """
     Register operation implementation for PrivateUse1 backend.
@@ -70,6 +78,11 @@ def register_operation_impl(op_name: str):
     This uses the torch.library.impl decorator approach which is more reliable.
     """
     def decorator(func):
+        # Global gate to avoid invalid registrations on some builds
+        enable_impl = os.getenv("GENIE_ENABLE_ATEN_IMPL", "0") == "1"
+        if not enable_impl or not _impl_capable():
+            logger.debug(f"Skipping registration for aten::{op_name} (impl disabled or unavailable)")
+            return func
         try:
             # Use torch.library.impl directly with decorator syntax
             @torch.library.impl(f"aten::{op_name}", "PrivateUse1")
@@ -87,7 +100,8 @@ def register_operation_impl(op_name: str):
             
         except Exception as e:
             _operation_stats["failed_ops"] += 1
-            logger.warning(f"Failed to register aten::{op_name}: {e}")
+            # Downgrade to debug to avoid noisy stderr during runtime
+            logger.debug(f"Failed to register aten::{op_name}: {e}")
             return func
     
     return decorator
@@ -269,4 +283,4 @@ def stack_impl(tensors: List[torch.Tensor], dim: int = 0):
     return torch.stack(tensors, dim=dim)
 
 
-logger.info(f"Phase 1 library loaded: {_operation_stats['registered_ops']} ops registered, {_operation_stats['failed_ops']} failed")
+logger.info(f"Phase 1 library loaded: {_operation_stats['registered_ops']} ops registered, {_operation_stats['failed_ops']} failed (impls {'enabled' if os.getenv('GENIE_ENABLE_ATEN_IMPL','0')=='1' else 'disabled'})")

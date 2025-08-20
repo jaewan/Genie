@@ -77,18 +77,19 @@ Genie is a semantic-driven framework-level disaggregation system for AI accelera
 #### 1.1 Device Extension
 ```python
 class RemoteAcceleratorDevice(torch._C.Device):
-    """Custom PyTorch device for disaggregated accelerators"""
-    
-    def __init__(self, device_id: int):
-        self.device_type = "remote_accelerator"
-        self.index = device_id
-        self.dispatcher_key = torch._C.DispatchKey.PrivateUse1
+	"""Custom PyTorch device for disaggregated accelerators"""
+	
+	def __init__(self, device_id: int):
+		self.device_type = "remote_accelerator"
+		self.index = device_id
+		self.dispatcher_key = torch._C.DispatchKey.PrivateUse1
 ```
 
 #### 1.2 Dispatcher Integration
-- **Hook Point**: PyTorch's unified dispatcher (`aten::` operations)
-- **Interception**: All tensor operations on `remote_accelerator` device
-- **Return**: LazyTensor proxies instead of eager execution
+- **Primary Capture Mechanism**: PyTorch `__torch_function__` protocol for comprehensive interception (>95% of ops) involving `LazyTensor`
+- **Factory Interception**: Lightweight hooks for tensor creation (e.g., `randn/zeros/ones/empty`) targeting `remote_accelerator`
+- **Dispatcher Notes**: Torch dispatcher (`aten::`) integration remains optional for targeted cases; not required for broad coverage in Phase 1
+- **Return**: `LazyTensor` proxies instead of eager execution
 - **Metadata Collection**: Operation type, tensor shapes, dtypes, device placement
 
 ### 2. LazyTensor Subsystem
@@ -96,154 +97,101 @@ class RemoteAcceleratorDevice(torch._C.Device):
 #### 2.1 LazyTensor Data Structure
 ```python
 class LazyTensor:
-    # Core execution tracking
-    operation: str                    # e.g., 'aten::matmul'
-    inputs: List[Union[LazyTensor, torch.Tensor]]
-    kwargs: Dict[str, Any]
-    # Genie Architecture Document
-
-    ## Executive Summary
-
-    Genie operates at the ML framework “narrow waist” (PyTorch) to bridge the semantic translation gap and make accelerator disaggregation practical. It converts eager operations into LazyTensor graphs enriched with semantic context, plans execution with workload-aware optimizations, and executes plans over a zero-copy user-space data path to CPU-minimal remote nodes.
-
-    ## System Architecture Overview
-
-    ### Core Design Principles
-
-    1. Framework-level integration for semantics and generality
-    2. Deferred execution (LazyTensor) for global, cross-op optimization
-    3. Zero-copy data path (DPDK + gpudev) for near-native throughput
-    4. CPU-minimal remote runtime (2 cores, 8GB RAM) for cost efficiency
-    5. Semantic-guided planning for workload diversity (LLM/Vision/RecSys/Multi-modal)
-
-    ### High-Level Architecture
-
-    ```
-    ┌─────────────────────────────────────────────────────────────┐
-    │                     User Application                         │
-    │                    (Unchanged PyTorch Code)                  │
-    └─────────────────────────────┬───────────────────────────────┘
-                                  │
-    ┌─────────────────────────────▼───────────────────────────────┐
-    │                      PyTorch Framework                       │
-    │  ┌─────────────────────────────────────────────────────┐   │
-    │  │            Genie Device Extension                    │   │
-    │  │  ┌──────────────┐  ┌──────────────┐  ┌───────────┐ │   │
-    │  │  │  Dispatcher  │──▶│  LazyTensor │──▶│  Graph    │ │   │
-    │  │  │  Integration │  │   Engine     │  │  Builder  │ │   │
-    │  │  └──────────────┘  └──────────────┘  └───────────┘ │   │
-    │  └─────────────────────────────────────────────────────┘   │
-    └─────────────────────────────┬───────────────────────────────┘
-                                  │
-    ┌─────────────────────────────▼───────────────────────────────┐
-    │                    Semantic Analysis Layer                   │
-    │  ┌──────────────┐  ┌──────────────┐  ┌────────────────┐   │
-    │  │  FX Static   │  │    Pattern    │  │     Hook       │   │
-    │  │   Analysis   │  │    Library    │  │    Manager     │   │
-    │  └──────────────┘  └──────────────┘  └────────────────┘   │
-    └─────────────────────────────┬───────────────────────────────┘
-                                  │
-    ┌─────────────────────────────▼───────────────────────────────┐
-    │                   Optimization & Execution                   │
-    │  ┌──────────────┐  ┌──────────────┐  ┌────────────────┐   │
-    │  │ Optimization │  │  Execution   │  │   Resource     │   │
-    │  │    Engine    │  │  Scheduler   │  │    Planner     │   │
-    │  └──────────────┘  └──────────────┘  └────────────────┘   │
-    └─────────────────────────────┬───────────────────────────────┘
-                                  │
-    ┌─────────────────────────────▼───────────────────────────────┐
-    │                    Zero-Copy Runtime Layer                   │
-    │  ┌──────────────┐  ┌──────────────┐  ┌────────────────┐   │
-    │  │    DPDK      │  │   Transfer   │  │    GPUDev      │   │
-    │  │  Allocator   │  │   Manager    │  │   Interface    │   │
-    │  └──────────────┘  └──────────────┘  └────────────────┘   │
-    └─────────────────────────────┬───────────────────────────────┘
-                                  │ Network (RDMA/RoCE)
-                                  │
-    ┌─────────────────────────────▼───────────────────────────────┐
-    │              Remote Accelerator Nodes (CPU-Minimal)          │
-    │  ┌─────────────────────────────────────────────────────┐   │
-    │  │  Node: [2 CPU cores] [8GB RAM] [4–8x GPUs]           │   │
-    │  │  ┌────────────┐  ┌────────────┐  ┌──────────────┐  │   │
-    │  │  │   Thin     │  │  SmartNIC/ │  │     GPU      │  │   │
-    │  │  │  Runtime   │  │    DPU     │  │   Cluster    │  │   │
-    │  │  └────────────┘  └────────────┘  └──────────────┘  │   │
-    │  └─────────────────────────────────────────────────────┘   │
-    └───────────────────────────────────────────────────────────┘
-    ```
-
-    ## Component Architecture
-
-    ### 1. PyTorch Integration Layer
-
-    Device and dispatcher hooks intercept ops on a `remote_accelerator` device and return LazyTensors instead of executing eagerly.
-
-    Key responsibilities:
-    - Capture op type, tensor shapes/dtypes/devices
-    - Maintain graph edges (data dependencies)
-    - Detect materialization triggers
-
-    ### 2. LazyTensor Subsystem
-
-    Data structures:
-    - LazyTensor: symbolic node with metadata and references to inputs
-    - ComputationGraph: DAG with regions (e.g., attention blocks, fusion points)
-
-    Materialization: explicit (.item, .cpu) and implicit (control-flow) triggers schedule execution plans.
-
-    ### 3. Semantic Analysis Engine
-
-    Three-tier capture:
-    - Tier 1 (Dispatcher): dynamic ops/shapes/control flow
-    - Tier 2 (FX): static module graph and boundaries
-    - Tier 3 (Hooks): module-level annotations, phase detection (prefill/decode)
-
-    Pattern Library: plugin system for LLM, Vision, RecSys, Multi-modal; supports rule- and ML-based classifiers.
-
-    ### 4. Optimization & Execution
-
-    Pipeline: Graph → Pattern Match → Classify → Select Strategies → Generate Plan.
-
-    Workload strategies:
-    - LLM: co-locate decode with KV cache, adaptive batching, parallel prefill
-    - Vision: pipeline stages, fuse transfers, optimize checkpointing
-    - Multi-modal: parallelize modalities, just-in-time fusion, heterogeneous placement
-
-    Execution Scheduler: overlap compute and communication; handle retries and partial failures.
-
-    ### 5. Zero-Copy Data Path
-
-    Memory architecture:
-    - Pre-registered, DMA-capable pools (DPDK huge pages)
-    - gpudev integration for GPUDirect RDMA when available; pinned-memory fallback
-
-    Transfer Manager: batches small transfers (target ≥1MB avg), aligns with graph plan.
-
-    ### 6. Remote Execution Runtime (CPU-Minimal)
-
-    Node profile: 2 CPU cores, 8GB RAM, 200Gbps NIC/DPU, 4–8 GPUs.
-
-    Thin runtime:
-    - Executes plan fragments (C++ preferred, minimal Python dependency)
-    - Single control/telemetry channel
-    - Ephemeral caches only; safe restart within 2s
-
-    ## Data Flow
-
-    1) Application targets `remote_accelerator` → 2) Dispatcher creates LazyTensor graph → 3) Semantic analysis and pattern matching → 4) Plan generation (placement, comms) → 5) Zero-copy transfers and remote execution → 6) Results materialized and returned.
-
-    ## Observability & Reliability
-
-    - Metrics: per-op/node latency, bytes moved, overlap %, GPU/CPU util
-    - Tracing: correlate graph regions with network transfers and kernels
-    - Resilience: automatic retries; idempotent operations; DR hooks for control-plane state
-  RDMA/RoCE Network
+	# Core execution tracking
+	operation: str                    # e.g., 'aten::matmul'
+	inputs: List[Union["LazyTensor", torch.Tensor]]
+	kwargs: Dict[str, Any]
+	# Inferred properties (may be meta until materialization)
+	shape: Tuple[int, ...]
+	dtype: torch.dtype
+	device: Optional[torch.device]   # device hint only; materialization coerces as needed
 ```
+Materialization triggers (e.g., `.cpu()`, `.item()`, tensor-to-numpy) schedule execution through the executor.
 
-### Communication Patterns
+### 3. Semantic Analysis Engine
+
+Three-tier capture:
+- Tier 1 (Dispatcher capture): dynamic ops/shapes/control flow via `LazyTensor` metadata
+- Tier 2 (FX): static module graph and boundaries
+- Tier 3 (Hooks): module-level annotations, phase detection (prefill/decode)
+
+Pattern Library: plugin system for LLM, Vision, RecSys, Multi-modal; supports rule- and ML-based classifiers.
+
+### 4. Optimization & Execution
+
+Pipeline: Graph → Pattern Match → Classify → Select Strategies → Generate Plan.
+
+Workload strategies:
+- LLM: co-locate decode with KV cache, adaptive batching, parallel prefill
+- Vision: pipeline stages, fuse transfers, optimize checkpointing
+- Multi-modal: parallelize modalities, just-in-time fusion, heterogeneous placement
+
+Execution Scheduler: overlap compute and communication; handle retries and partial failures.
+
+### 5. Zero-Copy Data Path
+
+Memory architecture:
+- Pre-registered, DMA-capable pools (DPDK huge pages)
+- gpudev integration for GPUDirect RDMA when available; pinned-memory fallback
+
+Transfer Manager: batches small transfers (target ≥1MB avg), aligns with graph plan.
+
+### 6. Remote Execution Runtime (CPU-Minimal)
+
+Node profile: 2 CPU cores, 8GB RAM, 200Gbps NIC/DPU, 4–8 GPUs.
+
+Thin runtime:
+- Executes plan fragments (C++ preferred, minimal Python dependency)
+- Single control/telemetry channel
+- Ephemeral caches only; safe restart within 2s
+
+### 7. Execution Layer Architecture (Phased)
+
+Phased plan to evolve from developer-friendly local execution to zero-copy remote execution:
+
+- Phase A: Local materialization (current)
+	- Capture via `__torch_function__`; build `LazyTensor` graph and metadata
+	- Materialize on CPU using eager PyTorch as fallback; coerce any `device` in kwargs to CPU
+	- Purpose: correctness, CI stability, and rapid iteration
+
+- Phase B: Local-remote dev backend (single-node)
+	- Add a subprocess or in-process C++ runtime using LibTorch for execution
+	- Control-plane over loopback TCP; data-plane via shared/pinned memory
+	- Same protocol types as remote (ExecutionPlan, TensorHandle) to ease swap-in
+
+- Phase C: Remote runtime over TCP
+	- Reuse Phase B runtime on a remote node; transport tensors via TCP pinned memory
+	- Introduce scheduling of plan fragments with explicit placement
+
+- Phase D: Zero-copy and GPUDirect RDMA
+	- Integrate DPDK mempools and gpudev registration; transport via RDMA
+	- Overlap communication and compute; enable batching and double-buffering
+
+Responsibilities by language:
+- Python:
+	- Capture, graph building, semantic analysis (FX, hooks), plan generation
+	- Orchestration, observability, user-facing API
+- C++:
+	- Execution runtime (LibTorch kernels), memory manager (pinned/DPDK), transport (TCP→RDMA)
+	- Low-latency RPC server, batching, flow control
+
+Development modes:
+- `GENIE_EXECUTION_MODE=local|local_remote|remote` selects Phase A/B/C paths at runtime
+
+## Data Flow
+
+1) Application targets `remote_accelerator` → 2) Capture via `__torch_function__` builds LazyTensor graph → 3) Semantic analysis and pattern matching → 4) Plan generation (placement, comms) → 5) Execute via selected mode (local / local-remote / remote) → 6) Results materialized and returned.
+
+## Observability & Reliability
+
+- Metrics: per-op/node latency, bytes moved, overlap %, GPU/CPU util
+- Tracing: correlate graph regions with network transfers and kernels
+- Resilience: automatic retries; idempotent operations; DR hooks for control-plane state
+
+## Communication Patterns
 
 1. **Control Plane**: TCP/IP for metadata and coordination
-2. **Data Plane**: RDMA for tensor transfers
+2. **Data Plane**: RDMA for tensor transfers (fallback: TCP with pinned memory)
 3. **Synchronization**: Custom RDMA-based barriers
 
 ## Deployment Architecture
@@ -281,15 +229,15 @@ services:
 ┌────────────────┐     ┌─────────────────┐
 │  Load Balancer │────▶│  Genie Clients  │
 └────────────────┘     │   (Full CPU)    │
-                       └────────┬────────┘
-                               │ RDMA
-                    ┌──────────▼──────────┐
-                    │   Network Fabric    │
-                    │  (200Gbps RDMA)     │
-                    └──────────┬──────────┘
-                               │
-        ┌──────────────────────┼──────────────────────┐
-        ↓                      ↓                      ↓
+                      └────────┬────────┘
+                              │ RDMA
+                   ┌──────────▼──────────┐
+                   │   Network Fabric    │
+                   │  (200Gbps RDMA)     │
+                   └──────────┬──────────┘
+                              │
+       ┌──────────────────────┼──────────────────────┐
+       ↓                      ↓                      ↓
 ┌───────────────┐    ┌───────────────┐    ┌───────────────┐
 │  GPU Pool 1   │    │  GPU Pool 2   │    │  GPU Pool N   │
 │ (Minimal CPU) │    │ (Minimal CPU) │    │ (Minimal CPU) │
@@ -311,14 +259,13 @@ services:
 ## Monitoring & Observability
 
 ### Metrics Collection
-
 ```python
 class MetricsCollector:
-    latency_histogram: Histogram  # End-to-end operation latency
-    throughput_counter: Counter   # Operations per second
-    network_traffic: Gauge        # Bytes transferred
-    gpu_utilization: Gauge        # Remote GPU usage
-    semantic_cache_hits: Counter  # Pattern recognition cache
+	latency_histogram: Histogram  # End-to-end operation latency
+	throughput_counter: Counter   # Operations per second
+	network_traffic: Gauge        # Bytes transferred
+	gpu_utilization: Gauge        # Remote GPU usage
+	semantic_cache_hits: Counter  # Pattern recognition cache
 ```
 
 ### Telemetry Pipeline
@@ -338,16 +285,15 @@ class MetricsCollector:
 4. **Pattern Mismatch**: Conservative execution with warning
 
 ### Recovery Mechanisms
-
 ```python
 class FailureHandler:
-    def handle_remote_failure(self, op: Operation):
-        if self.can_execute_locally(op):
-            return self.local_fallback(op)
-        elif backup := self.find_backup_accelerator():
-            return self.retry_on_backup(op, backup)
-        else:
-            raise AcceleratorUnavailableError()
+	def handle_remote_failure(self, op: Operation):
+		if self.can_execute_locally(op):
+			return self.local_fallback(op)
+		elif backup := self.find_backup_accelerator():
+			return self.retry_on_backup(op, backup)
+		else:
+			raise AcceleratorUnavailableError()
 ```
 
 ## Performance Optimizations
@@ -367,20 +313,19 @@ class FailureHandler:
 ## Extension Points
 
 ### Plugin Architecture
-
 ```python
 class GeniePlugin(ABC):
-    @abstractmethod
-    def register_patterns(self, registry: PatternRegistry):
-        """Add custom workload patterns"""
-        
-    @abstractmethod
-    def register_optimizations(self, engine: OptimizationEngine):
-        """Add custom optimization strategies"""
-        
-    @abstractmethod
-    def register_backends(self, runtime: Runtime):
-        """Add custom accelerator backends"""
+	@abstractmethod
+	def register_patterns(self, registry: PatternRegistry):
+		"""Add custom workload patterns"""
+		
+	@abstractmethod
+	def register_optimizations(self, engine: OptimizationEngine):
+		"""Add custom optimization strategies"""
+		
+	@abstractmethod
+	def register_backends(self, runtime: Runtime):
+		"""Add custom accelerator backends"""
 ```
 
 ### Custom Accelerator Support
@@ -393,9 +338,10 @@ class GeniePlugin(ABC):
 ## Future Architecture Evolution
 
 ### Phase 1: Current Implementation
-- Single-user, single-application focus
-- Manual remote device specification
-- Static pattern library
+- Capture via `__torch_function__` and factory interception
+- Local CPU materialization fallback; force CPU device during execution to avoid PrivateUse1 allocations
+- Single-user, single-application focus; static pattern library
+- Example suites for correctness and performance on single node
 
 ### Phase 2: Multi-Tenancy
 - Workload isolation

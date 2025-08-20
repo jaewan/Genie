@@ -30,6 +30,9 @@ class SimpleExecutor:
 			"aten::sub": self._execute_sub,
 			"aten::mul": self._execute_mul,
 			"aten::div": self._execute_div,
+
+			# No-op alias (used by lift)
+			"aten::alias": self._execute_alias,
 			
 			# Linear algebra
 			"aten::matmul": self._execute_matmul,
@@ -55,7 +58,31 @@ class SimpleExecutor:
 		self.execution_count += 1
 		
 		graph = GraphBuilder.current().get_graph()
-		order = graph.topological_sort()
+		# Compute minimal ancestor subgraph required for target
+		needed: Dict[str, bool] = {}
+		target_id = getattr(target_lazy_tensor, "id", None)
+		if target_id is None:
+			return torch.tensor(0.0)
+		
+		# Build reverse adjacency list once
+		rev_adj: Dict[str, list] = {}
+		for src, dst in graph.edges:
+			rev_adj.setdefault(dst, []).append(src)
+		
+		def mark_ancestors(node_id: str) -> None:
+			if needed.get(node_id):
+				return
+			needed[node_id] = True
+			for parent in rev_adj.get(node_id, []):
+				# Only traverse LazyTensor nodes present in graph
+				if parent in graph.nodes:
+					mark_ancestors(parent)
+		
+		mark_ancestors(target_id)
+		
+		# Global order, then filter to needed nodes
+		order_all = graph.topological_sort()
+		order = [nid for nid in order_all if needed.get(nid)]
 
 		# Map from node id to materialized tensor
 		materialized: Dict[str, torch.Tensor] = {}
@@ -103,31 +130,42 @@ class SimpleExecutor:
 		"""Execute a single operation."""
 		handler = self.operation_handlers.get(node.operation)
 		
-		# Resolve inputs
+		# Resolve inputs: allow literals (ints, tuples, etc.) and node ids
 		inputs = []
-		for input_id in node.inputs:
-			if input_id in materialized:
-				inputs.append(materialized[input_id])
-			else:
-				# Try to get concrete tensor
-				concrete = GraphBuilder.current().get_concrete(input_id)
-				if concrete is not None:
-					if hasattr(concrete, "materialize"):
-						inputs.append(concrete.materialize())
-					else:
-						inputs.append(concrete)
+		for arg in node.inputs:
+			# Literal or object inputs
+			if not isinstance(arg, str):
+				if isinstance(arg, torch.Tensor):
+					inputs.append(arg)
+				elif hasattr(arg, "materialize"):
+					try:
+						inputs.append(arg.materialize())
+					except Exception:
+						inputs.append(torch.tensor(0.0))
 				else:
-					logger.warning(f"Could not resolve input: {input_id}")
-					inputs.append(torch.tensor(0.0))
+					inputs.append(arg)
+				continue
+			# Node ids
+			if arg in materialized:
+				inputs.append(materialized[arg])
+				continue
+			concrete = GraphBuilder.current().get_concrete(arg)
+			if concrete is not None:
+				if hasattr(concrete, "materialize"):
+					inputs.append(concrete.materialize())
+				else:
+					inputs.append(concrete)
+				continue
+			logger.warning(f"Could not resolve input: {arg}")
+			inputs.append(torch.tensor(0.0))
 		
 		kwargs = node.metadata.get("kwargs", {})
-		# Ensure we never attempt to create tensors on remote_accelerator during materialization
-		if isinstance(kwargs, dict) and kwargs.get("device") is not None:
-			dev = kwargs.get("device")
-			if isinstance(dev, str) and (dev.startswith("remote_accelerator") or dev.startswith("privateuseone")):
-				kwargs = {**kwargs, "device": "cpu"}
-			elif isinstance(dev, torch.device) and dev.type in ("remote_accelerator", "privateuseone"):
-				kwargs = {**kwargs, "device": torch.device("cpu")}
+		# Only pass device for creation ops; strip for others to avoid invalid kwargs
+		kwargs = kwargs.copy() if kwargs else {}
+		if node.operation in ("aten::randn", "aten::zeros", "aten::ones"):
+			kwargs["device"] = "cpu"
+		else:
+			kwargs.pop("device", None)
 		
 		if handler is not None:
 			return handler(inputs, kwargs)
@@ -154,13 +192,18 @@ class SimpleExecutor:
 				else:
 					concrete_inputs.append(inp)
 
-		# Force CPU for creation-like ops or when device hints are remote
-		if isinstance(kwargs, dict) and kwargs.get("device") is not None:
-			dev = kwargs.get("device")
-			if isinstance(dev, str) and (dev.startswith("remote_accelerator") or dev.startswith("privateuseone")):
-				kwargs = {**kwargs, "device": "cpu"}
-			elif isinstance(dev, torch.device) and dev.type in ("remote_accelerator", "privateuseone"):
-				kwargs = {**kwargs, "device": torch.device("cpu")}
+		# Only pass device for creation ops; strip for others to avoid invalid kwargs
+		kwargs = kwargs.copy() if kwargs else {}
+		creation_ops = {"randn", "zeros", "ones"}
+		aten_prefix = "aten::"
+		base_name = op_name[len(aten_prefix):] if op_name.startswith(aten_prefix) else op_name
+		if base_name in creation_ops:
+			kwargs["device"] = "cpu"
+		else:
+			kwargs.pop("device", None)
+		
+		# Also ensure any input tensors are moved to CPU to prevent device conflicts
+		concrete_inputs = [inp.cpu() if isinstance(inp, torch.Tensor) else inp for inp in concrete_inputs]
 
 		# Normalize op name (e.g., "aten::add" -> "add")
 		aten_prefix = "aten::"
@@ -190,28 +233,52 @@ class SimpleExecutor:
 		if len(inputs) < 2:
 			return torch.tensor(0.0)
 		alpha = kwargs.get("alpha", 1)
-		return torch.add(inputs[0], inputs[1], alpha=alpha)
+		# Force CPU execution to prevent device conflicts
+		x = inputs[0].cpu() if isinstance(inputs[0], torch.Tensor) else inputs[0]
+		y = inputs[1].cpu() if isinstance(inputs[1], torch.Tensor) else inputs[1]
+		return torch.add(x, y, alpha=alpha)
 
 	def _execute_sub(self, inputs, kwargs) -> torch.Tensor:  # noqa: ANN001
 		if len(inputs) < 2:
 			return torch.tensor(0.0)
 		alpha = kwargs.get("alpha", 1)
-		return torch.sub(inputs[0], inputs[1], alpha=alpha)
+		# Force CPU execution to prevent device conflicts
+		x = inputs[0].cpu() if isinstance(inputs[0], torch.Tensor) else inputs[0]
+		y = inputs[1].cpu() if isinstance(inputs[1], torch.Tensor) else inputs[1]
+		return torch.sub(x, y, alpha=alpha)
 
 	def _execute_mul(self, inputs, kwargs) -> torch.Tensor:  # noqa: ANN001
 		if len(inputs) < 2:
 			return torch.tensor(0.0)
-		return torch.mul(inputs[0], inputs[1])
+		# Force CPU execution to prevent device conflicts
+		x = inputs[0].cpu() if isinstance(inputs[0], torch.Tensor) else inputs[0]
+		y = inputs[1].cpu() if isinstance(inputs[1], torch.Tensor) else inputs[1]
+		return torch.mul(x, y)
 
 	def _execute_div(self, inputs, kwargs) -> torch.Tensor:  # noqa: ANN001
 		if len(inputs) < 2:
 			return torch.tensor(0.0)
-		return torch.div(inputs[0], inputs[1])
+		# Force CPU execution to prevent device conflicts
+		x = inputs[0].cpu() if isinstance(inputs[0], torch.Tensor) else inputs[0]
+		y = inputs[1].cpu() if isinstance(inputs[1], torch.Tensor) else inputs[1]
+		return torch.div(x, y)
 
 	def _execute_matmul(self, inputs, kwargs) -> torch.Tensor:  # noqa: ANN001
 		if len(inputs) < 2:
 			return torch.tensor(0.0)
-		return torch.matmul(inputs[0], inputs[1])
+		# Force CPU execution to prevent device conflicts
+		x = inputs[0].cpu() if isinstance(inputs[0], torch.Tensor) else inputs[0]
+		y = inputs[1].cpu() if isinstance(inputs[1], torch.Tensor) else inputs[1]
+		return torch.matmul(x, y)
+
+	def _execute_alias(self, inputs, kwargs) -> torch.Tensor:  # noqa: ANN001
+		if not inputs:
+			return torch.tensor(0.0)
+		# Pass-through; ensure tensor
+		val = inputs[0]
+		if isinstance(val, torch.Tensor):
+			return val
+		return torch.tensor(val)
 
 	def _execute_mm(self, inputs, kwargs) -> torch.Tensor:  # noqa: ANN001
 		if len(inputs) < 2:

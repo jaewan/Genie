@@ -4,15 +4,15 @@
 Core abstraction that intercepts PyTorch operations and builds a semantically-rich computation graph through deferred execution.
 
 ## Context
-- **Upstream**: PyTorch Dispatcher (aten operations)
+- **Upstream**: PyTorch (`__torch_function__` protocol, factory functions)
 - **Downstream**: Semantic Analyzer, Optimization Engine
-- **Interactions**: Pattern Library, Materialization Tracker
+- **Interactions**: Pattern Library, Materialization Tracker, Graph Builder
 
 ## Key Requirements
-- Intercept >95% of PyTorch operations
-- <10μs overhead per operation
+- Intercept >95% of PyTorch operations (via `__torch_function__`)
+- <10µs overhead per operation
 - <1% memory overhead for metadata
-- Support autograd and control flow
+- Support autograd and control flow (Phase 2+)
 
 ## Core Implementation
 
@@ -28,63 +28,51 @@ class RemoteAcceleratorDevice(torch._C.Device):
 torch._C._register_device("remote_accelerator", RemoteAcceleratorDevice)
 ```
 
-### 2. Dispatcher Integration
-```python
-@torch.library.impl("aten::add", "remote_accelerator")
-def add_impl(x: Tensor, y: Tensor) -> LazyTensor:
-    return LazyTensor(
-        operation="aten::add",
-        inputs=[x, y],
-        metadata=capture_semantic_context()
-    )
-```
+### 2. Operation Interception Strategy
+- **Primary**: `__torch_function__` on `LazyTensor` to intercept most tensor ops automatically
+- **Factory hooks**: Patch `torch.randn/zeros/ones/empty/empty_strided` when `device==remote_accelerator` to return `LazyTensor`
+- **Normalization**: Normalize op names to canonical `aten::op` form for graph consistency (strip overloads)
+- **Dispatcher registration**: Optional for corner cases; not required for Phase 1
 
 ### 3. LazyTensor Data Structure
 ```python
 class LazyTensor:
-    def __init__(self, operation: str, inputs: List, metadata: Dict):
+    def __init__(self, operation: str, inputs: List, kwargs: Dict):
         self.id = generate_uuid()
-        self.operation = operation
+        self.operation = normalize_aten_name(operation)
         self.inputs = inputs
+        self.kwargs = kwargs
         self.metadata = SemanticMetadata(
-            op_type=operation,
-            tensor_shape=infer_shape(inputs),
-            dtype=infer_dtype(inputs),
-            module_path=get_current_module_path(),
-            execution_phase=detect_phase(),
-            memory_pattern=analyze_access_pattern()
+            operation_type=self.operation,
+            tensor_shape=infer_shape(inputs, kwargs),
+            dtype=infer_dtype(inputs, kwargs),
+            device_hint="remote_accelerator:0",
         )
         self.materialized = False
-        self.concrete_tensor = None
-        
-    def materialize(self) -> torch.Tensor:
-        if not self.materialized:
-            # Trigger graph execution up to this point
-            self.concrete_tensor = execute_subgraph(self)
-            self.materialized = True
-        return self.concrete_tensor
+        self.concrete_value = None
+
+    # Materialization trigger examples
+    def cpu(self):
+        return self.materialize().cpu()
+
+    def item(self):
+        return self.materialize().item()
 ```
 
 ### 4. Graph Building
 ```python
 class ComputationGraph:
-    def __init__(self):
-        self.nodes = {}  # NodeId -> ComputationNode
-        self.edges = []  # List of (source, target) tuples
-        self.materialization_frontier = set()
-        
     def add_operation(self, lazy_tensor: LazyTensor):
         node = ComputationNode(
             id=lazy_tensor.id,
             operation=lazy_tensor.operation,
             inputs=[self.get_or_create_node(inp) for inp in lazy_tensor.inputs],
-            metadata=lazy_tensor.metadata
+            metadata=lazy_tensor.metadata,
         )
         self.nodes[node.id] = node
         self.update_edges(node)
-        
+
     def get_execution_order(self) -> List[NodeId]:
-        # Topological sort for dependency ordering
         return topological_sort(self.nodes, self.edges)
 ```
 
@@ -96,24 +84,17 @@ class SemanticMetadata:
     tensor_shape: Tuple[int, ...]
     dtype: torch.dtype
     device_hint: str
-    
-    # Semantic enrichment
-    module_path: str         # e.g., 'model.encoder.attention'
-    semantic_role: str       # e.g., 'attention_key'
-    execution_phase: str     # e.g., 'prefill', 'decode'
-    workload_hints: Dict
-    
-    # Performance hints
-    compute_intensity: float  # FLOPs per byte
-    memory_access: str       # 'sequential', 'random', 'broadcast'
-    recompute_cost: float
+    # Semantic enrichment (Phase 2+)
+    module_path: Optional[str] = None
+    execution_phase: Optional[str] = None
+    workload_hints: Dict = field(default_factory=dict)
 ```
 
 ## Materialization Triggers
 
 ### Explicit Triggers
 - `.item()` - Convert to Python scalar
-- `.cpu()` - Move to CPU
+- `.cpu()` - Move to CPU and materialize
 - `.numpy()` - Convert to NumPy
 - Print operations
 - Explicit `.materialize()`
@@ -124,20 +105,25 @@ class SemanticMetadata:
 - Non-intercepted operations
 - Graph size limits
 
+## Phase 1 Materialization Behavior
+- Materialization coerces any `device` kwargs to CPU to avoid PrivateUse1 allocations during execution
+- Fallback to eager PyTorch execution (CPU) in executor; inputs are materialized recursively
+- Unsupported ops: log a warning and use eager execution path
+
 ## Implementation Checklist
 
 ### Phase 1: Basic Infrastructure
-- [ ] Device registration with PyTorch
-- [ ] Basic dispatcher hooks (10 core ops)
-- [ ] LazyTensor class with minimal metadata
-- [ ] Simple graph construction
-- [ ] Manual materialization
+- [x] Device registration with PyTorch
+- [x] `__torch_function__` interception + factory hooks
+- [x] LazyTensor class with minimal metadata
+- [x] Simple graph construction
+- [x] Manual materialization (CPU fallback)
 
 ### Phase 2: Full Coverage
-- [ ] 95% operation coverage
+- [ ] 95% operation coverage with method/ufunc support
 - [ ] Autograd support
 - [ ] Control flow handling
-- [ ] Semantic metadata collection
+- [ ] Semantic metadata collection (module_path, phase)
 - [ ] Hook integration
 
 ### Phase 3: Optimization
@@ -150,31 +136,31 @@ class SemanticMetadata:
 ## Testing Requirements
 ```python
 def test_lazy_tensor_creation():
-    x = torch.randn(10, 10, device="remote_accelerator")
+    x = torch.randn(10, 10, device="remote_accelerator:0")
     assert isinstance(x, LazyTensor)
     assert x.metadata.operation_type == "aten::randn"
-    assert x.metadata.tensor_shape == (10, 10)
+    assert tuple(x.metadata.tensor_shape) == (10, 10)
 
 def test_operation_interception():
-    x = torch.randn(10, 10, device="remote_accelerator")
-    y = torch.randn(10, 10, device="remote_accelerator")
-    z = x + y  # Should create new LazyTensor
+    x = torch.randn(10, 10, device="remote_accelerator:0")
+    y = torch.randn(10, 10, device="remote_accelerator:0")
+    z = torch.add(x, y)  # Should create new LazyTensor via __torch_function__
     assert isinstance(z, LazyTensor)
     assert z.operation == "aten::add"
     assert len(z.inputs) == 2
 
 def test_materialization():
-    x = torch.randn(10, 10, device="remote_accelerator")
-    y = x.cpu()  # Should trigger materialization
+    x = torch.randn(10, 10, device="remote_accelerator:0")
+    y = x.cpu()  # Should trigger materialization on CPU
     assert isinstance(y, torch.Tensor)
     assert y.device.type == "cpu"
 ```
 
 ## Performance Benchmarks
-- Operation interception: <10μs per op
+- Operation interception: <10µs per op
 - Metadata storage: <100 bytes per tensor
 - Graph construction: O(n) for n operations
-- Materialization: <1ms for typical subgraphs
+- Materialization: <1ms for typical subgraphs (CPU fallback)
 
 ## Error Handling
 ```python
@@ -189,19 +175,19 @@ class UnsupportedOperationError(LazyTensorError):
 
 def handle_unsupported_op(op_name: str, *args, **kwargs):
     logger.warning(f"Unsupported operation {op_name}, falling back to eager")
-    # Materialize inputs and execute eagerly
     materialized_args = [materialize_if_lazy(arg) for arg in args]
-    return torch.ops.aten[op_name](*materialized_args, **kwargs)
+    kwargs = coerce_device_to_cpu(kwargs)
+    return getattr(torch.ops.aten, op_name)(*materialized_args, **kwargs)
 ```
 
 ## Integration Points
-- **Semantic Analyzer**: Passes completed graph segments
+- **Semantic Analyzer**: Receives completed graph segments
 - **Pattern Library**: Queries for pattern hints during construction
 - **Optimization Engine**: Provides graph for optimization
-- **Remote Runtime**: Receives materialization requests
+- **Runtime**: Receives materialization requests (Phase 2+)
 
 ## Dependencies
-- PyTorch 2.1.2 (stable dispatcher API)
-- Python 3.10+ (type hints, dataclasses)
+- PyTorch 2.1.2 (`__torch_function__`, dispatcher)
+- Python 3.10+
 - NetworkX (graph algorithms)
 - UUID (unique identifiers)
