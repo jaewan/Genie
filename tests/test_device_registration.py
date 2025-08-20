@@ -84,19 +84,11 @@ class TestDeviceRegistration:
 
     @pytest.mark.skipif(not is_available(), reason="remote_accelerator backend not available")
     def test_tensor_creation_on_device(self):
-        """Test creating tensors on remote_accelerator device."""
-        # This test will be skipped if backend registration fails
-        try:
-            # Try to create a tensor on the device
-            # Note: This might fail in Phase 1 since we're still implementing LazyTensor integration
-            device = torch.device("remote_accelerator", 0)
-            
-            # This should eventually create a LazyTensor
-            with pytest.raises(RuntimeError, match="remote_accelerator operations should be handled by Python LazyTensor"):
-                tensor = torch.zeros(2, 2, device=device)
-                
-        except Exception as e:
-            pytest.skip(f"Tensor creation not yet fully implemented: {e}")
+        """Test creating tensors on remote_accelerator device produces LazyTensor in Phase 1."""
+        device = torch.device("remote_accelerator", 0)
+        x = torch.zeros(2, 2, device=device)
+        from genie.core.lazy_tensor import LazyTensor
+        assert isinstance(x, LazyTensor)
 
     def test_multiple_device_instances(self):
         """Test creating multiple device instances."""

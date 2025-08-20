@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Dict
 import time
 import torch
 
@@ -21,10 +21,12 @@ class SemanticMetadata:
 	module_path: Optional[str] = None
 	semantic_role: Optional[str] = None
 	execution_phase: Optional[str] = None
+	workload_hints: Optional[Dict] = None
 
 	# Performance hints
 	compute_intensity: float = 1.0
 	memory_access: str = "sequential"
+	recompute_cost: Optional[float] = None
 
 	# Metadata versioning
 	metadata_version: str = "1.0"

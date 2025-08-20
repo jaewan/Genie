@@ -53,20 +53,13 @@ class RemoteAcceleratorDevice:
 
 	def _register_python_hooks(self):
 		"""Register Python hooks to intercept operations and create LazyTensors."""
-		# Import here to avoid circular imports
-		from .lazy_tensor import LazyTensor
-		from .dispatcher import create_lazy_tensor_for_device_op
-		
-		# Register tensor creation hook
-		def tensor_creation_hook(op_name, *args, **kwargs):
-			"""Hook for tensor creation operations on remote_accelerator."""
-			if any(isinstance(arg, torch.Tensor) and arg.device.type == "remote_accelerator" 
-			       for arg in args if hasattr(arg, 'device')):
-				return create_lazy_tensor_for_device_op(op_name, args, kwargs)
+		# For Phase 1, torch.library registrations handle interception.
+		# We keep a lightweight placeholder to maintain API compatibility
+		# without importing the enhanced dispatcher (avoids double registration).
+		def _noop_hook(*_args, **_kwargs):  # noqa: D401
+			"""No-op hook; interception handled via torch.library impls."""
 			return None
-		
-		# Store hook for potential cleanup
-		self._tensor_creation_hook = tensor_creation_hook
+		self._tensor_creation_hook = _noop_hook
 
 	@classmethod
 	def get_device(cls, index: int = 0) -> "RemoteAcceleratorDevice":

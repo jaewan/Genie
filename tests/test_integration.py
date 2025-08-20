@@ -1,3 +1,58 @@
+import os
+import torch
+
+import genie
+from genie.core.device import RemoteAcceleratorDevice
+from genie.core.lazy_tensor import LazyTensor
+from genie.core.graph import GraphBuilder
+
+
+def setup_module(module):  # noqa: D401
+	"""Ensure lazy mode is enabled for tests."""
+	genie.set_lazy_mode(True)
+	os.environ["GENIE_ENABLE_META_INFER"] = "1"
+
+
+def test_device_registration():
+	device = RemoteAcceleratorDevice.get_device(0)
+	assert str(device) == "remote_accelerator:0"
+
+	# Create tensor on custom device
+	x = torch.randn(10, 10, device="remote_accelerator:0")
+	assert isinstance(x, LazyTensor)
+	assert x.metadata.operation_type == "aten::randn"
+	assert tuple(x.metadata.tensor_shape) == (10, 10)
+
+
+def test_operation_interception():
+	x = torch.randn(10, 10, device="remote_accelerator:0")
+	y = torch.randn(10, 10, device="remote_accelerator:0")
+	z = x + y  # Should create new LazyTensor via LazyTensor.__add__
+	assert isinstance(z, LazyTensor)
+	assert z.operation == "aten::add"
+	assert len(z.inputs) == 2
+
+
+def test_materialization():
+	x = torch.randn(10, 10, device="remote_accelerator:0")
+	y = x.cpu()  # Should trigger materialization
+	assert isinstance(y, torch.Tensor)
+	assert y.device.type == "cpu"
+
+
+def test_graph_construction():
+	# Reset thread-local builder to avoid cross-test pollution
+	# (by creating a new LazyTensor we implicitly add nodes to current graph)
+	x = torch.randn(10, 10, device="remote_accelerator:0")
+	y = torch.randn(10, 10, device="remote_accelerator:0")
+	z = x @ y  # Matrix multiplication
+	w = z + x  # Addition
+
+	graph = GraphBuilder.current().get_graph()
+	assert len(graph.nodes) >= 2
+	order = graph.topological_sort()
+	assert len(order) > 0
+
 import torch
 import pytest
 

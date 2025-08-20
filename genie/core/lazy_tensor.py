@@ -250,6 +250,10 @@ class LazyTensor:
 		"""Convert to numpy (triggers materialization)."""
 		return self.materialize().numpy()
 
+	# Printing should not force a full tensor dump; keep representation light
+	def __format__(self, format_spec: str) -> str:  # noqa: D401
+		return self.__repr__()
+
 	def size(self, dim: Optional[int] = None):  # noqa: ANN201
 		"""Get tensor size."""
 		if self.shape is not None:
@@ -297,13 +301,88 @@ class LazyTensor:
 	def tanh(self):  # noqa: ANN201
 		return LazyTensor("aten::tanh", [self])
 
+	# Common tensor methods that should create new LazyTensors
+	def unsqueeze(self, dim: int):  # noqa: ANN201
+		return LazyTensor("aten::unsqueeze", [self, dim])
+	
+	def squeeze(self, dim: Optional[int] = None):  # noqa: ANN201
+		if dim is None:
+			return LazyTensor("aten::squeeze", [self])
+		return LazyTensor("aten::squeeze", [self, dim])
+	
+	def reshape(self, *shape):  # noqa: ANN201
+		return LazyTensor("aten::reshape", [self, shape])
+	
+	def view(self, *shape):  # noqa: ANN201
+		return LazyTensor("aten::view", [self, shape])
+	
+	def transpose(self, dim0: int, dim1: int):  # noqa: ANN201
+		return LazyTensor("aten::transpose", [self, dim0, dim1])
+	
+	def permute(self, *dims):  # noqa: ANN201
+		return LazyTensor("aten::permute", [self, dims])
+	
+	def sum(self, dim=None, keepdim=False, dtype=None):  # noqa: ANN201
+		return LazyTensor("aten::sum", [self], {"dim": dim, "keepdim": keepdim, "dtype": dtype})
+	
+	def mean(self, dim=None, keepdim=False, dtype=None):  # noqa: ANN201
+		return LazyTensor("aten::mean", [self], {"dim": dim, "keepdim": keepdim, "dtype": dtype})
+	
+	def max(self, dim=None, keepdim=False):  # noqa: ANN201
+		return LazyTensor("aten::max", [self], {"dim": dim, "keepdim": keepdim})
+	
+	def abs(self):  # noqa: ANN201
+		return LazyTensor("aten::abs", [self])
+	
+	def exp(self):  # noqa: ANN201
+		return LazyTensor("aten::exp", [self])
+	
+	def log(self):  # noqa: ANN201
+		return LazyTensor("aten::log", [self])
+	
+	def sin(self):  # noqa: ANN201
+		return LazyTensor("aten::sin", [self])
+	
+	def cos(self):  # noqa: ANN201
+		return LazyTensor("aten::cos", [self])
+	
+	def sqrt(self):  # noqa: ANN201
+		return LazyTensor("aten::sqrt", [self])
+	
+	def pow(self, exponent):  # noqa: ANN201
+		return LazyTensor("aten::pow", [self, exponent])
+	
+	def clamp(self, min=None, max=None):  # noqa: ANN201
+		return LazyTensor("aten::clamp", [self], {"min": min, "max": max})
+
 	# String representation
 	def __repr__(self) -> str:
 		status = "materialized" if self.materialized else "lazy"
 		return f"LazyTensor(op={self.operation}, shape={self.shape}, dtype={self.dtype}, {status})"
 
 	def __str__(self) -> str:
+		# Optional: print-based materialization (explicit trigger)
+		if os.getenv("GENIE_PRINT_MATERIALIZE", "0") == "1":
+			try:
+				val = self.materialize()
+				return f"LazyTensor(value={val}, shape={tuple(val.shape)}, dtype={val.dtype})"
+			except Exception:
+				pass
 		return self.__repr__()
+
+	# Control-flow triggers (implicit)
+	def __bool__(self) -> bool:  # noqa: D401
+		"""Truthiness triggers materialization to support control flow."""
+		try:
+			val = self.materialize()
+			return bool(val.numel())
+		except Exception:
+			return True
+
+	def __len__(self) -> int:
+		if self.shape is not None and len(self.shape) > 0:
+			return self.shape[0]
+		return int(self.materialize().size(0))
 
 	@property
 	def metadata(self) -> SemanticMetadata:  # type: ignore[override]
@@ -315,5 +394,34 @@ class LazyTensor:
 				device_hint=self.device
 			)
 		return self._metadata
+
+	# PyTorch Function Protocol for comprehensive operation interception
+	@classmethod
+	def __torch_function__(cls, func, types, args=(), kwargs=None):
+		"""Intercept all torch function calls involving LazyTensor.
+		
+		This implements PyTorch's __torch_function__ protocol to automatically
+		capture >95% of operations without manual registration, as per the spec.
+		"""
+		kwargs = kwargs or {}
+		
+		# Extract function name for operation tracking
+		func_name = getattr(func, '__name__', str(func))
+		if hasattr(func, '_schema'):
+			# Use schema name if available (more precise)
+			op_name = str(func._schema).split('(')[0]
+		else:
+			# Fallback to function name
+			op_name = f"aten::{func_name}" if not func_name.startswith("aten::") else func_name
+		
+		# Check if any arguments are LazyTensors
+		has_lazy = any(isinstance(arg, cls) for arg in args) or any(isinstance(v, cls) for v in kwargs.values())
+		
+		if has_lazy:
+			# Create new LazyTensor for this operation
+			return cls(operation=op_name, inputs=list(args), kwargs=kwargs)
+		else:
+			# No LazyTensors involved, execute normally
+			return func(*args, **kwargs)
 
 

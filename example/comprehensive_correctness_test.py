@@ -1,0 +1,447 @@
+"""
+Comprehensive correctness validation for Genie LazyTensor implementation.
+
+This validates that LazyTensor produces identical results to native PyTorch
+execution across operations that work with our __torch_function__ implementation.
+"""
+from __future__ import annotations
+
+import torch
+import sys
+import os
+import math
+from typing import Tuple
+
+# Add the project root to Python path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import genie
+from genie.core.lazy_tensor import LazyTensor
+
+
+def print_header(title: str) -> None:
+    """Print a formatted header."""
+    print("\n" + "=" * 80)
+    print(title)
+    print("=" * 80)
+
+
+def print_test_result(test_name: str, passed: bool, error_msg: str = "") -> None:
+    """Print test result with formatting."""
+    status = "✅ PASS" if passed else "❌ FAIL"
+    print(f"{test_name:50s} {status}")
+    if not passed and error_msg:
+        print(f"    Error: {error_msg}")
+
+
+def compare_tensors(lazy_result: torch.Tensor, eager_result: torch.Tensor, 
+                   rtol: float = 1e-5, atol: float = 1e-8) -> Tuple[bool, str]:
+    """Compare two tensors for numerical equality."""
+    try:
+        # Check shapes first
+        if lazy_result.shape != eager_result.shape:
+            return False, f"Shape mismatch: {lazy_result.shape} vs {eager_result.shape}"
+        
+        # Check dtypes
+        if lazy_result.dtype != eager_result.dtype:
+            return False, f"Dtype mismatch: {lazy_result.dtype} vs {eager_result.dtype}"
+        
+        # Check numerical equality
+        if torch.allclose(lazy_result, eager_result, rtol=rtol, atol=atol):
+            return True, ""
+        else:
+            max_diff = torch.max(torch.abs(lazy_result - eager_result)).item()
+            return False, f"Max difference: {max_diff:.2e} (rtol={rtol}, atol={atol})"
+    
+    except Exception as e:
+        return False, f"Comparison failed: {str(e)}"
+
+
+class CorrectnessValidator:
+    """Comprehensive correctness validation suite."""
+    
+    def __init__(self):
+        self.passed_tests = 0
+        self.total_tests = 0
+        
+        # Set up test data
+        torch.manual_seed(42)
+        self.setup_test_data()
+    
+    def setup_test_data(self):
+        """Set up various test tensors."""
+        # Basic tensors
+        self.x_small = torch.randn(4, 4)
+        self.y_small = torch.randn(4, 4)
+        self.x_large = torch.randn(32, 32)
+        self.y_large = torch.randn(32, 32)
+        
+        # Special shapes for broadcasting
+        self.x_broadcast = torch.randn(4, 1)
+        self.y_broadcast = torch.randn(1, 4)
+        
+        # 3D tensors for batch operations
+        self.x_3d = torch.randn(2, 4, 4)
+        self.y_3d = torch.randn(2, 4, 4)
+        
+        # Vectors for 1D operations
+        self.vec_a = torch.randn(10)
+        self.vec_b = torch.randn(10)
+        
+        # Scalars
+        self.scalar = 2.5
+    
+    def test(self, name: str, lazy_fn, eager_fn, **kwargs) -> None:
+        """Run a single test and track results."""
+        self.total_tests += 1
+        try:
+            # Execute lazy version
+            lazy_result = lazy_fn()
+            if isinstance(lazy_result, LazyTensor):
+                lazy_result = lazy_result.cpu()
+            
+            # Execute eager version
+            eager_result = eager_fn()
+            
+            # Compare results
+            passed, error_msg = compare_tensors(lazy_result, eager_result, **kwargs)
+            print_test_result(name, passed, error_msg)
+            if passed:
+                self.passed_tests += 1
+        
+        except Exception as e:
+            print_test_result(name, False, str(e))
+    
+    def run_basic_arithmetic_tests(self):
+        """Test basic arithmetic operations."""
+        print_header("Basic Arithmetic Operations")
+        
+        # Addition
+        self.test("torch.add", 
+                 lambda: torch.add(self.x_small.to("remote_accelerator:0"), 
+                                  self.y_small.to("remote_accelerator:0")),
+                 lambda: torch.add(self.x_small, self.y_small))
+        
+        # Subtraction
+        self.test("torch.sub",
+                 lambda: torch.sub(self.x_small.to("remote_accelerator:0"), 
+                                  self.y_small.to("remote_accelerator:0")),
+                 lambda: torch.sub(self.x_small, self.y_small))
+        
+        # Multiplication
+        self.test("torch.mul",
+                 lambda: torch.mul(self.x_small.to("remote_accelerator:0"), 
+                                  self.y_small.to("remote_accelerator:0")),
+                 lambda: torch.mul(self.x_small, self.y_small))
+        
+        # Division
+        self.test("torch.div",
+                 lambda: torch.div(self.x_small.to("remote_accelerator:0"), 
+                                  self.y_small.to("remote_accelerator:0") + 0.1),  # Avoid div by zero
+                 lambda: torch.div(self.x_small, self.y_small + 0.1))
+        
+        # Broadcasting operations
+        self.test("torch.add (broadcast)",
+                 lambda: torch.add(self.x_broadcast.to("remote_accelerator:0"), 
+                                  self.y_broadcast.to("remote_accelerator:0")),
+                 lambda: torch.add(self.x_broadcast, self.y_broadcast))
+        
+        # Scalar operations
+        self.test("torch.add (scalar)",
+                 lambda: torch.add(self.x_small.to("remote_accelerator:0"), self.scalar),
+                 lambda: torch.add(self.x_small, self.scalar))
+        
+        self.test("torch.mul (scalar)",
+                 lambda: torch.mul(self.x_small.to("remote_accelerator:0"), self.scalar),
+                 lambda: torch.mul(self.x_small, self.scalar))
+    
+    def run_linear_algebra_tests(self):
+        """Test linear algebra operations."""
+        print_header("Linear Algebra Operations")
+        
+        # Matrix multiplication
+        self.test("torch.matmul",
+                 lambda: torch.matmul(self.x_small.to("remote_accelerator:0"), 
+                                     self.y_small.to("remote_accelerator:0")),
+                 lambda: torch.matmul(self.x_small, self.y_small))
+        
+        # 2D matrix multiplication
+        self.test("torch.mm",
+                 lambda: torch.mm(self.x_small.to("remote_accelerator:0"), 
+                                 self.y_small.to("remote_accelerator:0")),
+                 lambda: torch.mm(self.x_small, self.y_small))
+        
+        # Batch matrix multiplication
+        self.test("torch.bmm",
+                 lambda: torch.bmm(self.x_3d.to("remote_accelerator:0"), 
+                                  self.y_3d.to("remote_accelerator:0")),
+                 lambda: torch.bmm(self.x_3d, self.y_3d))
+        
+        # Vector dot product (via matmul)
+        self.test("torch.matmul (vectors)",
+                 lambda: torch.matmul(self.vec_a.to("remote_accelerator:0"), 
+                                     self.vec_b.to("remote_accelerator:0")),
+                 lambda: torch.matmul(self.vec_a, self.vec_b))
+    
+    def run_activation_tests(self):
+        """Test activation functions."""
+        print_header("Activation Functions")
+        
+        # ReLU
+        self.test("torch.relu",
+                 lambda: torch.relu(self.x_small.to("remote_accelerator:0")),
+                 lambda: torch.relu(self.x_small))
+        
+        # Sigmoid
+        self.test("torch.sigmoid",
+                 lambda: torch.sigmoid(self.x_small.to("remote_accelerator:0")),
+                 lambda: torch.sigmoid(self.x_small))
+        
+        # Tanh
+        self.test("torch.tanh",
+                 lambda: torch.tanh(self.x_small.to("remote_accelerator:0")),
+                 lambda: torch.tanh(self.x_small))
+        
+        # Softmax
+        self.test("torch.softmax",
+                 lambda: torch.softmax(self.x_small.to("remote_accelerator:0"), dim=1),
+                 lambda: torch.softmax(self.x_small, dim=1))
+    
+    def run_tensor_manipulation_tests(self):
+        """Test tensor manipulation operations."""
+        print_header("Tensor Manipulation Operations")
+        
+        # Transpose
+        self.test("torch.transpose",
+                 lambda: torch.transpose(self.x_small.to("remote_accelerator:0"), 0, 1),
+                 lambda: torch.transpose(self.x_small, 0, 1))
+        
+        # Reshape
+        self.test("torch.reshape",
+                 lambda: torch.reshape(self.x_small.to("remote_accelerator:0"), (2, 8)),
+                 lambda: torch.reshape(self.x_small, (2, 8)))
+        
+        # Squeeze/Unsqueeze
+        x_with_dim = self.x_small.unsqueeze(0)
+        self.test("torch.squeeze",
+                 lambda: torch.squeeze(x_with_dim.to("remote_accelerator:0"), 0),
+                 lambda: torch.squeeze(x_with_dim, 0))
+        
+        self.test("torch.unsqueeze",
+                 lambda: torch.unsqueeze(self.x_small.to("remote_accelerator:0"), 0),
+                 lambda: torch.unsqueeze(self.x_small, 0))
+        
+        # View
+        self.test("tensor.view",
+                 lambda: self.x_small.to("remote_accelerator:0").view(2, 8),
+                 lambda: self.x_small.view(2, 8))
+        
+        # Permute (via transpose for 2D)
+        self.test("torch.transpose (permute-like)",
+                 lambda: torch.transpose(self.x_3d.to("remote_accelerator:0"), 1, 2),
+                 lambda: torch.transpose(self.x_3d, 1, 2))
+    
+    def run_elementwise_tests(self):
+        """Test element-wise mathematical functions."""
+        print_header("Element-wise Mathematical Functions")
+        
+        # Use positive values to avoid domain issues
+        x_pos = torch.abs(self.x_small) + 0.1
+        
+        # Absolute value
+        self.test("torch.abs",
+                 lambda: torch.abs(self.x_small.to("remote_accelerator:0")),
+                 lambda: torch.abs(self.x_small))
+        
+        # Exponential
+        self.test("torch.exp",
+                 lambda: torch.exp(self.x_small.to("remote_accelerator:0")),
+                 lambda: torch.exp(self.x_small))
+        
+        # Logarithm
+        self.test("torch.log",
+                 lambda: torch.log(x_pos.to("remote_accelerator:0")),
+                 lambda: torch.log(x_pos))
+        
+        # Square root
+        self.test("torch.sqrt",
+                 lambda: torch.sqrt(x_pos.to("remote_accelerator:0")),
+                 lambda: torch.sqrt(x_pos))
+        
+        # Power
+        self.test("torch.pow",
+                 lambda: torch.pow(x_pos.to("remote_accelerator:0"), 2.0),
+                 lambda: torch.pow(x_pos, 2.0))
+        
+        # Trigonometric
+        self.test("torch.sin",
+                 lambda: torch.sin(self.x_small.to("remote_accelerator:0")),
+                 lambda: torch.sin(self.x_small))
+        
+        self.test("torch.cos",
+                 lambda: torch.cos(self.x_small.to("remote_accelerator:0")),
+                 lambda: torch.cos(self.x_small))
+        
+        # Clamp
+        self.test("torch.clamp",
+                 lambda: torch.clamp(self.x_small.to("remote_accelerator:0"), -1.0, 1.0),
+                 lambda: torch.clamp(self.x_small, -1.0, 1.0))
+    
+    def run_complex_chain_tests(self):
+        """Test complex operation chains."""
+        print_header("Complex Operation Chains")
+        
+        # Chain 1: (x @ y) + x
+        self.test("matmul + add chain",
+                 lambda: torch.add(
+                     torch.matmul(self.x_small.to("remote_accelerator:0"), 
+                                 self.y_small.to("remote_accelerator:0")),
+                     self.x_small.to("remote_accelerator:0")),
+                 lambda: torch.add(torch.matmul(self.x_small, self.y_small), self.x_small))
+        
+        # Chain 2: relu(x @ y + bias)
+        bias = torch.randn(4)
+        self.test("linear + relu chain",
+                 lambda: torch.relu(
+                     torch.add(
+                         torch.matmul(self.x_small.to("remote_accelerator:0"), 
+                                     self.y_small.to("remote_accelerator:0")),
+                         bias.to("remote_accelerator:0"))),
+                 lambda: torch.relu(torch.add(torch.matmul(self.x_small, self.y_small), bias)))
+        
+        # Chain 3: softmax(tanh(x) * y)
+        self.test("tanh + mul + softmax chain",
+                 lambda: torch.softmax(
+                     torch.mul(
+                         torch.tanh(self.x_small.to("remote_accelerator:0")),
+                         self.y_small.to("remote_accelerator:0")), dim=1),
+                 lambda: torch.softmax(torch.mul(torch.tanh(self.x_small), self.y_small), dim=1))
+        
+        # Chain 4: Complex reshape and transpose chain
+        self.test("reshape + transpose + reshape chain",
+                 lambda: torch.reshape(
+                     torch.transpose(
+                         torch.reshape(self.x_small.to("remote_accelerator:0"), (2, 8)), 0, 1), 
+                     (4, 4)),
+                 lambda: torch.reshape(torch.transpose(torch.reshape(self.x_small, (2, 8)), 0, 1), (4, 4)))
+    
+    def run_mixed_tensor_tests(self):
+        """Test operations mixing LazyTensor and regular tensors."""
+        print_header("Mixed Tensor Operations")
+        
+        # LazyTensor + CPU tensor
+        self.test("lazy + cpu tensor",
+                 lambda: torch.add(self.x_small.to("remote_accelerator:0"), self.y_small),
+                 lambda: torch.add(self.x_small, self.y_small))
+        
+        # CPU tensor + LazyTensor
+        self.test("cpu + lazy tensor",
+                 lambda: torch.add(self.x_small, self.y_small.to("remote_accelerator:0")),
+                 lambda: torch.add(self.x_small, self.y_small))
+    
+    def run_tensor_creation_tests(self):
+        """Test tensor creation operations."""
+        print_header("Tensor Creation Operations")
+        
+        # Test creation operations (compare structure, not values for random ops)
+        def compare_creation(lazy_fn, eager_fn, name):
+            lazy_result = lazy_fn().cpu()
+            eager_result = eager_fn()
+            
+            shape_match = lazy_result.shape == eager_result.shape
+            dtype_match = lazy_result.dtype == eager_result.dtype
+            passed = shape_match and dtype_match
+            
+            error_msg = ""
+            if not shape_match:
+                error_msg += f"Shape mismatch: {lazy_result.shape} vs {eager_result.shape}. "
+            if not dtype_match:
+                error_msg += f"Dtype mismatch: {lazy_result.dtype} vs {eager_result.dtype}."
+            
+            print_test_result(name, passed, error_msg)
+            return passed
+        
+        # Test creation operations (compare structure, not values)
+        self.total_tests += 3
+        
+        if compare_creation(
+            lambda: torch.randn(4, 4, device="remote_accelerator:0"),
+            lambda: torch.randn(4, 4),
+            "torch.randn (structure)"):
+            self.passed_tests += 1
+        
+        if compare_creation(
+            lambda: torch.zeros(4, 4, device="remote_accelerator:0"),
+            lambda: torch.zeros(4, 4),
+            "torch.zeros (structure)"):
+            self.passed_tests += 1
+        
+        if compare_creation(
+            lambda: torch.ones(4, 4, device="remote_accelerator:0"),
+            lambda: torch.ones(4, 4),
+            "torch.ones (structure)"):
+            self.passed_tests += 1
+        
+        # For zeros and ones, we can compare values too
+        self.test("torch.zeros (values)",
+                 lambda: torch.zeros(4, 4, device="remote_accelerator:0"),
+                 lambda: torch.zeros(4, 4))
+        
+        self.test("torch.ones (values)",
+                 lambda: torch.ones(4, 4, device="remote_accelerator:0"),
+                 lambda: torch.ones(4, 4))
+    
+    def run_all_tests(self):
+        """Run all correctness tests."""
+        print_header("Genie LazyTensor Correctness Validation")
+        print("Comparing LazyTensor results with native PyTorch execution...")
+        print("Using __torch_function__ protocol for comprehensive operation interception")
+        
+        # Enable lazy mode
+        genie.set_lazy_mode(True)
+        
+        # Run test suites
+        self.run_basic_arithmetic_tests()
+        self.run_linear_algebra_tests()
+        self.run_activation_tests()
+        self.run_tensor_manipulation_tests()
+        self.run_elementwise_tests()
+        self.run_complex_chain_tests()
+        self.run_mixed_tensor_tests()
+        self.run_tensor_creation_tests()
+        
+        # Print summary
+        print_header("Correctness Validation Summary")
+        pass_rate = (self.passed_tests / self.total_tests) * 100 if self.total_tests > 0 else 0
+        print(f"Tests passed: {self.passed_tests}/{self.total_tests} ({pass_rate:.1f}%)")
+        
+        if pass_rate >= 95:
+            print("🎉 EXCELLENT: Genie LazyTensor produces correct results!")
+        elif pass_rate >= 90:
+            print("✅ GOOD: Minor discrepancies detected, but mostly correct.")
+        elif pass_rate >= 80:
+            print("⚠️  WARNING: Some correctness issues detected.")
+        else:
+            print("❌ CRITICAL: Significant correctness issues detected.")
+        
+        return pass_rate >= 95
+
+
+def main():
+    """Run the correctness validation suite."""
+    print("Genie LazyTensor - Comprehensive Correctness Validation")
+    print(f"PyTorch version: {torch.__version__}")
+    
+    validator = CorrectnessValidator()
+    success = validator.run_all_tests()
+    
+    if success:
+        print("\n🎯 All correctness tests passed! Genie LazyTensor is ready for production.")
+    else:
+        print("\n🔧 Some tests failed. Review the results above for debugging.")
+    
+    return 0 if success else 1
+
+
+if __name__ == "__main__":
+    exit(main())

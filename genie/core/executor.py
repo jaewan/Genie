@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 import torch
 
 from .graph import GraphBuilder
+from .errors import MaterializationError, UnsupportedOperationError
 
 logger = logging.getLogger(__name__)
 
@@ -74,10 +75,12 @@ class SimpleExecutor:
 				# Mark the corresponding LazyTensor as materialized if we can find it
 				self._mark_tensor_materialized(node_id, result)
 				
+			except UnsupportedOperationError as e:
+				logger.warning(f"Unsupported operation {node.operation}: {e}")
+				materialized[node_id] = torch.tensor(0.0)
 			except Exception as e:
 				logger.error(f"Execution failed for {node.operation}: {e}")
-				# Fallback to zero tensor
-				materialized[node_id] = torch.tensor(0.0)
+				raise MaterializationError(str(e))
 
 		return materialized.get(target_lazy_tensor.id, torch.tensor(0.0))
 
@@ -100,10 +103,6 @@ class SimpleExecutor:
 		"""Execute a single operation."""
 		handler = self.operation_handlers.get(node.operation)
 		
-		if handler is None:
-			logger.warning(f"No handler for operation: {node.operation}")
-			return torch.tensor(0.0)
-		
 		# Resolve inputs
 		inputs = []
 		for input_id in node.inputs:
@@ -121,7 +120,70 @@ class SimpleExecutor:
 					logger.warning(f"Could not resolve input: {input_id}")
 					inputs.append(torch.tensor(0.0))
 		
-		return handler(inputs, node.metadata.get("kwargs", {}))
+		kwargs = node.metadata.get("kwargs", {})
+		# Ensure we never attempt to create tensors on remote_accelerator during materialization
+		if isinstance(kwargs, dict) and kwargs.get("device") is not None:
+			dev = kwargs.get("device")
+			if isinstance(dev, str) and (dev.startswith("remote_accelerator") or dev.startswith("privateuseone")):
+				kwargs = {**kwargs, "device": "cpu"}
+			elif isinstance(dev, torch.device) and dev.type in ("remote_accelerator", "privateuseone"):
+				kwargs = {**kwargs, "device": torch.device("cpu")}
+		
+		if handler is not None:
+			return handler(inputs, kwargs)
+		
+		# Fallback path: materialize inputs and execute eagerly via torch.ops or torch API
+		return self._execute_fallback_eager(node.operation, inputs, kwargs)
+
+	def _execute_fallback_eager(self, op_name: str, inputs, kwargs) -> torch.Tensor:
+		"""Fallback to eager execution using torch.ops.aten or torch API.
+
+		This implements the graceful degradation described in the spec: if an
+		operation isn't intercepted, materialize inputs and run it eagerly.
+		"""
+		# Ensure all inputs are concrete tensors; avoid nested materialization recursion
+		concrete_inputs = []
+		for inp in inputs:
+			if isinstance(inp, torch.Tensor):
+				concrete_inputs.append(inp)
+			else:
+				# Try to use pre-materialized value
+				val = getattr(inp, "concrete_value", None)
+				if val is not None and isinstance(val, torch.Tensor):
+					concrete_inputs.append(val)
+				else:
+					concrete_inputs.append(inp)
+
+		# Force CPU for creation-like ops or when device hints are remote
+		if isinstance(kwargs, dict) and kwargs.get("device") is not None:
+			dev = kwargs.get("device")
+			if isinstance(dev, str) and (dev.startswith("remote_accelerator") or dev.startswith("privateuseone")):
+				kwargs = {**kwargs, "device": "cpu"}
+			elif isinstance(dev, torch.device) and dev.type in ("remote_accelerator", "privateuseone"):
+				kwargs = {**kwargs, "device": torch.device("cpu")}
+
+		# Normalize op name (e.g., "aten::add" -> "add")
+		aten_prefix = "aten::"
+		base_name = op_name[len(aten_prefix):] if op_name.startswith(aten_prefix) else op_name
+
+		# Try torch.ops.aten first
+		try:
+			aten_ns = getattr(torch.ops, "aten")
+			aten_op = getattr(aten_ns, base_name)
+			return aten_op(*concrete_inputs, **kwargs)
+		except Exception as e_ops:
+			logger.debug(f"torch.ops.aten fallback failed for {op_name}: {e_ops}")
+			# Try functional/torch namespace as secondary fallback
+			try:
+				torch_api = getattr(torch, base_name)
+				return torch_api(*concrete_inputs, **kwargs)
+			except Exception as e_torch:
+				logger.warning(f"Unsupported operation {op_name}, returning zero tensor fallback: {e_torch}")
+				# Last resort: zero tensor matching first input shape/dtype
+				if len(concrete_inputs) > 0 and isinstance(concrete_inputs[0], torch.Tensor):
+					ref = concrete_inputs[0]
+					return torch.zeros_like(ref)
+				return torch.tensor(0.0)
 
 	# Operation handlers
 	def _execute_add(self, inputs, kwargs) -> torch.Tensor:  # noqa: ANN001

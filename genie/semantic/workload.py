@@ -30,4 +30,14 @@ class WorkloadProfile:
 	structure: Dict[str, Any] | None = None
 	context: Dict[str, Any] | None = None
 
+	# Optional fields to align with interface-contracts for future phases
+	confidence: float | None = None
+	phases: Dict[str, List[str]] | None = None
+	modalities: Dict[str, Any] | None = None
+	dependencies: List[Any] | None = None
+	compute_intensity: float | None = None
+	memory_bandwidth: float | None = None
+	latency_sensitivity: str | None = None
+	optimization_hints: Dict[str, Any] | None = None
+
 

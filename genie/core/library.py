@@ -37,6 +37,21 @@ class _GenieLibraryWrapper:
 genie_lib = _GenieLibraryWrapper()
 
 
+def _normalize_aten_name(full_op: str) -> str:
+    """Normalize aten op names by stripping overload suffixes.
+
+    Example: "aten::add.Tensor" -> "aten::add"
+             "aten::softmax.int" -> "aten::softmax"
+             "matmul" -> "aten::matmul"
+    """
+    if not full_op.startswith("aten::"):
+        full_op = f"aten::{full_op}"
+    # Split namespace and name
+    _, name = full_op.split("::", 1)
+    base = name.split(".", 1)[0]
+    return f"aten::{base}"
+
+
 def create_lazy_tensor(op_name: str, *args, **kwargs):
     """Create LazyTensor for deferred execution."""
     from .lazy_tensor import LazyTensor
@@ -44,7 +59,8 @@ def create_lazy_tensor(op_name: str, *args, **kwargs):
     # Update operation count
     _operation_stats["operation_count"] += 1
     
-    return LazyTensor(operation=op_name, inputs=list(args), kwargs=kwargs)
+    normalized = _normalize_aten_name(op_name)
+    return LazyTensor(operation=normalized, inputs=list(args), kwargs=kwargs)
 
 
 def register_operation_impl(op_name: str):
@@ -181,6 +197,22 @@ def zeros_impl(*size, dtype: Optional[torch.dtype] = None, device: Optional[torc
 @register_operation_impl("ones")
 def ones_impl(*size, dtype: Optional[torch.dtype] = None, device: Optional[torch.device] = None, requires_grad: bool = False):
     return torch.ones(*size, dtype=dtype, device=device, requires_grad=requires_grad)
+
+
+# Additional creation overloads that PyTorch may call internally
+@register_operation_impl("empty.memory_format")
+def empty_memory_format_impl(size, *, dtype: Optional[torch.dtype] = None, device: Optional[torch.device] = None, pin_memory: bool = False, memory_format=None, requires_grad: bool = False):
+    return create_lazy_tensor("aten::empty", size, dtype=dtype, device=device, pin_memory=pin_memory, memory_format=memory_format, requires_grad=requires_grad)
+
+
+@register_operation_impl("empty_strided")
+def empty_strided_impl(size, stride, *, dtype: Optional[torch.dtype] = None, device: Optional[torch.device] = None, pin_memory: bool = False, requires_grad: bool = False):
+    return create_lazy_tensor("aten::empty_strided", size, stride, dtype=dtype, device=device, pin_memory=pin_memory, requires_grad=requires_grad)
+
+
+@register_operation_impl("empty")
+def empty_impl(size, *, dtype: Optional[torch.dtype] = None, device: Optional[torch.device] = None, pin_memory: bool = False, requires_grad: bool = False):
+    return create_lazy_tensor("aten::empty", size, dtype=dtype, device=device, pin_memory=pin_memory, requires_grad=requires_grad)
 
 
 # Linalg extras
