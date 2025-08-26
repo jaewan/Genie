@@ -21,7 +21,7 @@ setup(
 	],
 	cmdclass={"build_ext": BuildExtension},
 	install_requires=[
-		"torch>=2.1.0,<2.2.0",
+		"torch>=2.2.0,<2.6.0",
 		"numpy>=1.24.0",
 		"networkx>=3.0",
 	],

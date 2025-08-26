@@ -19,12 +19,14 @@ class FXAnalyzer:
 			return StructuralInfo(modules={}, architecture=None, depth=0, width=0, parameters=0)
 		modules = self.extract_module_hierarchy(fx_graph)
 		architecture = self.identify_architecture(fx_graph, modules)
+		parameters = self.count_parameters(fx_graph)
+		depth, width = self._depth_and_width(fx_graph)
 		return StructuralInfo(
 			modules=modules,
 			architecture=architecture,
-			depth=len(list(fx_graph.nodes)),
-			width=max((len(list(n.users)) for n in fx_graph.nodes), default=0),
-			parameters=0,
+			depth=depth,
+			width=width,
+			parameters=parameters,
 		)
 
 	def extract_module_hierarchy(self, fx_graph: fx.Graph) -> Dict[str, Any]:
@@ -85,5 +87,30 @@ class FXAnalyzer:
 		except Exception:
 			logging.getLogger(__name__).debug("FX architecture identification failed", exc_info=True)
 		return None
+
+	def count_parameters(self, fx_graph: fx.Graph) -> int:
+		"""Best-effort parameter count from owning GraphModule if available."""
+		try:
+			# Prefer an attribute on the graph that points to GraphModule
+			gm = getattr(fx_graph, 'owning_module', None)
+			if gm is None:
+				from genie.core.graph import GraphBuilder as _GB
+				gm = getattr(_GB.current(), '_fx_graph', None)
+				gm = getattr(gm, 'module', gm)
+			if gm is None or not hasattr(gm, 'parameters'):
+				return 0
+			return sum(int(p.numel()) for p in gm.parameters())
+		except Exception:
+			logging.getLogger(__name__).debug("Parameter counting failed", exc_info=True)
+			return 0
+
+	def _depth_and_width(self, fx_graph: fx.Graph) -> tuple[int, int]:
+		try:
+			nodes = list(fx_graph.nodes)
+			depth = len(nodes)
+			width = max((len(list(n.users)) for n in nodes), default=0)
+			return depth, width
+		except Exception:
+			return 0, 0
 
 

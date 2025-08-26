@@ -18,7 +18,7 @@ from genie.patterns.matmul_pattern import MatMulPattern, ConvolutionPattern
 from genie.patterns.llm_pattern import LLMAttentionPattern
 from genie.patterns.advanced_patterns import (
     AdvancedLLMPattern, AdvancedVisionPattern, RecSysPattern, MultiModalPattern,
-    get_pattern_performance_stats
+    get_pattern_performance_stats, ResidualBlockPattern
 )
 
 
@@ -42,6 +42,7 @@ class PatternRegistry:
 		self.register_pattern(AdvancedVisionPattern())
 		self.register_pattern(RecSysPattern())
 		self.register_pattern(MultiModalPattern())
+		self.register_pattern(ResidualBlockPattern())
 		
 		# Keep legacy patterns for fallback
 		self.register_pattern(MatMulPattern())

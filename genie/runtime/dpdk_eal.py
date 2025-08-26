@@ -27,19 +27,30 @@ class DpdkLibraries:
 
 
 def load_dpdk() -> DpdkLibraries:
-    # Try common sonames; versioned names vary by distro. Also try monolithic libdpdk.
+    # Try our installed DPDK first, then common system locations
+    dpdk_lib_path = "/opt/dpdk/dpdk-23.11/install/lib/x86_64-linux-gnu"
+    
     eal = _load_first([
-        "librte_eal.so", "librte_eal.so.20", "librte_eal.so.23", "librte_eal.so.23.0",
+        f"{dpdk_lib_path}/librte_eal.so.24.0",
+        f"{dpdk_lib_path}/librte_eal.so.24",
+        f"{dpdk_lib_path}/librte_eal.so",
+        "librte_eal.so", "librte_eal.so.20", "librte_eal.so.23", "librte_eal.so.24",
         "libdpdk.so", "libdpdk.so.20", "libdpdk.so.23", "libdpdk.so.24",
         "/usr/lib/x86_64-linux-gnu/librte_eal.so",
     ])
     mempool = _load_first([
-        "librte_mempool.so", "librte_mempool.so.20", "librte_mempool.so.23", "librte_mempool.so.23.0",
+        f"{dpdk_lib_path}/librte_mempool.so.24.0",
+        f"{dpdk_lib_path}/librte_mempool.so.24",
+        f"{dpdk_lib_path}/librte_mempool.so",
+        "librte_mempool.so", "librte_mempool.so.20", "librte_mempool.so.23", "librte_mempool.so.24",
         "libdpdk.so", "libdpdk.so.20", "libdpdk.so.23", "libdpdk.so.24",
         "/usr/lib/x86_64-linux-gnu/librte_mempool.so",
     ])
     mbuf = _load_first([
-        "librte_mbuf.so", "librte_mbuf.so.20", "librte_mbuf.so.23", "librte_mbuf.so.23.0",
+        f"{dpdk_lib_path}/librte_mbuf.so.24.0",
+        f"{dpdk_lib_path}/librte_mbuf.so.24",
+        f"{dpdk_lib_path}/librte_mbuf.so",
+        "librte_mbuf.so", "librte_mbuf.so.20", "librte_mbuf.so.23", "librte_mbuf.so.24",
         "libdpdk.so", "libdpdk.so.20", "libdpdk.so.23", "libdpdk.so.24",
         "/usr/lib/x86_64-linux-gnu/librte_mbuf.so",
     ])

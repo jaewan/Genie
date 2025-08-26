@@ -30,6 +30,7 @@ class EnhancedDispatcher:
         self.operation_count: int = 0
         self.successful_registrations: Set[str] = set()
         self.failed_registrations: Set[str] = set()
+        self.fallback_capture_count: int = 0
 
     def register_op(self, op_name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """Enhanced operation registration with better error handling."""
@@ -45,13 +46,22 @@ class EnhancedDispatcher:
                     # Fallback to eager execution
                     return self._execute_eagerly(func, args, kwargs)
 
+            import os
+            enable_impl = os.getenv("GENIE_ENABLE_ATEN_IMPL", "0") == "1"
             try:
                 # Try to register with PyTorch dispatcher
                 # Use the working approach from the original implementation
-                torch.library.impl(op_name, "PrivateUse1")(wrapper)
-                self.registered_ops[op_name] = wrapper
-                self.successful_registrations.add(op_name)
-                logger.debug(f"Successfully registered operation: {op_name}")
+                if enable_impl:
+                    torch.library.impl(op_name, "PrivateUse1")(wrapper)
+                    self.registered_ops[op_name] = wrapper
+                    self.successful_registrations.add(op_name)
+                    logger.debug(f"Successfully registered operation: {op_name}")
+                else:
+                    # Skip registration but keep wrapper for unified fallback capture
+                    self.failed_registrations.add(op_name)
+                    self.registered_ops[op_name] = wrapper
+                    self.fallback_ops.add(op_name)
+                    logger.debug(f"Registration disabled, using fallback capture for: {op_name}")
             except Exception as e:
                 logger.debug(f"PyTorch registration failed for {op_name}: {e}")
                 # Store as fallback operation
@@ -92,7 +102,8 @@ class EnhancedDispatcher:
             "fallback_ops": len(self.fallback_ops),
             "operation_count": self.operation_count,
             "lazy_mode": self.lazy_mode,
-            "coverage_percentage": self._calculate_coverage()
+            "coverage_percentage": self._calculate_coverage(),
+            "fallback_capture_count": self.fallback_capture_count,
         }
 
     def _calculate_coverage(self) -> float:
@@ -113,6 +124,14 @@ class EnhancedDispatcher:
     def get_failed_operations(self) -> List[str]:
         """Get list of failed operation registrations."""
         return list(self.failed_registrations)
+
+    # Unified dispatcher fallback surface (used by LazyTensor path)
+    def is_operation_registered(self, op_name: str) -> bool:
+        return op_name in self.registered_ops and op_name in self.successful_registrations
+
+    def record_fallback_capture(self, op_name: str) -> None:
+        self.fallback_ops.add(op_name)
+        self.fallback_capture_count += 1
 
 
 # Create enhanced dispatcher instance

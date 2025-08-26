@@ -17,20 +17,30 @@ class Transport:
     def prepare_for_dma(self, tensor: torch.Tensor) -> torch.Tensor:
         if not isinstance(tensor, torch.Tensor):
             return tensor
-        if tensor.is_pinned():
-            return tensor
-        # If CUDA is not available (CPU-only build), pin_memory is not supported.
+        # Already a CPU pinned tensor
         try:
-            cuda_available = torch.cuda.is_available()
+            if tensor.device.type == "cpu" and getattr(tensor, "is_pinned", lambda: False)():
+                return tensor
         except Exception:
-            cuda_available = False
-        if not cuda_available:
-            return tensor.contiguous()
-        # Pin a contiguous clone for stable DMA mapping
+            pass
+        # If on CUDA, stage into CPU pinned buffer
         try:
-            return tensor.contiguous().pin_memory()
+            if tensor.device.type == "cuda":
+                try:
+                    pinned = torch.empty_like(tensor, device=torch.device("cpu"), pin_memory=True)
+                except Exception:
+                    pinned = torch.empty_like(tensor, device=torch.device("cpu"))
+                try:
+                    pinned.copy_(tensor, non_blocking=False)
+                except Exception:
+                    pinned.copy_(tensor)
+                return pinned
         except Exception:
-            # Graceful fallback for environments without CUDA pinning support
+            pass
+        # CPU but not pinned: try to pin contiguous clone
+        try:
+            return tensor.contiguous().pin_memory()  # type: ignore[attr-defined]
+        except Exception:
             return tensor.contiguous()
 
     async def send_batch(self, requests: list[TransferRequest]) -> list[TransferResult]:
@@ -66,16 +76,29 @@ class PinnedTCPTransport(Transport):
             writer.write(tensor_id_bytes)
             writer.write(request.num_bytes.to_bytes(8, "big"))
             await writer.drain()
-            # Payload would be streamed here. We only send zeros as a stub to avoid
-            # touching user tensors until a server exists.
-            chunk = b"\x00" * min(1 << 20, request.num_bytes)
-            remaining = request.num_bytes
-            while remaining > 0:
-                n = min(remaining, len(chunk))
-                writer.write(chunk[:n])
-                remaining -= n
-                if remaining % (8 << 20) == 0:
-                    await writer.drain()
+            # Stream payload if provided; otherwise send zeros as a stub
+            if request.payload is not None:
+                view = request.payload
+                # Send in 1MB chunks
+                mv = view.cast("B")
+                offset = 0
+                chunk_size = 1 << 20
+                total = request.num_bytes
+                while offset < total:
+                    end = min(offset + chunk_size, total)
+                    writer.write(mv[offset:end])
+                    offset = end
+                    if offset % (8 << 20) == 0:
+                        await writer.drain()
+            else:
+                chunk = b"\x00" * min(1 << 20, request.num_bytes)
+                remaining = request.num_bytes
+                while remaining > 0:
+                    n = min(remaining, len(chunk))
+                    writer.write(chunk[:n])
+                    remaining -= n
+                    if remaining % (8 << 20) == 0:
+                        await writer.drain()
             await writer.drain()
             writer.close()
             try:

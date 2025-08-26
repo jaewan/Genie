@@ -8,35 +8,73 @@ Semantic-driven, framework-level disaggregation for AI accelerators. Phase 1 pro
 - PyTorch 2.1.2
 - Optional (GPU): CUDA 12.1, NVIDIA driver 535+, cuDNN
 
-### Quickstart (CPU)
+### Quickstart (one command)
 
 ```bash
-# Create and activate virtualenv
-python3 -m venv .venv
-source .venv/bin/activate
-
-# Upgrade pip
-pip install --upgrade pip
-
-# Install PyTorch (CPU) and torchvision matching 2.1.2
-pip install torch==2.1.2 torchvision==0.16.2 \
-  --index-url https://download.pytorch.org/whl/cpu
-
-# Dev dependencies (pytest, etc.)
-pip install -r requirements-dev.txt
-
-# Build & install genie (editable)
-pip install -e .
-
-# Validate environment
-python -c "from genie import validate_environment; print('env:', validate_environment(strict=False))"
-
-# Run tests
-pytest -q
-
-# Run example (ResNet-18 based minimal demo)
-PYTHONPATH=$(pwd) python example/resnet18_demo.py
+# CPU-only
+bash setup_gpu_server.sh
+# CUDA 12.1 wheels
+bash setup_gpu_server.sh --pytorch-cuda cu121
+# CUDA 11.8 wheels
+bash setup_gpu_server.sh --pytorch-cuda cu118
 ```
+
+### DPDK Zero-Copy Setup (Advanced)
+
+For high-performance zero-copy tensor transfers using DPDK and GPUDev:
+
+#### 🚨 TEMPORARY: No-IOMMU Development Mode
+
+**Currently running in no-IOMMU mode for development purposes.**
+
+⚠️ **IMPORTANT**: This setup provides DPDK functionality but without memory protection. It's suitable for development and testing but **NOT for production use**.
+
+**To enable full IOMMU support:**
+1. Ask your server administrator to follow instructions in `BIOS_IOMMU_SETUP.md`
+2. After BIOS changes and reboot, run: `sudo ./enable_iommu_mode.sh`
+3. Remove this section from README.md
+
+#### Setup Instructions
+
+1. **Automated Setup** (Recommended):
+```bash
+# Run the automated setup script
+sudo ./setup_dpdk_server.sh
+
+# Or with custom configuration
+cp dpdk_config.template.env dpdk_config.env
+# Edit dpdk_config.env with your settings
+sudo ./setup_dpdk_server.sh --config dpdk_config.env
+```
+
+2. **Enable No-IOMMU Mode** (Current temporary setup):
+```bash
+# Already configured - NIC bound to DPDK in no-IOMMU mode
+# Mellanox ConnectX-5 (0000:18:00.0) → vfio-pci driver
+```
+
+3. **Verify Installation**:
+```bash
+./verify_dpdk_setup.sh
+```
+
+The setup script handles:
+- System dependencies and kernel configuration
+- DPDK 23.11 LTS installation with GPUDev support
+- Hugepage allocation and VFIO setup
+- NIC binding to DPDK drivers (no-IOMMU mode)
+- GPUDirect RDMA configuration
+- Python bindings creation
+- Systemd service for persistence
+
+**Current Status:**
+- ✅ DPDK 23.11 installed with MLX5 and GPUDev support
+- ✅ Mellanox ConnectX-5 bound to DPDK (vfio-pci)
+- ✅ Hugepages allocated (2GB)
+- ⚠️ Running in no-IOMMU mode (temporary)
+- ⚠️ IOMMU disabled (requires BIOS configuration)
+
+See `documents/todos/01-dpdk-setup-tasks.md` for manual setup instructions.
 
 Expected example output (CPU-only):
 
@@ -48,25 +86,9 @@ FX nodes: 7X
 handoff.valid=True
 ```
 
-### Quickstart (CUDA 12.1)
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
-
-# Install PyTorch + CUDA 12.1 binaries
-pip install torch==2.1.2+cu121 torchvision==0.16.2+cu121 \
-  --index-url https://download.pytorch.org/whl/cu121
-
-pip install -r requirements-dev.txt
-pip install -e .
-
-python -c "from genie import validate_environment; print('env:', validate_environment(strict=False))"
-
-pytest -q
-PYTHONPATH=$(pwd) python example/resnet18_demo.py
-```
+Notes:
+- requirements-dev.txt intentionally excludes torch. Torch is installed by the setup script according to `--pytorch-cuda` (cpu|cu121|cu118) using 2.2.2 wheels.
+- The setup script builds C++ extensions in-place, so no editable install is required. If you prefer, you can still run `python setup.py build_ext --inplace` manually.
 
 Note: Phase 1 executes locally (CPU materialization) even when CUDA is available. GPU/remote execution is targeted in later phases.
 

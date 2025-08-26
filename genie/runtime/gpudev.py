@@ -24,7 +24,16 @@ class GpuDevLibs:
 
 
 def load_gpudev() -> GpuDevLibs:
-    lib = _load(["librte_gpudev.so", "librte_gpudev.so.23", "librte_gpudev.so.23.0"])
+    # Try our installed DPDK first, then common system locations
+    dpdk_lib_path = "/opt/dpdk/dpdk-23.11/install/lib/x86_64-linux-gnu"
+    
+    lib = _load([
+        f"{dpdk_lib_path}/librte_gpudev.so.24.0",
+        f"{dpdk_lib_path}/librte_gpudev.so.24",
+        f"{dpdk_lib_path}/librte_gpudev.so",
+        "librte_gpudev.so", "librte_gpudev.so.23", "librte_gpudev.so.24",
+        "/usr/lib/x86_64-linux-gnu/librte_gpudev.so",
+    ])
     return GpuDevLibs(gpudev=lib)
 
 

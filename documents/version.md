@@ -13,15 +13,15 @@ Genie is a semantic-driven framework-level disaggregation system for AI accelera
 # pyproject.toml (modern Python standard)
 [project]
 name = "genie"
-requires-python = ">=3.10,<3.12"
+requires-python = ">=3.10,<3.13"
 dependencies = [
-    "torch>=2.1.0,<2.3.0",  # Pin to minor version range
+    "torch>=2.2.0,<2.6.0",  # Phase 1 validated on 2.2.2
     "numpy>=1.24.0,<2.0.0",
 ]
 
 [tool.poetry.dependencies]  # If using Poetry
 python = "^3.10"
-torch = "~2.1.0"  # Allows 2.1.x but not 2.2.0
+torch = "~2.2.0"  # Allows 2.2.x
 ```
 
 **For C++ Dependencies:**
@@ -32,7 +32,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Find specific versions
-find_package(Torch 2.1.2 REQUIRED)
+find_package(Torch 2.2 REQUIRED)
 ```
 
 ### 2. **Critical Version Decisions for Genie**
@@ -53,9 +53,9 @@ dependencies:
   - pydantic=2.6.*             # Schema validation for metadata/graph export
   
   # PyTorch ecosystem
-  - pytorch=2.1.2  # LTS version with stable extension API
-  - torchvision=0.16.2
-  - pytorch-cuda=12.1  # CUDA 12.1 for H100 support
+  - pytorch=2.2.2
+  - torchvision=0.17.2
+  - pytorch-cuda=12.1  # CUDA 12.1 wheels validated
   - torchdata=0.7.*            # Data pipelines/benchmarks
   
   # Build tools
@@ -104,9 +104,9 @@ KERNEL_MIN="5.15"  # Ubuntu 22.04 LTS kernel
 ### 4. **Detailed Version Requirements**
 
 ````yaml
-# Exact versions for reproducibility
-torch==2.1.2+cu121
-numpy==1.24.4
+# Exact versions for reproducibility (Phase 1 validated)
+torch==2.2.2+cu121  # use +cpu on CPU-only environments
+numpy==1.26.4
 pybind11==2.11.1
 typing-extensions==4.9.0
 networkx==3.3
@@ -136,7 +136,7 @@ FROM nvidia/cuda:12.1.0-devel-ubuntu22.04
 
 # Pin specific versions
 ENV PYTHON_VERSION=3.10.13
-ENV PYTORCH_VERSION=2.1.2
+ENV PYTORCH_VERSION=2.2.2
 ENV DPDK_VERSION=23.11
 ENV CMAKE_VERSION=3.28.1
 
@@ -148,7 +148,7 @@ RUN apt-get update && apt-get install -y \
 
 # Install PyTorch with CUDA support
 RUN pip install torch==${PYTORCH_VERSION}+cu121 \
-    -f https://download.pytorch.org/whl/torch_stable.html
+    --index-url https://download.pytorch.org/whl/cu121
 
 # Build DPDK from source with specific version
 RUN git clone -b v${DPDK_VERSION} https://github.com/DPDK/dpdk.git && \
@@ -162,8 +162,8 @@ RUN git clone -b v${DPDK_VERSION} https://github.com/DPDK/dpdk.git && \
 
 | Component | Version | Rationale | Compatibility Notes |
 |-----------|---------|-----------|-------------------|
-| **Python** | 3.10.x | Stable, good PyTorch support | Not 3.11+ (some C++ extension issues) |
-| **PyTorch** | 2.1.2 | LTS, stable dispatcher API | 2.2+ has breaking extension changes |
+| **Python** | 3.10–3.12 | Stable, validated on 3.12.3 | 3.10 recommended baseline |
+| **PyTorch** | 2.2.2 | Validated dispatcher/extension API | Use matching cu118/cu121 wheels |
 | **CUDA** | 12.1 | H100 support, stable | 12.0 lacks features, 12.2+ less tested |
 | **C++ Std** | C++17 | PyTorch requirement | C++20 not yet required |
 | **GCC** | 11.x | C++17, CUDA compatible | GCC 12+ has CUDA issues |
@@ -181,8 +181,8 @@ from packaging import version
 def check_versions():
     # Check PyTorch version
     torch_ver = version.parse(torch.__version__.split('+')[0])
-    if not (version.parse("2.1.0") <= torch_ver < version.parse("2.2.0")):
-        raise RuntimeError(f"Genie requires PyTorch 2.1.x, got {torch.__version__}")
+    if not (version.parse("2.2.0") <= torch_ver < version.parse("2.6.0")):
+        raise RuntimeError(f"Genie requires PyTorch 2.2.x–2.5.x, got {torch.__version__}")
     
     # Check CUDA version
     if torch.cuda.is_available():
@@ -201,7 +201,7 @@ def check_versions():
 # Pin versions in Makefile for consistency
 
 PYTHON := python3.10
-TORCH_VERSION := 2.1.2
+TORCH_VERSION := 2.2.2
 CUDA_VERSION := 12.1
 DPDK_VERSION := 23.11
 
@@ -229,12 +229,12 @@ jobs:
           # Primary target
           - os: ubuntu-22.04
             python: "3.10"
-            pytorch: "2.1.2"
+            pytorch: "2.2.2"
             cuda: "12.1"
           # Compatibility testing
           - os: ubuntu-22.04
             python: "3.10"
-            pytorch: "2.1.0"  # Minimum supported
+            pytorch: "2.2.0"  # Minimum supported for Phase 1
             cuda: "12.1"
 ````
 
@@ -623,7 +623,7 @@ jobs:
 
 **Key Recommendations:**
 
-1. **Use PyTorch 2.1.2** - LTS release with stable extension APIs and proven CUDA 12.1 compatibility
+1. **Use PyTorch 2.2.2** - Validated with CUDA 12.1 wheels and current extensions
 2. **Pin to Python 3.10.13** - Best compatibility with PyTorch extensions and stable ecosystem
 3. **DPDK 23.11 LTS** - Latest LTS with stable gpudev support and 2-year maintenance window
 4. **CUDA 12.1.1** - H100 Hopper support with stable PyTorch integration

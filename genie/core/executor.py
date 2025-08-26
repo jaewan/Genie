@@ -162,7 +162,15 @@ class SimpleExecutor:
 		kwargs = node.metadata.get("kwargs", {})
 		# Only pass device for creation ops; strip for others to avoid invalid kwargs
 		kwargs = kwargs.copy() if kwargs else {}
-		if node.operation in ("aten::randn", "aten::zeros", "aten::ones"):
+		# Broaden creation ops set
+		aten_prefix = "aten::"
+		base_name = node.operation[len(aten_prefix):] if node.operation.startswith(aten_prefix) else node.operation
+		creation_ops = {
+			"randn", "rand", "randint",
+			"zeros", "ones", "empty", "full", "empty_strided",
+			"arange", "linspace", "logspace",
+		}
+		if base_name in creation_ops:
 			kwargs["device"] = "cpu"
 		else:
 			kwargs.pop("device", None)
@@ -194,7 +202,11 @@ class SimpleExecutor:
 
 		# Only pass device for creation ops; strip for others to avoid invalid kwargs
 		kwargs = kwargs.copy() if kwargs else {}
-		creation_ops = {"randn", "zeros", "ones"}
+		creation_ops = {
+			"randn", "rand", "randint",
+			"zeros", "ones", "empty", "full", "empty_strided",
+			"arange", "linspace", "logspace",
+		}
 		aten_prefix = "aten::"
 		base_name = op_name[len(aten_prefix):] if op_name.startswith(aten_prefix) else op_name
 		if base_name in creation_ops:

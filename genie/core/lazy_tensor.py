@@ -70,6 +70,25 @@ class LazyTensor:
 		self.materialized = False
 		self.concrete_value: Optional[torch.Tensor] = None
 		
+		# Optional debug logging for intercepted ops
+		if os.getenv("GENIE_LOG_INTERCEPTS", "0") == "1":
+			try:
+				in_shapes = []
+				for arg in inputs:
+					shape = getattr(arg, "shape", None)
+					in_shapes.append(tuple(shape) if shape is not None else None)
+				logger.info(f"[Genie] Intercepted {self.operation} -> id={self.id}, in_shapes={in_shapes}, out_shape={self.shape}")
+			except Exception:
+				logger.info(f"[Genie] Intercepted {self.operation} -> id={self.id}")
+
+		# Notify enhanced dispatcher of fallback capture when op isn't registered
+		try:
+			from .enhanced_dispatcher import enhanced_dispatcher
+			if not enhanced_dispatcher.is_operation_registered(self.operation):
+				enhanced_dispatcher.record_fallback_capture(self.operation)
+		except Exception:
+			pass
+
 		# Register with graph builder
 		from .graph import GraphBuilder
 		GraphBuilder.current().add_tensor(self)
@@ -359,6 +378,30 @@ class LazyTensor:
 	
 	def max(self, dim=None, keepdim=False):  # noqa: ANN201
 		return LazyTensor("aten::max", [self], {"dim": dim, "keepdim": keepdim})
+	
+	def prod(self, dim=None, keepdim=False, dtype=None):  # noqa: ANN201
+		return LazyTensor("aten::prod", [self], {"dim": dim, "keepdim": keepdim, "dtype": dtype})
+
+	def var(self, dim=None, keepdim=False, unbiased=True):  # noqa: ANN201
+		return LazyTensor("aten::var", [self], {"dim": dim, "keepdim": keepdim, "unbiased": unbiased})
+
+	def std(self, dim=None, keepdim=False, unbiased=True):  # noqa: ANN201
+		return LazyTensor("aten::std", [self], {"dim": dim, "keepdim": keepdim, "unbiased": unbiased})
+
+	def all(self, dim=None, keepdim=False):  # noqa: ANN201
+		return LazyTensor("aten::all", [self], {"dim": dim, "keepdim": keepdim})
+
+	def any(self, dim=None, keepdim=False):  # noqa: ANN201
+		return LazyTensor("aten::any", [self], {"dim": dim, "keepdim": keepdim})
+
+	def argmax(self, dim=None, keepdim=False):  # noqa: ANN201
+		return LazyTensor("aten::argmax", [self], {"dim": dim, "keepdim": keepdim})
+
+	def argmin(self, dim=None, keepdim=False):  # noqa: ANN201
+		return LazyTensor("aten::argmin", [self], {"dim": dim, "keepdim": keepdim})
+
+	def softmax(self, dim, dtype=None):  # noqa: ANN201
+		return LazyTensor("aten::softmax", [self], {"dim": dim, "dtype": dtype})
 	
 	def abs(self):  # noqa: ANN201
 		return LazyTensor("aten::abs", [self])

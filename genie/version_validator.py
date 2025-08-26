@@ -1,6 +1,10 @@
 import warnings
 from packaging import version
-import torch
+try:
+    import torch
+    HAS_TORCH = True
+except ImportError:
+    HAS_TORCH = False
 import subprocess
 
 
@@ -8,10 +12,14 @@ def validate_environment(strict: bool = False) -> bool:
 	"""Validate core runtime versions for Genie Phase 1."""
 	success = True
 
+	if not HAS_TORCH:
+		warnings.warn("PyTorch not installed. Some features may be unavailable.")
+		return not strict
+	
 	# PyTorch version
 	torch_ver = version.parse(torch.__version__.split("+")[0])
-	if not (version.parse("2.1.0") <= torch_ver < version.parse("2.2.0")):
-		warnings.warn(f"Genie targets PyTorch 2.1.x; found {torch.__version__}")
+	if not (version.parse("2.2.0") <= torch_ver < version.parse("2.6.0")):
+		warnings.warn(f"Genie targets PyTorch 2.2.x–2.5.x; found {torch.__version__}")
 		success = False
 
 	# CUDA availability is optional in Phase 1

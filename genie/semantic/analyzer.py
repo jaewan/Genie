@@ -87,4 +87,30 @@ class SemanticAnalyzer:
 			"pattern_stats": self.pattern_registry.get_performance_report()
 		}
 
+	def generate_stub_plan(self, graph: ComputationGraph, profile: "WorkloadProfile") -> "ExecutionPlan":
+		"""Emit a minimal ExecutionPlan with placement hints.
+
+		This is a Phase-1 stub that wraps the entire graph into a single fragment
+		with conservative placement based on workload type.
+		"""
+		from genie.semantic.workload import ExecutionPlan, PlanFragment, WorkloadType
+		fragment_id = "fragment_0"
+		fragment = PlanFragment(fragment_id=fragment_id, subgraph=graph, inputs=[], outputs=[])
+		# Simple placement heuristic
+		placement_device = {
+			WorkloadType.VISION: "remote_accelerator:0",
+			WorkloadType.LLM: "remote_accelerator:0",
+			WorkloadType.MULTIMODAL: "remote_accelerator:0",
+			WorkloadType.RECSYS: "cpu",
+			WorkloadType.UNKNOWN: "cpu",
+		}.get(profile.workload_type, "cpu")
+		plan = ExecutionPlan(
+			plan_id="plan_stub_0",
+			fragments=[fragment],
+			placement={fragment_id: placement_device},
+			transfers=[],
+			feature_flags={"overlap_io": False, "micro_batching": False},
+		)
+		return plan
+
 

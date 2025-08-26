@@ -47,20 +47,70 @@ class TransferRequest:
     tensor_id: str
     num_bytes: int
     destination: RemoteAccelerator
+    # Optional payload for data-plane transfers; may carry a memoryview over
+    # CPU (pinned) storage to enable zero-copy framing on TCP/RDMA paths.
+    payload: Optional[memoryview] = None
+    # Keep-alive owner to ensure the underlying storage isn't GC'd while in-flight
+    payload_owner: Optional[object] = None
 
     @staticmethod
     def from_tensor(tensor: Any, destination: RemoteAccelerator) -> "TransferRequest":  # noqa: ANN401
         import torch
 
         if isinstance(tensor, torch.Tensor):
-            num_bytes = tensor.element_size() * tensor.nelement()
-            tensor_id = str(id(tensor))
+            # Stage to CPU pinned memory when coming from CUDA
+            try:
+                device_type = tensor.device.type  # type: ignore[attr-defined]
+            except Exception:
+                device_type = "cpu"
+
+            owner: Optional[object] = None
+            cpu_tensor = tensor
+            if device_type == "cuda":
+                # Create a pinned CPU buffer and copy synchronously
+                try:
+                    pinned = torch.empty_like(tensor, device=torch.device("cpu"), pin_memory=True)
+                except Exception:
+                    pinned = torch.empty_like(tensor, device=torch.device("cpu"))
+                try:
+                    pinned.copy_(tensor, non_blocking=False)
+                except Exception:
+                    pinned.copy_(tensor)
+                cpu_tensor = pinned
+                owner = pinned
+            else:
+                # Ensure contiguous CPU storage; attempt to pin for faster I/O when possible
+                try:
+                    cpu_tensor = tensor.contiguous()
+                    if hasattr(cpu_tensor, "pin_memory"):
+                        cpu_tensor = cpu_tensor.pin_memory()
+                except Exception:
+                    cpu_tensor = tensor.contiguous()
+
+            # Build a memoryview over the underlying storage via numpy bridge
+            try:
+                np_arr = cpu_tensor.detach().cpu().contiguous().numpy()
+                payload_view = memoryview(np_arr)
+                num_bytes = np_arr.nbytes
+                tensor_id = str(id(cpu_tensor))
+                return TransferRequest(
+                    tensor_id=tensor_id,
+                    num_bytes=num_bytes,
+                    destination=destination,
+                    payload=payload_view,
+                    payload_owner=owner or cpu_tensor,
+                )
+            except Exception:
+                # Fallback: no payload; header-only
+                num_bytes = cpu_tensor.element_size() * cpu_tensor.nelement()
+                tensor_id = str(id(cpu_tensor))
+                return TransferRequest(tensor_id=tensor_id, num_bytes=num_bytes, destination=destination)
         else:
             # Fallback for unknown data; treat as bytes-like
             buf = memoryview(tensor)
             num_bytes = buf.nbytes
             tensor_id = str(id(buf))
-        return TransferRequest(tensor_id=tensor_id, num_bytes=num_bytes, destination=destination)
+            return TransferRequest(tensor_id=tensor_id, num_bytes=num_bytes, destination=destination, payload=buf, payload_owner=tensor)
 
 
 @dataclass

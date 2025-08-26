@@ -16,6 +16,7 @@ except Exception:
 from .core import device as _genie_device  # noqa: F401,E402
 from .core import library as _genie_library  # noqa: F401,E402
 from .core import factory_intercept as _genie_factory  # noqa: F401,E402
+from .core import enhanced_dispatcher as _genie_enhanced  # noqa: F401,E402
 
 # Ensure a default device exists (triggers backend registration)
 try:
@@ -57,4 +58,40 @@ def is_remote_accelerator_available() -> bool:
 		return False
 
 
+
+
+def get_capture_stats() -> dict:
+	"""Return combined capture statistics from the unified dispatcher and library.
+
+	Includes counts of registered operations, fallback-captured operations, and
+	other helpful signals for understanding coverage and behavior.
+	"""
+	stats = {}
+	try:
+		from .core.enhanced_dispatcher import get_enhanced_stats  # noqa: WPS433
+		disp = get_enhanced_stats()
+		stats["dispatcher"] = disp
+	except Exception:
+		stats["dispatcher"] = {}
+	try:
+		from .core.library import get_library_stats  # noqa: WPS433
+		lib = get_library_stats()
+		stats["library"] = lib
+	except Exception:
+		stats["library"] = {}
+	# Convenience rollups
+	try:
+		d_registered = int(stats["dispatcher"].get("successful_registrations", 0))
+		d_failed = int(stats["dispatcher"].get("failed_registrations", 0))
+		d_fallback_ops = int(stats["dispatcher"].get("fallback_ops", 0))
+		d_fallback_caps = int(stats["dispatcher"].get("fallback_capture_count", 0))
+		stats["summary"] = {
+			"dispatcher_registered_ops": d_registered,
+			"dispatcher_failed_ops": d_failed,
+			"dispatcher_fallback_ops": d_fallback_ops,
+			"dispatcher_fallback_capture_count": d_fallback_caps,
+		}
+	except Exception:
+		stats["summary"] = {}
+	return stats
 

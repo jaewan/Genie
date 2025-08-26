@@ -39,6 +39,34 @@ class ComputationGraph:
 			visit(node_id)
 		return stack
 
+	def validate_invariants(self) -> Tuple[bool, List[str]]:
+		"""Validate basic invariants for nodes and edges.
+
+		Checks:
+		- All edge endpoints exist in nodes
+		- Node ids are unique
+		- No self-loops
+		- Inputs referenced as strings must exist as node ids
+		"""
+		errors: List[str] = []
+		# Unique ids
+		if len(set(self.nodes.keys())) != len(self.nodes):
+			errors.append("Duplicate node ids detected")
+		# Edge endpoints
+		for src, dst in self.edges:
+			if src == dst:
+				errors.append(f"Self-loop detected: {src}")
+			if src not in self.nodes:
+				errors.append(f"Edge src missing node: {src}")
+			if dst not in self.nodes:
+				errors.append(f"Edge dst missing node: {dst}")
+		# Input references
+		for node in self.nodes.values():
+			for inp in node.inputs:
+				if isinstance(inp, str) and inp.startswith("lt_") and inp not in self.nodes:
+					errors.append(f"Missing input node: {inp} for {node.id}")
+		return (len(errors) == 0, errors)
+
 
 class GraphBuilder:
 	"""Thread-local graph builder."""
@@ -58,6 +86,11 @@ class GraphBuilder:
 		if not hasattr(cls._thread_local, "builder"):
 			cls._thread_local.builder = cls()
 		return cls._thread_local.builder
+
+	@classmethod
+	def reset_current(cls) -> None:
+		"""Reset the thread-local builder to a fresh instance."""
+		cls._thread_local.builder = cls()
 
 	def add_tensor(self, lazy_tensor) -> None:  # noqa: ANN001
 		node = ComputationNode(
@@ -79,6 +112,15 @@ class GraphBuilder:
 			inp_id = getattr(inp, "id", None)
 			if inp_id:
 				self.edges.append((inp_id, lazy_tensor.id))
+
+	def reset(self) -> None:
+		"""Clear all graph state for a fresh build cycle."""
+		self.nodes.clear()
+		self.edges.clear()
+		self.tensor_to_node.clear()
+		self._concrete_map.clear()
+		self._lazy_tensors.clear()
+		self._fx_graph = None
 
 	def _get_tensor_id(self, tensor) -> str:  # noqa: ANN001
 		tid = getattr(tensor, "id", None)

@@ -13,9 +13,9 @@ Unlike low-level approaches (driver/PCIe) that lose semantic context or high-lev
 - **Solution**: Operate at PyTorch framework level where semantics are preserved but generality remains
 
 ### 2. Lazy Tensor Abstraction
-- Intercepts PyTorch operations on `remote_accelerator` device
-- Primary capture via PyTorch `__torch_function__` protocol (>95% op coverage); factory interception for creation ops
-- Defers execution while building a semantically-rich computation graph
+- Intercepts PyTorch intent on `remote_accelerator` with a fallback-first strategy
+- Primary capture via factory hooks (creation ops) and lightweight wrappers; `__torch_function__` is optional
+- Defers execution while building a semantically rich computation graph
 - Captures operation type, tensor properties, module context, and execution phase
 
 ### 3. Pluggable Architecture
@@ -30,12 +30,18 @@ Frontend (PyTorch) → SRG (Semantic Graph) → Scheduler → Backend (Transport
 - `local` (Phase 1): Materialize on CPU via eager PyTorch fallback; force device to CPU during execution
 - `local_remote` (Phase 2): In-process/subprocess C++ runtime using LibTorch; control-plane loopback; shared/pinned memory
 - `remote` (Phase 3): Remote runtime over TCP pinned memory; same protocol artifacts
-- `remote_zero_copy` (Phase 4): DPDK mempools + gpudev, GPUDirect RDMA; overlap comm/compute, batching
+- `remote_zero_copy` (Phase 4): DPDK + GPUDev zero-copy transport (DEFAULT for production)
+  - Uses standard NICs - no special hardware required
+  - Custom reliable protocol optimized for GPU transfers
+  - Works in all cloud environments (AWS, GCP, Azure)
 
-### 5. Zero-Copy Data Path
-- Proactive DPDK integration (hugepages, mempools)
-- GPU-NIC direct DMA (GPUDirect RDMA) when available
-- Pinned-memory/TCP fallback path remains available
+### 5. Zero-Copy Data Path (DPDK + GPUDev Default)
+- **PRIMARY**: DPDK + GPUDev for commodity cloud compatibility (no RNICs required)
+- Works with standard NICs (Intel E810, Mellanox ConnectX) in AWS/GCP/Azure
+- GPU-NIC direct DMA via GPUDev library (not RDMA - works without special hardware)
+- Custom reliable protocol over UDP (software reliability for cloud environments)
+- Pinned-memory/TCP fallback when DPDK unavailable
+- Optional RDMA upgrade when RNICs present on both ends (not required)
 
 ### 6. CPU-Minimal Remote Nodes
 - 2 CPU cores, 8GB RAM per node with 4–8 GPUs
@@ -90,13 +96,15 @@ answer = model(image, text_query)
 
 ## Technology Stack
 - **Python**: 3.10.x (stable PyTorch support)
-- **PyTorch**: 2.1.2 (stable dispatcher and `__torch_function__`)
+- **PyTorch**: 2.2.x–2.5.x (stable dispatcher; `torch.library` optional)
 - **CUDA**: 12.1 (H100 support)
-- **DPDK**: 23.11 LTS (gpudev)
-- **Network**: RDMA/RoCE (200Gbps+)
+- **DPDK**: 23.11 LTS with GPUDev (PRIMARY network backend)
+- **Network**: Standard Ethernet NICs (100-200Gbps)
+  - Works with commodity cloud NICs (no RNICs required)
+  - Optional RDMA/RoCE when available (not required)
 
 ## Architecture Layers
-1. **PyTorch Integration**: Device registration, `__torch_function__`, factory hooks
+1. **PyTorch Integration**: Device registration, factory hooks, optional `__torch_function__`
 2. **LazyTensor Engine**: Graph construction, metadata accumulation, materialization triggers
 3. **Semantic Analyzer**: Pattern recognition, workload classification, plan generation
 4. **Optimization Engine**: Placement decisions, scheduling
@@ -104,3 +112,13 @@ answer = model(image, text_query)
 6. **Remote Execution**: Thin runtime, GPU orchestration
 
 This context document provides the essential understanding needed for implementing any component of Genie. Refer to component-specific documents for detailed interfaces and implementation guidance.
+
+## Fallback-First Strategy
+- Correctness-first: Non-intercepted ops materialize inputs and execute eagerly on CPU.
+- Selective interception: Common ops (creation, arithmetic, matmul, reductions) create `LazyTensor` nodes for semantic richness.
+- Opt-in integrations: `torch.library` impls and extended dispatcher paths are gated by env flags.
+
+### Environment Flags
+- `GENIE_LOG_INTERCEPTS=1`: Log intercepted operations for debugging.
+- `GENIE_ENABLE_ATEN_IMPL=1`: Enable torch.library impls for PrivateUse1 registration.
+- `GENIE_ENABLE_META_INFER=1`: Allow meta-based shape/dtype inference in LazyTensor when needed.

@@ -1,4 +1,6 @@
+Paper/
 __pycache__/
 tags
 build/
+.venv/
 *.so
