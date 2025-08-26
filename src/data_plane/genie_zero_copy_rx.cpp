@@ -119,30 +119,24 @@ private:
     int register_as_external_memory() {
         // Register GPU memory as external memory for DPDK
         size_t page_size = 2 * 1024 * 1024;  // 2MB pages
-        size_t n_pages = (buffer_size_ + page_size - 1) / page_size;
         
-        struct rte_extmem_param param = {};
-        param.va = gpu_buffer_;
-        param.iova = reinterpret_cast<uint64_t>(gpu_buffer_);  // Use VA as IOVA initially
-        param.len = buffer_size_;
-        param.pgsz = page_size;
-        param.socket_id = rte_socket_id();
-        
-        int ret = rte_extmem_register(param.va, param.len, nullptr, param.iova, param.pgsz);
+        // Register external memory (simplified - using VA as IOVA)
+        uint64_t iova = reinterpret_cast<uint64_t>(gpu_buffer_);
+        int ret = rte_extmem_register(gpu_buffer_, buffer_size_, nullptr, 0, page_size);
         if (ret < 0) {
             std::cerr << "Failed to register external memory: " << rte_strerror(-ret) << std::endl;
             return ret;
         }
         
         // Map to all devices
-        ret = rte_extmem_attach(param.va, param.len);
+        ret = rte_extmem_attach(gpu_buffer_, buffer_size_);
         if (ret < 0) {
             std::cerr << "Failed to attach external memory: " << rte_strerror(-ret) << std::endl;
-            rte_extmem_unregister(param.va, param.len);
+            rte_extmem_unregister(gpu_buffer_, buffer_size_);
             return ret;
         }
         
-        gpu_iova_ = param.iova;
+        gpu_iova_ = iova;
         return 0;
     }
     
@@ -193,7 +187,7 @@ private:
             
             // Get shared info from private data
             struct rte_mbuf_ext_shared_info* shinfo = 
-                RTE_PTR_ADD(mbufs[i], sizeof(struct rte_mbuf));
+                (struct rte_mbuf_ext_shared_info*)RTE_PTR_ADD(mbufs[i], sizeof(struct rte_mbuf));
             
             // Initialize shared info
             shinfo->free_cb = gpu_mbuf_free_cb;

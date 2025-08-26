@@ -1,6 +1,7 @@
 Paper/
 __pycache__/
 tags
+src/data_plane/build/
 build/
 .venv/
 *.so

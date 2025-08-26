@@ -344,7 +344,8 @@ public:
         printf("  Active connections: %u\n", rte_hash_count(hash_table_));
         
         // Print hash table stats
-        rte_hash_dump(hash_table_);
+        // rte_hash_dump not available - would need custom implementation
+        // rte_hash_dump(hash_table_);
     }
     
 private:
@@ -524,7 +525,9 @@ private:
         uint8_t* payload;
         uint32_t payload_size;
         
-        if (packet_processor_->parse_packet(pkt, parsed_pkt, payload, payload_size)) {
+        // PacketProcessor not fully implemented yet
+        // if (packet_processor_->parse_packet(pkt, parsed_pkt, payload, payload_size)) {
+        if (false) {  // Placeholder
             // Update connection state
             conn_state->bytes_transferred += payload_size;
             

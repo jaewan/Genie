@@ -6,7 +6,53 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Find DPDK
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(DPDK REQUIRED libdpdk)
+
+# Try to find DPDK through pkg-config
+pkg_check_modules(DPDK libdpdk)
+
+if(NOT DPDK_FOUND)
+    # Try alternative DPDK paths
+    set(DPDK_SEARCH_PATHS
+        /opt/dpdk/dpdk-23.11/install
+        /usr/local
+        /usr
+        $ENV{DPDK_INSTALL}
+        $ENV{RTE_SDK}/install
+    )
+    
+    foreach(path ${DPDK_SEARCH_PATHS})
+        if(EXISTS ${path}/lib/x86_64-linux-gnu/pkgconfig/libdpdk.pc)
+            set(ENV{PKG_CONFIG_PATH} "${path}/lib/x86_64-linux-gnu/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+            pkg_check_modules(DPDK libdpdk)
+            if(DPDK_FOUND)
+                message(STATUS "Found DPDK at ${path}")
+                break()
+            endif()
+        endif()
+    endforeach()
+endif()
+
+if(NOT DPDK_FOUND)
+    message(WARNING "DPDK not found via pkg-config. Trying manual configuration...")
+    
+    # Manual DPDK configuration as fallback
+    set(DPDK_INCLUDE_DIRS "/opt/dpdk/dpdk-23.11/install/include")
+    set(DPDK_LIBRARY_DIRS "/opt/dpdk/dpdk-23.11/install/lib/x86_64-linux-gnu")
+    
+    if(EXISTS ${DPDK_INCLUDE_DIRS} AND EXISTS ${DPDK_LIBRARY_DIRS})
+        set(DPDK_FOUND TRUE)
+        set(DPDK_LIBRARIES
+            -L${DPDK_LIBRARY_DIRS}
+            -Wl,--whole-archive
+            -ldpdk
+            -Wl,--no-whole-archive
+            -lnuma -ldl -lpcap -lm
+        )
+        message(STATUS "Using manual DPDK configuration")
+    else()
+        message(FATAL_ERROR "DPDK not found. Please install DPDK or set DPDK_INSTALL environment variable")
+    endif()
+endif()
 
 # Find CUDA (optional)
 find_package(CUDA)
@@ -26,6 +72,9 @@ set(SOURCES
     genie_zero_copy_rx.cpp
     genie_extbuf_tx.cpp
     genie_dpdk_thread_model.cpp  # Use DPDK native threading instead
+    genie_zero_copy_transport.cpp
+    genie_performance_tuning.cpp
+    genie_monitoring.cpp
 )
 
 # Create shared library
@@ -47,6 +96,11 @@ target_compile_options(genie_data_plane PRIVATE
     -mtune=native
     -msse4.2
 )
+
+# Add library directories if manually configured
+if(DPDK_LIBRARY_DIRS)
+    target_link_directories(genie_data_plane PRIVATE ${DPDK_LIBRARY_DIRS})
+endif()
 
 # Link libraries
 target_link_libraries(genie_data_plane

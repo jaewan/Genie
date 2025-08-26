@@ -260,13 +260,13 @@ struct DataPlaneStats {
 class GenieDataPlane {
 public:
     explicit GenieDataPlane(const DataPlaneConfig& config);
-    ~GenieDataPlane();
+    virtual ~GenieDataPlane();
     
     // Lifecycle management
-    bool initialize();
+    virtual bool initialize();
     bool start();
     void stop();
-    void shutdown();
+    virtual void shutdown();
     
     // Thread management
     bool initialize_thread_pool(bool use_thread_pool = true);
@@ -338,13 +338,16 @@ private:
     
     bool handle_fragment(const GeniePacket& pkt, const uint8_t* payload, uint32_t payload_size);
     
-    // Reliability
+protected:
+    // Reliability - made protected for derived classes
     void send_ack(const std::string& target_node, uint32_t seq_num);
     void send_nack(const std::string& target_node, uint32_t seq_num);
     void handle_ack(uint32_t seq_num);
     void handle_nack(uint32_t seq_num);
     void check_timeouts();
     void send_ack_for_fragment(const GeniePacket& pkt, uint32_t seq_num);
+    
+private:
     
     // Utilities
     uint32_t calculate_checksum(const uint8_t* data, size_t size);

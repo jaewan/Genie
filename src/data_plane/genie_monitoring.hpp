@@ -19,6 +19,8 @@
 #include <mutex>
 #include <memory>
 #include <string>
+#include <functional>
+#include <thread>
 #include <rte_cycles.h>
 
 namespace genie {
@@ -449,3 +451,4 @@ MonitoringSystem& get_monitoring_system();
 
 } // namespace data_plane
 } // namespace genie
+
