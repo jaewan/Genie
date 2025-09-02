@@ -48,6 +48,7 @@ class PacketProcessor;
 class GPUMemoryManager;
 class ReliabilityManager;
 class FlowController;
+class KCPWrapper;
 
 /**
  * Configuration for the data plane
@@ -145,7 +146,11 @@ struct GeniePacketHeader {
     uint32_t total_size;      // Total tensor size
     uint32_t checksum;        // Data checksum
     uint64_t timestamp_ns;    // Timestamp
-    uint8_t padding[8];       // Padding to 64 bytes
+    // Semantic metadata (compact): dtype code + shape dims + phase
+    uint8_t dtype_code;       // 0=unknown,1=f32,2=f16,3=i64,4=i32,5=u8
+    uint8_t phase;            // 0=prefill,1=decode,2=fusion,3=other
+    uint8_t shape_rank;       // number of dims (0..4)
+    uint16_t shape_dims[4];   // up to 4 dims (pack larger dims as truncated)
 };
 
 struct GeniePacket {
@@ -222,6 +227,11 @@ struct TransferContext {
     std::atomic<bool> is_complete{false};
     std::atomic<bool> has_error{false};
     std::string error_message;
+    // Semantic metadata for header (default unknown)
+    uint8_t meta_dtype_code{0};
+    uint8_t meta_phase{3};
+    uint8_t meta_shape_rank{0};
+    uint16_t meta_shape_dims[4]{};
     
     TransferContext() : cpu_buffer(nullptr), total_size(0), total_fragments(0) {
         start_time = std::chrono::high_resolution_clock::now();
@@ -261,6 +271,10 @@ class GenieDataPlane {
 public:
     explicit GenieDataPlane(const DataPlaneConfig& config);
     virtual ~GenieDataPlane();
+    // Phase 2.1: runtime reliability mode scaffolding (no behavior change yet)
+    enum class ReliabilityMode { CUSTOM = 0, KCP = 1 };
+    void set_reliability_mode(ReliabilityMode mode) { reliability_mode_ = mode; }
+    ReliabilityMode reliability_mode() const { return reliability_mode_; }
     
     // Lifecycle management
     virtual bool initialize();
@@ -286,6 +300,13 @@ public:
                        void* gpu_ptr,
                        size_t size,
                        const std::string& source_node);
+    
+    // Semantic metadata setter
+    bool set_transfer_metadata(const std::string& transfer_id,
+                               uint8_t dtype_code,
+                               uint8_t phase,
+                               const uint16_t* shape_dims,
+                               uint8_t shape_rank);
     
     // Memory management
     bool register_gpu_memory(void* gpu_ptr, size_t size, GPUMemoryHandle& handle);
@@ -352,6 +373,7 @@ private:
     // Utilities
     uint32_t calculate_checksum(const uint8_t* data, size_t size);
     void update_statistics();
+    int dpdk_send_raw(const char* buf, int len);
     
 protected:  // Allow derived classes to access these
     // Configuration
@@ -405,6 +427,10 @@ private:
     
     // GPU memory management
     std::unique_ptr<GPUMemoryManager> gpu_memory_mgr_;
+
+    // Runtime reliability selection (scaffold)
+    ReliabilityMode reliability_mode_ = ReliabilityMode::CUSTOM;
+    std::unique_ptr<KCPWrapper> kcp_;
 };
 
 /**
@@ -444,6 +470,15 @@ extern "C" {
     // Configuration
     void genie_set_target_node(void* data_plane, const char* node_id, const char* ip, const char* mac);
     void genie_remove_target_node(void* data_plane, const char* node_id);
+    
+    // Semantic metadata (optional): set dtype/phase/shape for a transfer
+    int genie_set_transfer_metadata(void* data_plane,
+                                   const char* transfer_id,
+                                   uint8_t dtype_code,
+                                   uint8_t phase,
+                                   uint8_t shape_rank,
+                                   const uint16_t* shape_dims,
+                                   size_t dims_len);
 }
 
 } // namespace data_plane

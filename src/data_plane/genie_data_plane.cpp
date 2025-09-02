@@ -14,6 +14,7 @@
 
 #include "genie_data_plane.hpp"
 #include "genie_dpdk_thread_model.hpp"  // Use DPDK native threading
+#include "genie_kcp_wrapper.hpp"
 #include <iostream>
 #include <cstring>
 #include <cstdlib>  // for aligned_alloc
@@ -366,8 +367,11 @@ public:
         // Calculate payload checksum
         genie_pkt->app.checksum = htonl(calculate_checksum(payload, payload_size));
         
-        // Zero padding
-        std::memset(genie_pkt->app.padding, 0, 8);
+        // Populate semantic metadata (best-effort defaults)
+        genie_pkt->app.dtype_code = 0;  // unknown; Python can set via metadata later
+        genie_pkt->app.phase = 3;       // other
+        genie_pkt->app.shape_rank = 0;
+        std::memset(genie_pkt->app.shape_dims, 0, sizeof(genie_pkt->app.shape_dims));
         
         // Copy payload
         if (payload_size > 0) {
@@ -472,7 +476,11 @@ public:
         genie_pkt->app.checksum = 0;
         genie_pkt->app.timestamp_ns = htobe64(std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::high_resolution_clock::now().time_since_epoch()).count());
-        std::memset(genie_pkt->app.padding, 0, 8);
+        // Initialize semantic fields for ACK path
+        genie_pkt->app.dtype_code = 0;
+        genie_pkt->app.phase = 3;
+        genie_pkt->app.shape_rank = 0;
+        std::memset(genie_pkt->app.shape_dims, 0, sizeof(genie_pkt->app.shape_dims));
         
         pkt->data_len = total_size;
         pkt->pkt_len = total_size;
@@ -800,6 +808,16 @@ bool GenieDataPlane::initialize() {
         reliability_mgr_ = std::make_unique<ReliabilityManager>(config_.ack_timeout_ms, config_.max_retries);
         flow_controller_ = std::make_unique<FlowController>(config_.window_size);
         
+        // Initialize KCP wrapper if reliability mode is KCP
+        if (reliability_mode() == GenieDataPlane::ReliabilityMode::KCP) {
+            // Output function bridges to DPDK send
+            auto output_fn = [this](const char* buf, int len) -> int {
+                return this->dpdk_send_raw(buf, len);
+            };
+            kcp_ = std::make_unique<KCPWrapper>();
+            kcp_->initialize(0x1u, output_fn);
+        }
+
         std::cout << "Data plane initialized successfully" << std::endl;
         return true;
         
@@ -807,6 +825,33 @@ bool GenieDataPlane::initialize() {
         std::cerr << "Exception during initialization: " << e.what() << std::endl;
         return false;
     }
+}
+int GenieDataPlane::dpdk_send_raw(const char* buf, int len) {
+    if (len <= 0 || !buf) return -1;
+    // Allocate mbuf
+    struct rte_mbuf* pkt = rte_pktmbuf_alloc(mempool_);
+    if (!pkt) return -1;
+    // Ensure buffer fits
+    if (rte_pktmbuf_tailroom(pkt) < static_cast<uint16_t>(len)) {
+        rte_pktmbuf_free(pkt);
+        return -1;
+    }
+    // Copy data into mbuf data area
+    char* data_ptr = rte_pktmbuf_append(pkt, static_cast<uint16_t>(len));
+    if (!data_ptr) {
+        rte_pktmbuf_free(pkt);
+        return -1;
+    }
+    std::memcpy(data_ptr, buf, len);
+    // Transmit immediately on queue
+    uint16_t sent = rte_eth_tx_burst(port_id_, queue_id_, &pkt, 1);
+    if (sent == 0) {
+        rte_pktmbuf_free(pkt);
+        return -1;
+    }
+    stats_.packets_sent.fetch_add(1);
+    stats_.bytes_sent.fetch_add(static_cast<uint64_t>(len));
+    return len;
 }
 
 bool GenieDataPlane::init_dpdk() {
@@ -955,6 +1000,39 @@ bool GenieDataPlane::start() {
                     std::this_thread::sleep_for(std::chrono::milliseconds(config_.ack_timeout_ms / 2));
                 }
             });
+            // Start KCP update loop when KCP mode is active
+            if (reliability_mode() == GenieDataPlane::ReliabilityMode::KCP && kcp_) {
+                std::thread([this]() {
+                    const int interval_ms = 10;
+                    std::vector<char> recv_buf(64 * 1024);
+                    while (running_.load()) {
+                        kcp_->update(0);
+                        // Poll KCP for received payloads and hand to reassembly path
+                        int n = 0;
+                        do {
+                            n = kcp_->recv(recv_buf.data(), static_cast<int>(recv_buf.size()));
+                            if (n > 0) {
+                                // Expect KCP messages to carry GeniePacketHeader + payload
+                                if (static_cast<size_t>(n) > sizeof(GeniePacketHeader)) {
+                                    GeniePacketHeader header{};
+                                    std::memcpy(&header, recv_buf.data(), sizeof(GeniePacketHeader));
+                                    const uint8_t* payload_ptr = reinterpret_cast<const uint8_t*>(recv_buf.data() + sizeof(GeniePacketHeader));
+                                    const uint32_t payload_len = static_cast<uint32_t>(n - static_cast<int>(sizeof(GeniePacketHeader)));
+
+                                    // Construct a minimal GeniePacket wrapper to reuse handle_fragment()
+                                    GeniePacket pkt{};
+                                    pkt.app = header;
+                                    handle_fragment(pkt, payload_ptr, payload_len);
+                                    stats_.bytes_received.fetch_add(static_cast<uint64_t>(payload_len));
+                                } else {
+                                    // Not enough data to contain a header; drop
+                                }
+                            }
+                        } while (n > 0);
+                        std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
+                    }
+                }).detach();
+            }
         }
         
         std::cout << "Data plane started successfully"
@@ -999,6 +1077,11 @@ void GenieDataPlane::stop() {
 
 void GenieDataPlane::shutdown() {
     stop();
+    // Close KCP if active
+    if (kcp_) {
+        kcp_->close();
+        kcp_.reset();
+    }
     
     // Cleanup resources
     if (tx_ring_) {
@@ -1088,6 +1171,22 @@ bool GenieDataPlane::receive_tensor(const std::string& transfer_id,
     stats_.active_transfers.fetch_add(1);
     
     std::cout << "Prepared to receive tensor " << tensor_id << " (" << size << " bytes) from " << source_node << std::endl;
+    return true;
+}
+
+bool GenieDataPlane::set_transfer_metadata(const std::string& transfer_id,
+                                          uint8_t dtype_code,
+                                          uint8_t phase,
+                                          const uint16_t* shape_dims,
+                                          uint8_t shape_rank) {
+    std::lock_guard<std::mutex> lock(transfers_mutex_);
+    auto it = active_transfers_.find(transfer_id);
+    if (it == active_transfers_.end()) return false;
+    auto& ctx = it->second;
+    ctx->meta_dtype_code = dtype_code;
+    ctx->meta_phase = phase;
+    ctx->meta_shape_rank = std::min<uint8_t>(shape_rank, 4);
+    for (size_t i = 0; i < ctx->meta_shape_rank; ++i) ctx->meta_shape_dims[i] = shape_dims[i];
     return true;
 }
 
@@ -1217,12 +1316,17 @@ void GenieDataPlane::process_rx_packets(struct rte_mbuf** pkts, uint16_t nb_pkts
         uint32_t payload_size;
         
         if (packet_processor_->parse_packet(pkts[i], parsed_pkt, payload, payload_size)) {
-            // Handle different packet types
+            // Handle different packet types (switch behavior if KCP enabled)
             PacketType pkt_type = static_cast<PacketType>(parsed_pkt.app.type);
             
             switch (pkt_type) {
                 case PacketType::DATA:
-                    handle_fragment(parsed_pkt, payload, payload_size);
+                    if (reliability_mode() == GenieDataPlane::ReliabilityMode::KCP && kcp_) {
+                        // Feed payload to KCP
+                        kcp_->input(reinterpret_cast<const char*>(payload), static_cast<int>(payload_size));
+                    } else {
+                        handle_fragment(parsed_pkt, payload, payload_size);
+                    }
                     break;
                 case PacketType::ACK:
                     handle_ack(ntohl(parsed_pkt.app.seq_num));
@@ -1786,6 +1890,36 @@ void genie_remove_target_node(void* data_plane, const char* node_id) {
         auto* dp = static_cast<genie::data_plane::GenieDataPlane*>(data_plane);
         dp->remove_target_node(node_id);
     }
+}
+
+int genie_set_transfer_metadata(void* data_plane,
+                               const char* transfer_id,
+                               uint8_t dtype_code,
+                               uint8_t phase,
+                               uint8_t shape_rank,
+                               const uint16_t* shape_dims,
+                               size_t dims_len) {
+    if (!data_plane || !transfer_id) return -1;
+    auto* dp = static_cast<genie::data_plane::GenieDataPlane*>(data_plane);
+    size_t n = std::min<size_t>(dims_len, 4);
+    return dp->set_transfer_metadata(transfer_id, dtype_code, phase, shape_dims, static_cast<uint8_t>(n)) ? 0 : -1;
+}
+
+int genie_set_reliability_mode(void* data_plane, int mode) {
+    if (!data_plane) return -1;
+    auto* dp = static_cast<genie::data_plane::GenieDataPlane*>(data_plane);
+    if (mode == 1) {
+        dp->set_reliability_mode(genie::data_plane::GenieDataPlane::ReliabilityMode::KCP);
+    } else {
+        dp->set_reliability_mode(genie::data_plane::GenieDataPlane::ReliabilityMode::CUSTOM);
+    }
+    return 0;
+}
+
+int genie_get_reliability_mode(void* data_plane) {
+    if (!data_plane) return -1;
+    auto* dp = static_cast<genie::data_plane::GenieDataPlane*>(data_plane);
+    return dp->reliability_mode() == genie::data_plane::GenieDataPlane::ReliabilityMode::KCP ? 1 : 0;
 }
 
 } // extern "C"

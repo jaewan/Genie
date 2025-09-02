@@ -48,10 +48,10 @@ class RteEthTxMqMode(IntEnum):
 
 
 def _load_first(names: List[str]) -> Optional[ctypes.CDLL]:
-    """Load the first available library from a list of names."""
+    """Load the first available library from a list of names with RTLD_GLOBAL."""
     for name in names:
         try:
-            lib = ctypes.CDLL(name)
+            lib = ctypes.CDLL(name, mode=ctypes.RTLD_GLOBAL)
             logger.debug(f"Successfully loaded DPDK library: {name}")
             return lib
         except OSError as e:
@@ -88,6 +88,22 @@ class DpdkLibraries:
 def load_dpdk_libraries() -> DpdkLibraries:
     """Load all DPDK libraries with fallback paths."""
     dpdk_lib_path = "/opt/dpdk/dpdk-23.11/install/lib/x86_64-linux-gnu"
+    
+    # Try monolithic libdpdk first (best for symbol resolution)
+    libdpdk = _load_first([
+        f"{dpdk_lib_path}/libdpdk.so",
+        "libdpdk.so",
+        "/usr/lib/x86_64-linux-gnu/libdpdk.so",
+    ])
+    if libdpdk is not None:
+        # Many symbols are available via the umbrella; reuse for all handles
+        return DpdkLibraries(
+            eal=libdpdk,
+            mempool=libdpdk,
+            mbuf=libdpdk,
+            ethdev=libdpdk,
+            gpudev=libdpdk,
+        )
     
     # Core libraries
     eal = _load_first([

@@ -272,7 +272,11 @@ private:
         pkt.app.checksum = 0;  // Will be offloaded
         pkt.app.timestamp_ns = htobe64(rte_get_tsc_cycles());
         
-        memset(pkt.app.padding, 0, 8);
+        // Initialize semantic fields to defaults
+        pkt.app.dtype_code = 0;
+        pkt.app.phase = 3;
+        pkt.app.shape_rank = 0;
+        memset(pkt.app.shape_dims, 0, sizeof(pkt.app.shape_dims));
     }
     
     uint16_t calculate_ip_checksum(const IPv4Header* ip) {

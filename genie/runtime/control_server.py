@@ -73,6 +73,8 @@ class NodeCapabilities:
     network_bandwidth_gbps: float = 100.0  # 100 Gbps default
     memory_bandwidth_gbps: float = 900.0   # 900 GB/s default for modern GPUs
     features: List[str] = field(default_factory=lambda: ['fragmentation', 'compression', 'reliability'])
+    # Optional data port for UDP plane (used by integration harness)
+    data_port: int = 5556
 
 @dataclass
 class TransferRequest:
@@ -108,6 +110,8 @@ class ControlMessage:
     """Control plane message"""
     type: MessageType
     sender: str
+    # Optional explicit receiver for point-to-point flows (integration harness)
+    receiver: str = ""
     timestamp: float = field(default_factory=time.time)
     message_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     payload: Dict[str, Any] = field(default_factory=dict)
@@ -491,27 +495,29 @@ class ControlPlaneServer:
         # Background tasks
         self.heartbeat_task: Optional[asyncio.Task] = None
         self.cleanup_task: Optional[asyncio.Task] = None
+        # Server serving task (if we choose to run serve_forever in background)
+        self.server_task: Optional[asyncio.Task] = None
     
     async def start(self):
-        """Start the control plane server"""
+        """Start the control plane server (non-blocking)."""
         try:
+            # Create server
             self.server = await asyncio.start_server(
                 self.handle_client,
                 self.host,
                 self.port
             )
-            
+
+            # Begin accepting connections without blocking this coroutine
+            await self.server.start_serving()
+
             # Start background tasks
             self.heartbeat_task = asyncio.create_task(self.heartbeat_loop())
             self.cleanup_task = asyncio.create_task(self.cleanup_loop())
-            
+
             addr = self.server.sockets[0].getsockname()
             logger.info(f"Control plane server started on {addr[0]}:{addr[1]}")
-            
-            # Serve forever
-            async with self.server:
-                await self.server.serve_forever()
-                
+
         except Exception as e:
             logger.error(f"Failed to start control plane server: {e}")
             raise
@@ -541,6 +547,10 @@ class ControlPlaneServer:
             await self.server.wait_closed()
         
         logger.info("Control plane server stopped")
+
+    def get_capabilities(self) -> NodeCapabilities:
+        """Return server capabilities (compat with tests)."""
+        return self.capabilities
     
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Handle new client connection"""

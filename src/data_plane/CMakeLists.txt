@@ -1,5 +1,45 @@
 cmake_minimum_required(VERSION 3.16)
 project(genie_data_plane)
+# Optional KCP support
+option(GENIE_WITH_KCP "Enable KCP reliable transport" OFF)
+set(KCP_LIBRARIES "")
+if(GENIE_WITH_KCP)
+    message(STATUS "Checking for KCP (ikcp) ...")
+    # Assume ikcp headers/libraries are available in system or provided path
+    find_path(KCP_INCLUDE_DIRS ikcp.h PATHS /usr/local/include /usr/include $ENV{KCP_INCLUDE_DIR})
+    find_library(KCP_LIB ikcp PATHS /usr/local/lib /usr/lib $ENV{KCP_LIB_DIR})
+    if(KCP_INCLUDE_DIRS AND KCP_LIB)
+        message(STATUS "KCP found: ${KCP_INCLUDE_DIRS} ${KCP_LIB}")
+        include_directories(${KCP_INCLUDE_DIRS})
+        set(KCP_LIBRARIES ${KCP_LIB})
+        add_definitions(-DGENIE_WITH_KCP)
+    else()
+        message(WARNING "KCP not found; building without KCP linkage (stubs active)")
+        set(GENIE_WITH_KCP OFF)
+    endif()
+endif()
+
+# Optional SPDK support
+option(GENIE_WITH_SPDK "Enable SPDK-backed DMA buffers" OFF)
+set(SPDK_LIBRARIES "")
+if(GENIE_WITH_SPDK)
+    message(STATUS "Checking for SPDK ...")
+    find_path(SPDK_INCLUDE_DIR spdk/env.h PATHS /usr/local/include /usr/include $ENV{SPDK_INCLUDE_DIR})
+    # Try common SPDK env libraries
+    find_library(SPDK_ENV_LIB spdk_env_dpdk PATHS /usr/local/lib /usr/lib $ENV{SPDK_LIB_DIR})
+    if(NOT SPDK_ENV_LIB)
+        find_library(SPDK_ENV_LIB spdk_env PATHS /usr/local/lib /usr/lib $ENV{SPDK_LIB_DIR})
+    endif()
+    if(SPDK_INCLUDE_DIR AND SPDK_ENV_LIB)
+        message(STATUS "SPDK found: ${SPDK_INCLUDE_DIR} ${SPDK_ENV_LIB}")
+        include_directories(${SPDK_INCLUDE_DIR})
+        list(APPEND SPDK_LIBRARIES ${SPDK_ENV_LIB})
+        add_definitions(-DGENIE_WITH_SPDK)
+    else()
+        message(WARNING "SPDK not found; building without SPDK (fallback to rte_malloc)")
+        set(GENIE_WITH_SPDK OFF)
+    endif()
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -54,11 +94,22 @@ if(NOT DPDK_FOUND)
     endif()
 endif()
 
-# Find CUDA (optional)
-find_package(CUDA)
-if(CUDA_FOUND)
+# CUDA (optional) - prefer PyTorch's packaged CUDA runtime to avoid version mismatch
+set(TORCH_CUDA_LIB_DIR $ENV{TORCH_CUDA_LIB_DIR})
+if(TORCH_CUDA_LIB_DIR)
+    message(STATUS "Using CUDA runtime from PyTorch: ${TORCH_CUDA_LIB_DIR}")
     add_definitions(-DGENIE_CUDA_SUPPORT)
-    include_directories(${CUDA_INCLUDE_DIRS})
+    # Headers can come from system CUDA; runtime will be resolved from PyTorch's lib dir
+    find_path(CUDA_INCLUDE_DIR cuda_runtime.h PATHS /usr/local/cuda/include /usr/include /usr/local/include)
+    if(CUDA_INCLUDE_DIR)
+        include_directories(${CUDA_INCLUDE_DIR})
+    endif()
+else()
+    find_package(CUDA)
+    if(CUDA_FOUND)
+        add_definitions(-DGENIE_CUDA_SUPPORT)
+        include_directories(${CUDA_INCLUDE_DIRS})
+    endif()
 endif()
 
 # Find JSON library
@@ -75,6 +126,8 @@ set(SOURCES
     genie_zero_copy_transport.cpp
     genie_performance_tuning.cpp
     genie_monitoring.cpp
+    genie_c_api.cpp
+    genie_kcp_wrapper.cpp
 )
 
 # Create shared library
@@ -106,12 +159,18 @@ endif()
 target_link_libraries(genie_data_plane
     ${DPDK_LIBRARIES}
     nlohmann_json::nlohmann_json
+    ${KCP_LIBRARIES}
+    ${SPDK_LIBRARIES}
     pthread
     numa
     dl
 )
 
-if(CUDA_FOUND)
+if(TORCH_CUDA_LIB_DIR)
+    # Link against PyTorch's packaged cudart to match the Python runtime
+    target_link_directories(genie_data_plane PRIVATE ${TORCH_CUDA_LIB_DIR})
+    target_link_libraries(genie_data_plane cudart)
+elseif(CUDA_FOUND)
     target_link_libraries(genie_data_plane ${CUDA_LIBRARIES})
 endif()
 
@@ -158,7 +217,15 @@ install(FILES genie_data_plane.hpp
 # Test executable (optional)
 if(BUILD_TESTS)
     add_executable(test_data_plane test_data_plane.cpp)
-    target_link_libraries(test_data_plane genie_data_plane)
+    # Ensure DPDK library search path is available for the test executable
+    target_link_directories(test_data_plane PRIVATE /opt/dpdk/dpdk-23.11/install/lib/x86_64-linux-gnu)
+    target_link_libraries(test_data_plane
+        genie_data_plane
+        ${DPDK_LIBRARIES}
+        pthread
+        numa
+        dl
+    )
 endif()
 
 # Print configuration

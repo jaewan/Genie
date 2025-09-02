@@ -166,6 +166,10 @@ public:
     
     Stats get_stats() const;
     void print_stats() const;
+
+    // Introspection helpers
+    bool gpu_direct_enabled() const { return config_.use_gpu_direct; }
+    size_t gpu_buffer_count() const { return gpu_buffer_pool_.size(); }
     
 private:
     Config config_;

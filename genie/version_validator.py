@@ -18,8 +18,9 @@ def validate_environment(strict: bool = False) -> bool:
 	
 	# PyTorch version
 	torch_ver = version.parse(torch.__version__.split("+")[0])
-	if not (version.parse("2.2.0") <= torch_ver < version.parse("2.6.0")):
-		warnings.warn(f"Genie targets PyTorch 2.2.x–2.5.x; found {torch.__version__}")
+	# Support both legacy (2.2–2.5) and new (2.8) tracks
+	if not ((version.parse("2.2.0") <= torch_ver < version.parse("2.6.0")) or torch_ver >= version.parse("2.8.0")):
+		warnings.warn(f"Genie targets PyTorch 2.2.x–2.5.x or 2.8+; found {torch.__version__}")
 		success = False
 
 	# CUDA availability is optional in Phase 1

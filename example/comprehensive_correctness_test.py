@@ -95,6 +95,13 @@ class CorrectnessValidator:
         """Run a single test and track results."""
         self.total_tests += 1
         try:
+            # Reset FXGraphBuilder for each test to avoid finalization issues
+            try:
+                from genie.core.fx_graph_builder import FXGraphBuilder
+                FXGraphBuilder.reset()
+            except ImportError:
+                pass
+            
             # Execute lazy version
             lazy_result = lazy_fn()
             if isinstance(lazy_result, LazyTensor):
@@ -345,6 +352,13 @@ class CorrectnessValidator:
         
         # Test creation operations (compare structure, not values for random ops)
         def compare_creation(lazy_fn, eager_fn, name):
+            # Reset FXGraphBuilder before each test
+            try:
+                from genie.core.fx_graph_builder import FXGraphBuilder
+                FXGraphBuilder.reset()
+            except ImportError:
+                pass
+            
             lazy_result = lazy_fn().cpu()
             eager_result = eager_fn()
             

@@ -3,10 +3,14 @@
  */
 
 #include "genie_zero_copy_transport.hpp"
+#ifdef GENIE_WITH_SPDK
+#include "spdk_dma.hpp"
+#endif
 #include <iostream>
 #include <cstring>
 #include <chrono>
 #include <cmath>
+#include <sys/stat.h>
 #include <rte_cycles.h>
 #include <rte_ether.h>
 #include <rte_ip.h>
@@ -218,6 +222,12 @@ bool ZeroCopyTransport::init_gpu_resources() {
     }
     
     // Initialize DPDK GPU device
+    // Initialize GPUDev subsystem (allow up to 16 GPUs)
+    int gpuret = rte_gpu_init(16);
+    if (gpuret < 0) {
+        std::cerr << "Failed to initialize DPDK GPUDev" << std::endl;
+    }
+
     if (rte_gpu_count_avail() > 0) {
         gpu_dev_id_ = rte_gpu_find_next(0, RTE_GPU_ID_ANY);
         if (gpu_dev_id_ >= 0) {
@@ -255,16 +265,46 @@ bool ZeroCopyTransport::init_gpu_resources() {
     }
     
     std::cout << "Allocated " << gpu_buffer_pool_.size() << " GPU buffers" << std::endl;
+
+#ifdef GENIE_CUDA_SUPPORT
+    // Check for any pending CUDA errors that may have occurred during setup
+    cudaError_t last_err = cudaGetLastError();
+    if (last_err != cudaSuccess) {
+        std::cerr << "CUDA error during GPU resource initialization: "
+                  << cudaGetErrorString(last_err) << std::endl;
+        // Cleanup allocated resources and signal fallback to CPU staging
+        for (auto& buffer : gpu_buffer_pool_) {
+            if (buffer.gpu_ptr) {
+                cudaFree(buffer.gpu_ptr);
+            }
+        }
+        gpu_buffer_pool_.clear();
+        while (!available_gpu_buffers_.empty()) { available_gpu_buffers_.pop(); }
+        if (cuda_stream_) {
+            cudaStreamDestroy(cuda_stream_);
+            cuda_stream_ = nullptr;
+        }
+        return false;
+    }
+#endif
     
     return !gpu_buffer_pool_.empty();
 }
 
 bool ZeroCopyTransport::register_gpu_memory(GPUBuffer& buffer) {
     if (gpu_dev_id_ < 0) {
-        // Fallback: Get IOVA through host registration
-        cudaHostRegister(buffer.gpu_ptr, buffer.size, cudaHostRegisterDefault);
-        buffer.iova = (uint64_t)buffer.gpu_ptr;  // Simplified - would need proper IOVA
-        return true;
+        // No DPDK GPU device available; cannot safely register device memory
+        // for DMA in this configuration. Signal failure so callers can fall back
+        // to CPU staging instead of attempting invalid CUDA operations.
+        return false;
+    }
+    // Check for NVIDIA peer memory module to avoid hanging in registration
+    struct stat st1{}, st2{};
+    bool has_peermem = (stat("/sys/module/nvidia_peermem", &st1) == 0) ||
+                       (stat("/sys/module/peermem", &st2) == 0);
+    if (!has_peermem) {
+        std::cerr << "GPU peer memory module not loaded (nvidia-peermem). Disabling GPU Direct." << std::endl;
+        return false;
     }
     
     // Register with DPDK GPU device
@@ -330,13 +370,17 @@ std::future<bool> ZeroCopyTransport::send_tensor_zero_copy(
             }
         }
         
-        // Copy data to buffer
+        // Copy data to buffer (device-to-device). If source pointer is not a valid
+        // device address, fall back to CPU staging path.
         cudaError_t err = cudaMemcpyAsync(gpu_buffer.gpu_ptr, gpu_ptr, size,
                                          cudaMemcpyDeviceToDevice, cuda_stream_);
         if (err != cudaSuccess) {
-            std::cerr << "Failed to copy GPU data: " << cudaGetErrorString(err) << std::endl;
-            transfer->completion_promise.set_value(false);
-            return transfer->completion_promise.get_future();
+            std::cerr << "Failed to copy GPU data (falling back to CPU staging): "
+                      << cudaGetErrorString(err) << std::endl;
+            auto promise = std::make_shared<std::promise<bool>>();
+            bool result = send_with_cpu_staging(gpu_ptr, size, transfer_id, dest_ip, dest_port);
+            promise->set_value(result);
+            return promise->get_future();
         }
         
         // Wait for copy to complete
@@ -464,9 +508,17 @@ struct rte_mbuf* ZeroCopyTransport::create_packet_with_gpu_memory(
             // Fall back to copying
             char* payload = rte_pktmbuf_append(mbuf, length);
             if (payload) {
-                // Copy from GPU to packet
-                cudaMemcpy(payload, (char*)buffer.gpu_ptr + offset, length,
+                // Copy from GPU/CPU source to packet
+                #ifdef GENIE_CUDA_SUPPORT
+                cudaError_t cerr = cudaMemcpy(payload, (char*)buffer.gpu_ptr + offset, length,
                           cudaMemcpyDeviceToHost);
+                if (cerr != cudaSuccess) {
+                    // If device pointer invalid, avoid raising a CUDA sticky error
+                    std::memset(payload, 0, length);
+                }
+                #else
+                std::memcpy(payload, (char*)buffer.gpu_ptr + offset, length);
+                #endif
                 
                 {
                     std::lock_guard<std::mutex> lock(stats_mutex_);
@@ -549,7 +601,16 @@ bool ZeroCopyTransport::prepare_receive(const std::string& transfer_id, size_t s
         transfer->gpu_buffer = gpu_buffer;
     } else {
         // Allocate CPU staging buffer
-        transfer->cpu_staging = rte_malloc("rx_staging", size, 64);
+        void* rx_buf = nullptr;
+#ifdef GENIE_WITH_SPDK
+        if (SpdkDMA::initialize() && SpdkDMA::available()) {
+            rx_buf = SpdkDMA::alloc(size, 0x1000);
+        }
+#endif
+        if (!rx_buf) {
+            rx_buf = rte_malloc("rx_staging", size, 64);
+        }
+        transfer->cpu_staging = rx_buf;
         if (!transfer->cpu_staging) {
             return false;
         }
@@ -687,7 +748,14 @@ void ZeroCopyTransport::complete_transfer(const std::string& transfer_id, bool s
     
     // Clean up CPU staging buffer
     if (transfer->cpu_staging) {
-        rte_free(transfer->cpu_staging);
+#ifdef GENIE_WITH_SPDK
+        if (SpdkDMA::available()) {
+            SpdkDMA::free(transfer->cpu_staging);
+        } else
+#endif
+        {
+            rte_free(transfer->cpu_staging);
+        }
     }
     
     // Remove from active transfers
@@ -699,22 +767,52 @@ bool ZeroCopyTransport::send_with_cpu_staging(void* gpu_ptr, size_t size,
                                              uint32_t dest_ip, uint16_t dest_port) {
     
     // Allocate CPU staging buffer
-    void* cpu_buffer = rte_malloc("tx_staging", size, 64);
+    bool cpu_is_spdk = false;
+    void* cpu_buffer = nullptr;
+#ifdef GENIE_WITH_SPDK
+    if (SpdkDMA::initialize() && SpdkDMA::available()) {
+        cpu_buffer = SpdkDMA::alloc(size, 0x1000);
+        cpu_is_spdk = cpu_buffer != nullptr;
+    }
+#endif
+    if (!cpu_buffer) {
+        cpu_buffer = rte_malloc("tx_staging", size, 64);
+    }
     if (!cpu_buffer) {
         return false;
     }
     
     // Copy from GPU to CPU
+    #ifdef GENIE_CUDA_SUPPORT
     cudaError_t err = cudaMemcpy(cpu_buffer, gpu_ptr, size, cudaMemcpyDeviceToHost);
     if (err != cudaSuccess) {
-        rte_free(cpu_buffer);
+#ifdef GENIE_WITH_SPDK
+        if (cpu_is_spdk) {
+            SpdkDMA::free(cpu_buffer);
+        } else
+#endif
+        {
+            rte_free(cpu_buffer);
+        }
         return false;
     }
+    #else
+    std::memcpy(cpu_buffer, gpu_ptr, size);
+    #endif
     
     // Send using CPU buffer
     // Note: Simplified - would fragment and send
     
-    rte_free(cpu_buffer);
+    {
+#ifdef GENIE_WITH_SPDK
+        if (cpu_is_spdk) {
+            SpdkDMA::free(cpu_buffer);
+        } else
+#endif
+        {
+            rte_free(cpu_buffer);
+        }
+    }
     
     {
         std::lock_guard<std::mutex> lock(stats_mutex_);

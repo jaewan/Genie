@@ -12,7 +12,11 @@ from .interfaces import RemoteAccelerator, TransferRequest, TransferResult
 
 class Transport:
     def is_dma_capable(self, tensor: torch.Tensor) -> bool:
-        return bool(getattr(tensor, "is_pinned", lambda: False)())
+        try:
+            return bool(getattr(tensor, "is_pinned", lambda: False)())
+        except Exception:
+            # Some custom/PrivateUse1 tensors may raise until hooks are registered
+            return False
 
     def prepare_for_dma(self, tensor: torch.Tensor) -> torch.Tensor:
         if not isinstance(tensor, torch.Tensor):
