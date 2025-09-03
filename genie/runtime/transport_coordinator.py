@@ -86,6 +86,10 @@ class DataPlaneConfig:
     mempool_size: int = 8192
     rx_ring_size: int = 1024
     tx_ring_size: int = 1024
+    # Multi-queue & RSS
+    rx_queues: int = 1
+    tx_queues: int = 1
+    enable_rss: bool = False
     
     # GPU configuration
     gpu_device_id: int = 0
@@ -107,6 +111,14 @@ class DataPlaneConfig:
     window_size: int = 64
     # Phase 2.1: optional reliability mode override ("custom" or "kcp")
     reliability_mode: Optional[str] = None
+    # NIC offloads (Phase 3)
+    rx_offload_checksum: bool = False
+    rx_offload_lro: bool = False
+    tx_offload_ipv4_cksum: bool = False
+    tx_offload_udp_cksum: bool = False
+    tx_offload_tso: bool = False
+    # CUDA Graphs (Phase 3.3)
+    enable_cuda_graphs: bool = False
     
     def to_json(self) -> str:
         """Convert to JSON for C++ consumption"""
@@ -117,6 +129,9 @@ class DataPlaneConfig:
             'mempool_size': self.mempool_size,
             'rx_ring_size': self.rx_ring_size,
             'tx_ring_size': self.tx_ring_size,
+            'rx_queues': self.rx_queues,
+            'tx_queues': self.tx_queues,
+            'enable_rss': self.enable_rss,
             'gpu_device_id': self.gpu_device_id,
             'enable_gpudev': self.enable_gpudev,
             'local_ip': self.local_ip,
@@ -128,6 +143,12 @@ class DataPlaneConfig:
             'ack_timeout_ms': self.ack_timeout_ms,
             'max_retries': self.max_retries,
             'window_size': self.window_size
+            , 'rx_offload_checksum': self.rx_offload_checksum
+            , 'rx_offload_lro': self.rx_offload_lro
+            , 'tx_offload_ipv4_cksum': self.tx_offload_ipv4_cksum
+            , 'tx_offload_udp_cksum': self.tx_offload_udp_cksum
+            , 'tx_offload_tso': self.tx_offload_tso
+            , 'enable_cuda_graphs': self.enable_cuda_graphs
         })
 
 @dataclass
@@ -307,6 +328,23 @@ class DataPlaneBindings:
                 ctypes.c_size_t        # dims_len
             ]
             self.lib.genie_set_transfer_metadata.restype = ctypes.c_int
+
+            # Optional Phase 3 configuration hooks (best-effort)
+            try:
+                self.lib.genie_configure_queues.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_int]
+                self.lib.genie_configure_queues.restype = ctypes.c_int
+            except Exception:
+                pass
+            try:
+                self.lib.genie_enable_offloads.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+                self.lib.genie_enable_offloads.restype = ctypes.c_int
+            except Exception:
+                pass
+            try:
+                self.lib.genie_enable_cuda_graphs.argtypes = [ctypes.c_void_p, ctypes.c_int]
+                self.lib.genie_enable_cuda_graphs.restype = ctypes.c_int
+            except Exception:
+                pass
             
             logger.info("C++ data plane function signatures configured")
             
@@ -331,6 +369,29 @@ class DataPlaneBindings:
                 mode = self._extract_reliability_mode(config)
                 if mode is not None:
                     self.lib.genie_set_reliability_mode(self.data_plane_ptr, mode)
+            except Exception:
+                pass
+            # Phase 3: apply optional queue/offload/cuda graphs if symbols exist
+            try:
+                if hasattr(self.lib, 'genie_configure_queues'):
+                    self.lib.genie_configure_queues(self.data_plane_ptr, ctypes.c_uint16(config.rx_queues), ctypes.c_uint16(config.tx_queues), ctypes.c_int(1 if config.enable_rss else 0))
+            except Exception:
+                pass
+            try:
+                if hasattr(self.lib, 'genie_enable_offloads'):
+                    self.lib.genie_enable_offloads(
+                        self.data_plane_ptr,
+                        ctypes.c_int(1 if config.rx_offload_checksum else 0),
+                        ctypes.c_int(1 if config.rx_offload_lro else 0),
+                        ctypes.c_int(1 if config.tx_offload_ipv4_cksum else 0),
+                        ctypes.c_int(1 if config.tx_offload_udp_cksum else 0),
+                        ctypes.c_int(1 if config.tx_offload_tso else 0),
+                    )
+            except Exception:
+                pass
+            try:
+                if hasattr(self.lib, 'genie_enable_cuda_graphs'):
+                    self.lib.genie_enable_cuda_graphs(self.data_plane_ptr, ctypes.c_int(1 if config.enable_cuda_graphs else 0))
             except Exception:
                 pass
             return self.data_plane_ptr is not None

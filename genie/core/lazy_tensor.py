@@ -49,12 +49,15 @@ class LazyTensor:
 		self.shape = None
 		self.dtype = None
 		self.device = "remote_accelerator:0"
-		if self.operation in ("aten::add", "aten::sub", "aten::mul", "aten::div") and inputs:
+		_is_elementwise_fastpath = False
+		_enable_fastpath = os.getenv("GENIE_ENABLE_ELEMENTWISE_FASTPATH", "0") == "1"
+		if _enable_fastpath and self.operation in ("aten::add", "aten::sub", "aten::mul", "aten::div") and inputs:
 			first = inputs[0]
 			# Avoid function calls; copy from first input when available
 			self.shape = getattr(first, "shape", None)
 			self.dtype = getattr(first, "dtype", None)
 			self.device = getattr(first, "device", self.device)
+			_is_elementwise_fastpath = True
 		else:
 			# Infer tensor properties (still lightweight for non-elementwise ops)
 			self.shape = self._infer_shape()
@@ -86,22 +89,29 @@ class LazyTensor:
 			except Exception:
 				logger.info(f"[Genie] Intercepted {self.operation} -> id={self.id}")
 
-		# Notify enhanced dispatcher of fallback capture when op isn't registered
-		try:
-			from .enhanced_dispatcher import enhanced_dispatcher
-			if not enhanced_dispatcher.is_operation_registered(self.operation):
-				enhanced_dispatcher.record_fallback_capture(self.operation)
-		except Exception:
-			pass
+		# Notify enhanced dispatcher only for non-fastpath ops
+		if not _is_elementwise_fastpath:
+			try:
+				from .enhanced_dispatcher import enhanced_dispatcher
+				if not enhanced_dispatcher.is_operation_registered(self.operation):
+					enhanced_dispatcher.record_fallback_capture(self.operation)
+			except Exception:
+				pass
 
-		# Register with FX graph builder
-		try:
-			from .fx_graph_builder import FXGraphBuilder
-			FXGraphBuilder.current().add_lazy_tensor(self)
-		except ImportError:
-			# Fallback to old graph builder if FX not available
-			from .graph import GraphBuilder
-			GraphBuilder.current().add_tensor(self)
+		# Register with graph builders.
+		# For elementwise fastpath, skip registration entirely to minimize overhead.
+		if not _is_elementwise_fastpath:
+			try:
+				from .fx_graph_builder import FXGraphBuilder
+				FXGraphBuilder.current().add_lazy_tensor(self)
+			except ImportError:
+				pass
+			# Always keep ComputationGraph in sync for pattern analyzers
+			try:
+				from .graph import GraphBuilder
+				GraphBuilder.current().add_tensor(self)
+			except Exception:
+				pass
 
 	def _infer_shape(self) -> Optional[torch.Size]:
 		"""Infer output shape from operation and inputs."""
@@ -749,7 +759,8 @@ class LazyTensor:
 		
 		# High compute operations
 		if self._estimate_compute_intensity() > 5.0:
-			priority += 5
+			# Ensure high-compute ops outrank phase-only bumps (e.g., fusion=+6)
+			priority += 7
 		
 		# Operations in certain phases
 		phase = self._detect_phase()

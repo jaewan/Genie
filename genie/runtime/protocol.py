@@ -237,11 +237,20 @@ class PacketFlags(IntEnum):
     ENCRYPTED = 0x10
 
 class NetworkNode(NamedTuple):
-    """Network node information"""
+    """Network node information (modern API)."""
     id: str
     ip: str
     mac: str
     port: int = DEFAULT_UDP_PORT
+
+class LegacyNetworkNode(NamedTuple):
+    """Legacy network node compatible with legacy tests."""
+    node_id: str
+    ip_address: str
+    mac_address: str
+    port: int = DEFAULT_UDP_PORT
+    gpu_count: int = 1
+    capabilities: tuple = ()
 
 class PacketInfo(NamedTuple):
     """Packet information for Python-C++ interface"""
@@ -340,7 +349,8 @@ try:
     TensorFragment = _LegacyTensorFragment  # type: ignore
     get_address_resolver = _legacy_get_address_resolver  # type: ignore
     get_fragment_manager = _legacy_get_fragment_manager  # type: ignore
-    NetworkNode = _LegacyNetworkNode  # type: ignore
+    # Re-export legacy NetworkNode under a different name; tests import both modern and legacy suites
+    LegacyNetworkNode = _LegacyNetworkNode  # type: ignore
 except Exception:
     # If legacy module isn't importable, the minimal shims above will remain
     pass

@@ -896,8 +896,30 @@ bool GenieDataPlane::init_port() {
     // Configure port
     struct rte_eth_conf port_conf = {};
     port_conf.rxmode.mtu = DEFAULT_MTU;
+    if (config_.enable_rss) {
+        port_conf.rxmode.mq_mode = RTE_ETH_MQ_RX_RSS;
+        port_conf.rx_adv_conf.rss_conf.rss_key = nullptr;
+        port_conf.rx_adv_conf.rss_conf.rss_hf = RTE_ETH_RSS_IP | RTE_ETH_RSS_UDP;
+    }
+    // Optional NIC offloads
+    if (config_.rx_offload_checksum) {
+        port_conf.rxmode.offloads |= RTE_ETH_RX_OFFLOAD_CHECKSUM;
+    }
+    if (config_.rx_offload_lro) {
+        port_conf.rxmode.offloads |= RTE_ETH_RX_OFFLOAD_TCP_LRO;
+        port_conf.rxmode.mtu = std::max<uint16_t>(port_conf.rxmode.mtu, 9000);
+    }
+    if (config_.tx_offload_ipv4_cksum) {
+        port_conf.txmode.offloads |= RTE_ETH_TX_OFFLOAD_IPV4_CKSUM;
+    }
+    if (config_.tx_offload_udp_cksum) {
+        port_conf.txmode.offloads |= RTE_ETH_TX_OFFLOAD_UDP_CKSUM;
+    }
+    if (config_.tx_offload_tso) {
+        port_conf.txmode.offloads |= RTE_ETH_TX_OFFLOAD_TCP_TSO;
+    }
     
-    ret = rte_eth_dev_configure(port_id_, 1, 1, &port_conf);
+    ret = rte_eth_dev_configure(port_id_, config_.rx_queues, config_.tx_queues, &port_conf);
     if (ret < 0) {
         std::cerr << "Failed to configure port: " << rte_strerror(-ret) << std::endl;
         return false;
@@ -953,20 +975,24 @@ bool GenieDataPlane::start() {
             return false;
         }
         
-        // Setup RX queue
-        ret = rte_eth_rx_queue_setup(port_id_, queue_id_, config_.rx_ring_size,
-                                    rte_eth_dev_socket_id(port_id_), nullptr, mempool_);
-        if (ret < 0) {
-            std::cerr << "Failed to setup RX queue: " << rte_strerror(-ret) << std::endl;
-            return false;
+        // Setup RX queues
+        for (uint16_t q = 0; q < config_.rx_queues; q++) {
+            ret = rte_eth_rx_queue_setup(port_id_, q, config_.rx_ring_size,
+                                        rte_eth_dev_socket_id(port_id_), nullptr, mempool_);
+            if (ret < 0) {
+                std::cerr << "Failed to setup RX queue " << q << ": " << rte_strerror(-ret) << std::endl;
+                return false;
+            }
         }
         
-        // Setup TX queue
-        ret = rte_eth_tx_queue_setup(port_id_, queue_id_, config_.tx_ring_size,
-                                    rte_eth_dev_socket_id(port_id_), nullptr);
-        if (ret < 0) {
-            std::cerr << "Failed to setup TX queue: " << rte_strerror(-ret) << std::endl;
-            return false;
+        // Setup TX queues
+        for (uint16_t q = 0; q < config_.tx_queues; q++) {
+            ret = rte_eth_tx_queue_setup(port_id_, q, config_.tx_ring_size,
+                                        rte_eth_dev_socket_id(port_id_), nullptr);
+            if (ret < 0) {
+                std::cerr << "Failed to setup TX queue " << q << ": " << rte_strerror(-ret) << std::endl;
+                return false;
+            }
         }
         
         // Create TX ring for inter-thread communication
@@ -1571,6 +1597,37 @@ void GenieDataPlane::remove_target_node(const std::string& node_id) {
     std::cout << "Removed target node " << node_id << std::endl;
 }
 
+// Phase 3: Configuration methods for C API
+void GenieDataPlane::configure_queues(uint16_t rx_queues, uint16_t tx_queues, bool enable_rss) {
+    config_.rx_queues = rx_queues;
+    config_.tx_queues = tx_queues;
+    config_.enable_rss = enable_rss;
+    
+    std::cout << "Phase 3: Configured queues - RX: " << rx_queues 
+              << ", TX: " << tx_queues 
+              << ", RSS: " << (enable_rss ? "enabled" : "disabled") << std::endl;
+}
+
+void GenieDataPlane::enable_offloads(bool rx_checksum, bool rx_lro, bool tx_ipv4_cksum, bool tx_udp_cksum, bool tx_tso) {
+    config_.rx_offload_checksum = rx_checksum;
+    config_.rx_offload_lro = rx_lro;
+    config_.tx_offload_ipv4_cksum = tx_ipv4_cksum;
+    config_.tx_offload_udp_cksum = tx_udp_cksum;
+    config_.tx_offload_tso = tx_tso;
+    
+    std::cout << "Phase 3: Configured offloads - RX checksum: " << (rx_checksum ? "on" : "off")
+              << ", RX LRO: " << (rx_lro ? "on" : "off")
+              << ", TX IPv4 cksum: " << (tx_ipv4_cksum ? "on" : "off")
+              << ", TX UDP cksum: " << (tx_udp_cksum ? "on" : "off")
+              << ", TX TSO: " << (tx_tso ? "on" : "off") << std::endl;
+}
+
+void GenieDataPlane::enable_cuda_graphs(bool enable) {
+    config_.enable_cuda_graphs = enable;
+    
+    std::cout << "Phase 3: CUDA Graphs " << (enable ? "enabled" : "disabled") << std::endl;
+}
+
 void GenieDataPlane::get_statistics(DataPlaneStats& stats) const {
     // Copy atomic values to regular struct
     stats.packets_sent.store(stats_.packets_sent.load());
@@ -1920,6 +1977,42 @@ int genie_get_reliability_mode(void* data_plane) {
     if (!data_plane) return -1;
     auto* dp = static_cast<genie::data_plane::GenieDataPlane*>(data_plane);
     return dp->reliability_mode() == genie::data_plane::GenieDataPlane::ReliabilityMode::KCP ? 1 : 0;
+}
+
+// Phase 3: Multi-queue & RSS configuration
+int genie_configure_queues(void* data_plane, uint16_t rx_queues, uint16_t tx_queues, int enable_rss) {
+    if (!data_plane) return -1;
+    
+    auto* dp = static_cast<genie::data_plane::GenieDataPlane*>(data_plane);
+    dp->configure_queues(rx_queues, tx_queues, enable_rss != 0);
+    
+    // Note: In a full implementation, this would reconfigure the DPDK port
+    // For now, we just update the configuration for future use
+    return 0;
+}
+
+// Phase 3: NIC offloads configuration  
+int genie_enable_offloads(void* data_plane, int rx_checksum, int rx_lro, int tx_ipv4_cksum, int tx_udp_cksum, int tx_tso) {
+    if (!data_plane) return -1;
+    
+    auto* dp = static_cast<genie::data_plane::GenieDataPlane*>(data_plane);
+    dp->enable_offloads(rx_checksum != 0, rx_lro != 0, tx_ipv4_cksum != 0, tx_udp_cksum != 0, tx_tso != 0);
+    
+    // Note: In a full implementation, this would reconfigure the DPDK port offloads
+    // For now, we just update the configuration for future use
+    return 0;
+}
+
+// Phase 3: CUDA Graphs integration
+int genie_enable_cuda_graphs(void* data_plane, int enable) {
+    if (!data_plane) return -1;
+    
+    auto* dp = static_cast<genie::data_plane::GenieDataPlane*>(data_plane);
+    dp->enable_cuda_graphs(enable != 0);
+    
+    // Note: In a full implementation, this would initialize CUDA Graph capture
+    // For now, we just update the configuration for future use
+    return 0;
 }
 
 } // extern "C"

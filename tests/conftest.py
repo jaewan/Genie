@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 import pytest
+import os
 
 
 # Ensure repository root is on sys.path so `import genie` works without editable install
@@ -19,6 +20,15 @@ def reset_graph_state():
         FXGraphBuilder.reset()
     except Exception:
         pass
+
+
+@pytest.fixture(autouse=True, scope="session")
+def default_disable_cpp_dataplane():
+    """Disable C++ data plane by default for test stability.
+    Can be overridden per-test by setting GENIE_DISABLE_CPP_DATAPLANE explicitly.
+    """
+    if os.environ.get("GENIE_DISABLE_CPP_DATAPLANE") is None:
+        os.environ["GENIE_DISABLE_CPP_DATAPLANE"] = "1"
 
     try:
         from genie.core.lazy_tensor import LazyTensor

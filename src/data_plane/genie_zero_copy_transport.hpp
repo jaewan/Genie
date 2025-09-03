@@ -124,6 +124,7 @@ public:
         bool use_external_buffers = true;
         size_t gpu_buffer_pool_size = 1024 * 1024 * 1024; // 1GB
         int gpu_id = 0;
+        bool enable_cuda_graphs = false;
     };
     
     ZeroCopyTransport(const Config& config);
@@ -173,6 +174,14 @@ public:
     
 private:
     Config config_;
+    // CUDA Graphs (optional)
+#ifdef GENIE_CUDA_SUPPORT
+    cudaGraph_t graph_ = nullptr;
+    cudaGraphExec_t graph_exec_ = nullptr;
+    bool graph_captured_ = false;
+    bool capture_transfer_graph(void* src_ptr, size_t size);
+    void execute_graph();
+#endif
     
     // DPDK resources
     struct rte_mempool* mbuf_pool_;

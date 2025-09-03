@@ -307,6 +307,23 @@ def _max_impl(x, dim=None, keepdim=False):
 def _min_impl(x, dim=None, keepdim=False):
     return torch.min(x, dim=dim, keepdim=keepdim)
 
+# Arg reductions and additional statistics
+@enhanced_dispatcher.register_op("aten::argmax")
+def _argmax_impl(x, dim=None, keepdim=False):
+    return torch.argmax(x, dim=dim, keepdim=keepdim)
+
+@enhanced_dispatcher.register_op("aten::argmin")
+def _argmin_impl(x, dim=None, keepdim=False):
+    return torch.argmin(x, dim=dim, keepdim=keepdim)
+
+@enhanced_dispatcher.register_op("aten::var")
+def _var_impl(x, dim=None, keepdim=False, correction=1):
+    return torch.var(x, dim=dim, keepdim=keepdim, correction=correction)
+
+@enhanced_dispatcher.register_op("aten::std")
+def _std_impl(x, dim=None, keepdim=False, correction=1):
+    return torch.std(x, dim=dim, keepdim=keepdim, correction=correction)
+
 # Comparison operations
 @enhanced_dispatcher.register_op("aten::eq")
 def _eq_impl(x, y):

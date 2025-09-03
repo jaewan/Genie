@@ -18,6 +18,8 @@
 
 #ifdef GENIE_CUDA_SUPPORT
 // CUDA functions are available
+#include <cuda.h>
+#include <cuda_runtime_api.h>
 #else
 // Stub implementations for CUDA functions when CUDA is not available
 inline cudaError_t cudaGetDeviceCount(int* count) { *count = 0; return 1; }
@@ -73,6 +75,10 @@ bool ZeroCopyTransport::initialize() {
             config_.use_gpu_direct = false;
         }
     }
+    // Optional CUDA Graph setup (lazy capture on first send)
+#ifdef GENIE_CUDA_SUPPORT
+    graph_captured_ = false;
+#endif
     
     std::cout << "Zero-Copy Transport initialized successfully" << std::endl;
     std::cout << "  GPU Direct: " << (config_.use_gpu_direct ? "Enabled" : "Disabled") << std::endl;
@@ -80,6 +86,25 @@ bool ZeroCopyTransport::initialize() {
     
     return true;
 }
+#ifdef GENIE_CUDA_SUPPORT
+bool ZeroCopyTransport::capture_transfer_graph(void* src_ptr, size_t size) {
+    if (!config_.enable_cuda_graphs || graph_captured_ || !cuda_stream_) return false;
+    // Minimal placeholder capture; real capture would include device-to-host copies and signaling
+    cudaError_t e = cudaStreamBeginCapture(cuda_stream_, cudaStreamCaptureModeGlobal);
+    if (e != cudaSuccess) return false;
+    // No-ops in capture for now
+    e = cudaStreamEndCapture(cuda_stream_, &graph_);
+    if (e != cudaSuccess) return false;
+    if (cudaGraphInstantiate(&graph_exec_, graph_, NULL, NULL, 0) != cudaSuccess) return false;
+    graph_captured_ = true;
+    return true;
+}
+
+void ZeroCopyTransport::execute_graph() {
+    if (!config_.enable_cuda_graphs || !graph_captured_ || !graph_exec_) return;
+    cudaGraphLaunch(graph_exec_, cuda_stream_);
+}
+#endif
 
 void ZeroCopyTransport::shutdown() {
     // Clean up active transfers

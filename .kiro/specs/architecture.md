@@ -306,6 +306,16 @@ class FailureHandler:
 
 ### Communication Optimizations
 
+## Numerics Stability Strategy
+
+To preserve PyTorch-level numerical behavior across diverse workloads:
+
+- Maintain a numerics-critical bypass set at the execution layer: `softmax`, `log_softmax`, `logsumexp`, `exp`, `log`, `tanh`. These execute via eager fallback (no FX) to avoid amplification of tiny differences.
+- Keep elementwise fast path off by default (`GENIE_ENABLE_ELEMENTWISE_FASTPATH=0`). When enabled, it must compute dtype via `torch.result_type` and shapes via broadcasting rules to mirror PyTorch semantics without materialization.
+- Temporarily bypass FX for `matmul/mm/bmm`, reductions (`mean/var/std`), arithmetic (`add/sub/mul/div`), and arg reductions until FX parity is proven against golden tests.
+- Expose toggles so production can choose between maximal performance and maximal determinism.
+
+This approach ensures correctness-first behavior while allowing opt-in performance once equivalence is verified.
 1. **Operation Batching**: Combine small transfers
 2. **Pipeline Parallelism**: Overlap compute and communication
 3. **Compression**: Selective tensor compression for bandwidth-limited scenarios

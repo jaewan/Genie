@@ -58,9 +58,18 @@ struct DataPlaneConfig {
     std::vector<std::string> eal_args;
     uint16_t port_id = 0;
     uint16_t queue_id = 0;
+    uint16_t rx_queues = 1;
+    uint16_t tx_queues = 1;
+    bool enable_rss = false;
     uint32_t mempool_size = 8192;
     uint16_t rx_ring_size = 1024;
     uint16_t tx_ring_size = 1024;
+    // NIC offloads (configurable; applied when supported by device)
+    bool rx_offload_checksum = false;
+    bool rx_offload_lro = false;
+    bool tx_offload_ipv4_cksum = false;
+    bool tx_offload_udp_cksum = false;
+    bool tx_offload_tso = false;
     
     // GPU configuration
     int gpu_device_id = 0;
@@ -81,6 +90,9 @@ struct DataPlaneConfig {
     uint32_t ack_timeout_ms = 100;
     uint32_t max_retries = 3;
     uint32_t window_size = 64;
+    
+    // Phase 3: CUDA Graphs integration
+    bool enable_cuda_graphs = false;
     
     // Enhanced features
     bool use_dpdk_libs = true;  // Use rte_ip_frag, rte_reorder, rte_hash
@@ -321,6 +333,11 @@ public:
     void set_target_node(const std::string& node_id, const std::string& ip, const std::string& mac);
     void remove_target_node(const std::string& node_id);
     
+    // Phase 3: Configuration methods for C API
+    void configure_queues(uint16_t rx_queues, uint16_t tx_queues, bool enable_rss);
+    void enable_offloads(bool rx_checksum, bool rx_lro, bool tx_ipv4_cksum, bool tx_udp_cksum, bool tx_tso);
+    void enable_cuda_graphs(bool enable);
+    
 private:
     // DPDK initialization
     bool init_dpdk();
@@ -479,6 +496,15 @@ extern "C" {
                                    uint8_t shape_rank,
                                    const uint16_t* shape_dims,
                                    size_t dims_len);
+    
+    // Phase 3: Multi-queue & RSS configuration
+    int genie_configure_queues(void* data_plane, uint16_t rx_queues, uint16_t tx_queues, int enable_rss);
+    
+    // Phase 3: NIC offloads configuration  
+    int genie_enable_offloads(void* data_plane, int rx_checksum, int rx_lro, int tx_ipv4_cksum, int tx_udp_cksum, int tx_tso);
+    
+    // Phase 3: CUDA Graphs integration
+    int genie_enable_cuda_graphs(void* data_plane, int enable);
 }
 
 } // namespace data_plane

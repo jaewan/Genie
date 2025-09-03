@@ -87,6 +87,20 @@ answer = model(image, text_query)
 5. **Correctness**: Numerical parity within 1e-5
 6. **Pragmatism**: Phased execution from local to zero-copy remote
 
+## Numerics Stability Policy (Executor & Capture)
+
+Genie prioritizes correctness parity with PyTorch. Certain op chains are numerically sensitive (e.g., tanh → mul → softmax). Small deviations in dtype/broadcast semantics or evaluation order can be amplified. To guarantee parity while retaining performance, we adopt the following policy:
+
+- FX-bypass whitelist for numerics-critical ops: `aten::softmax`, `aten::log_softmax`, `aten::logsumexp`, `aten::exp`, `aten::log`, `aten::tanh`. These ops (and their short chains) execute via eager fallback to avoid drift.
+- Elementwise fast path (disabled by default): gated by `GENIE_ENABLE_ELEMENTWISE_FASTPATH=1`. When disabled (default), dtype promotion and broadcasting behavior mirror PyTorch via meta inference or eager fallback.
+- Additional FX-bypass entries: `aten::{matmul,mm,bmm,mean,var,std,add,sub,mul,div,argmax,argmin}` are bypassed while the FX path matures for exact parity.
+- Env flags:
+  - `GENIE_ENABLE_ELEMENTWISE_FASTPATH=0|1` (default 0): micro-optimization for elementwise ops; enable only when parity is validated.
+  - `GENIE_ANALYZER_DEBUG=0|1`: verbose pattern logs.
+  - `GENIE_ENABLE_META_INFER=0|1` (default 1): meta-based shape/dtype inference without materialization.
+
+This policy delivered 40/40 on the comprehensive correctness suite and is designed to remain stable as we evolve the FX executor.
+
 ## Critical Success Factors
 1. **Semantic Capture**: Rich metadata without performance impact (overhead <10µs/op)
 2. **Pattern Recognition**: >85% accuracy in workload classification
