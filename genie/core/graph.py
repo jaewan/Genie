@@ -3,11 +3,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Set, Tuple, Optional
 import threading
+import warnings
 from torch import fx
 
 
 @dataclass
 class ComputationNode:
+	"""Computation node in the legacy graph representation.
+	
+	.. deprecated:: 2025-09-30
+		Use FX GraphModule instead. This class will be removed in a future version.
+		See the migration guide in docs/REFACTORING_PLAN.md for details.
+	"""
 	id: str
 	operation: str
 	inputs: List[str]
@@ -17,9 +24,29 @@ class ComputationNode:
 
 @dataclass
 class ComputationGraph:
+	"""Legacy computation graph representation.
+	
+	.. deprecated:: 2025-09-30
+		Use FX GraphModule with FXGraphAdapter instead. This class will be removed
+		in a future version. See the migration guide in docs/REFACTORING_PLAN.md.
+		
+	New code should use:
+		- `genie.core.fx_graph_builder.FXGraphBuilder` for building graphs
+		- `genie.core.fx_graph_adapter.FXGraphAdapter` for analyzing graphs
+	"""
 	nodes: Dict[str, ComputationNode]
 	edges: List[Tuple[str, str]]  # (source_id, target_id)
 	entry_points: Set[str]
+	
+	def __post_init__(self):
+		"""Emit deprecation warning on first use."""
+		warnings.warn(
+			"ComputationGraph is deprecated and will be removed in a future version. "
+			"Use FX GraphModule with FXGraphAdapter instead. "
+			"See docs/REFACTORING_PLAN.md for migration guide.",
+			DeprecationWarning,
+			stacklevel=3
+		)
 
 	def topological_sort(self) -> List[str]:
 		visited: Set[str] = set()
@@ -131,6 +158,12 @@ class GraphBuilder:
 		return key
 
 	def get_graph(self) -> ComputationGraph:
+		"""Get computation graph in legacy format.
+		
+		.. deprecated:: 2025-09-30
+			Use FXGraphBuilder instead for new code. This method returns the legacy
+			ComputationGraph format which will be removed in a future version.
+		"""
 		return ComputationGraph(
 			nodes=self.nodes.copy(),
 			edges=self.edges.copy(),

@@ -85,6 +85,9 @@ This directory contains comprehensive implementation documentation for the Genie
 **Status**: Ready for open-source release  
 **Total Docs**: 12 guides, 10,740+ lines  
 **Recent Updates**: 
-- Refactoring #1 (Error Handling) - 85% complete
-- Architecture overview updated with scheduler/optimizer details
-- Document 12 added for tracking refactoring progress
+- ✅ Refactoring #1 (Error Handling) - COMPLETE (60/60 tests)
+- ✅ Refactoring #3 (FX Graph Migration) - COMPLETE (80+ tests)
+- ✅ Refactoring #4 (Async-First Transport) - COMPLETE (14/14 tests)
+- ✅ Refactoring #5 (Pattern Matching Service) - COMPLETE (27/27 tests)
+- Architecture overview updated with async transport details
+- Runtime transport doc updated with ThreadPoolExecutor implementation

@@ -1,6 +1,6 @@
 # Genie Scripts Directory
 
-This directory contains all setup, build, and utility scripts for the Genie project.
+This directory contains the essential scripts for GPUdirect RDMA setup and testing.
 
 ## Directory Structure
 

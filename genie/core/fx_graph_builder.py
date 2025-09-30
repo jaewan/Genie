@@ -117,7 +117,17 @@ class FXGraphBuilder:
                 fx_kwargs if fx_kwargs else {}
             )
         
-        # Attach semantic metadata to node
+        # Attach metadata in new unified format (Refactoring #3)
+        # Uses 'genie' namespace to coordinate with Refactoring #2's MetadataRegistry
+        node.meta['genie'] = {
+            'tensor_id': lazy_tensor.id,      # Key for MetadataRegistry lookup
+            'operation': lazy_tensor.operation,  # Duplicated for convenience
+            'shape': lazy_tensor.shape,       # Graph-structural info
+            'dtype': lazy_tensor.dtype,       # Graph-structural info
+            'device': lazy_tensor.device,     # Graph-structural info
+        }
+        
+        # Keep old format for backward compatibility (will be removed in Refactoring #3 complete)
         node.meta['semantic'] = lazy_tensor.metadata
         node.meta['lazy_tensor_id'] = lazy_tensor.id
         node.meta['shape'] = lazy_tensor.shape

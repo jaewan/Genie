@@ -1,0 +1,15 @@
+# Core dependencies for Genie with RTX 50-series GPU support
+torch>=2.8.0
+torchvision>=0.19.0
+torchaudio>=2.4.0
+
+# Development dependencies
+numpy>=1.24.0,<2.0.0
+networkx>=3.0
+packaging>=23.0
+pytest>=7.3.1
+
+# Additional common dependencies for AI/ML workloads
+matplotlib>=3.5.0
+tqdm>=4.64.0
+psutil>=5.9.0

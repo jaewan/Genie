@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import time
-from typing import Dict, Any
+from typing import Dict, Any, Union
+import torch.fx as fx
 
 from genie.core.graph import ComputationGraph
 from genie.semantic.pattern_registry import PatternRegistry
@@ -14,24 +15,55 @@ import os
 
 
 class SemanticAnalyzer:
-	"""Three-tier semantic analyzer (dynamic, FX, hooks)."""
+	"""Three-tier semantic analyzer (dynamic, FX, hooks).
+	
+	Updated for Refactoring #3: Now supports both ComputationGraph and FX GraphModule.
+	Updated for Refactoring #5: Now supports dependency injection for pattern matchers.
+	"""
 
-	def __init__(self, pattern_registry: PatternRegistry | None = None) -> None:
-		self.pattern_registry = pattern_registry or PatternRegistry()
+	def __init__(
+		self, 
+		pattern_registry: PatternRegistry | None = None,
+		pattern_matcher=None
+	) -> None:
+		"""Initialize semantic analyzer.
+		
+		Args:
+			pattern_registry: (Deprecated) Legacy pattern registry. Use pattern_matcher instead.
+			pattern_matcher: IPatternMatcher instance for pattern matching.
+						   If None, uses default NetworkXPatternMatcher.
+		"""
+		# Support both old and new initialization
+		if pattern_matcher is not None:
+			# New approach: Use injected pattern matcher
+			self.pattern_matcher = pattern_matcher
+			self.pattern_registry = None  # Deprecated
+		elif pattern_registry is not None:
+			# Old approach: Wrap pattern_registry in NetworkXPatternMatcher
+			from genie.semantic.pattern_matcher import NetworkXPatternMatcher
+			self.pattern_matcher = NetworkXPatternMatcher(pattern_registry)
+			self.pattern_registry = pattern_registry  # Keep for backward compat
+		else:
+			# Default: Use NetworkX matcher with default patterns
+			from genie.semantic.pattern_matcher import get_default_pattern_matcher
+			self.pattern_matcher = get_default_pattern_matcher()
+			self.pattern_registry = None
+		
 		self.fx_analyzer = FXAnalyzer()
 		self.hook_manager = HookManager()
 		self._analysis_stats: Dict[str, float] = {}
 
 	@track_performance
-	def analyze_graph(self, graph: ComputationGraph) -> WorkloadProfile:
+	def analyze_graph(self, graph: Union[ComputationGraph, fx.GraphModule]) -> WorkloadProfile:
 		"""Analyze graph with performance tracking and advanced algorithms."""
 		start_time = time.perf_counter()
 		logger = logging.getLogger(__name__)
 		
 		# Stable graph-id caching (best-effort in-process)
+		# Note: Currently only supports ComputationGraph hashing
 		cache_enabled = os.getenv("GENIE_ANALYZER_CACHE", "1") == "1"
 		graph_id: str | None = None
-		if cache_enabled:
+		if cache_enabled and isinstance(graph, ComputationGraph):
 			try:
 				graph_id = compute_graph_id(graph)
 			except Exception:
@@ -48,8 +80,8 @@ class SemanticAnalyzer:
 		structural_info = self.fx_analyzer.analyze_structure(graph)
 		semantic_context = self.hook_manager.get_context(graph)
 		
-		# Match patterns (now returns Result)
-		pattern_result = self.pattern_registry.match_patterns(graph)
+		# Match patterns using injected pattern matcher (Refactoring #5)
+		pattern_result = self.pattern_matcher.match_patterns(graph)
 		if pattern_result.is_ok:
 			patterns = pattern_result.unwrap()
 		else:
@@ -93,10 +125,10 @@ class SemanticAnalyzer:
 		"""Get comprehensive performance report."""
 		return {
 			"analyzer_stats": self._analysis_stats,
-			"pattern_stats": self.pattern_registry.get_performance_report()
+			"pattern_stats": self.pattern_matcher.get_performance_report()
 		}
 
-	def generate_stub_plan(self, graph: ComputationGraph, profile: "WorkloadProfile") -> "ExecutionPlan":
+	def generate_stub_plan(self, graph: Union[ComputationGraph, fx.GraphModule], profile: "WorkloadProfile") -> "ExecutionPlan":
 		"""Emit a minimal ExecutionPlan with placement hints.
 
 		This is a Phase-1 stub that wraps the entire graph into a single fragment

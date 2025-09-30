@@ -5,9 +5,9 @@ Semantic-driven, framework-level disaggregation for AI accelerators. Phase 1 pro
 ### Requirements
 
 - Python 3.10+ recommended (3.12 tested)
-- PyTorch 2.1.2+ (or custom build for RTX 5060/5080)
-- Optional (GPU): CUDA 12.1+ (PyTorch 2.2–2.5) or CUDA 12.8 (PyTorch 2.8), NVIDIA driver 535+, cuDNN
-- **RTX 5060 Ti / RTX 5080**: Requires PyTorch built from source with sm_120 support
+- PyTorch 2.8.0+ for RTX 50-series GPU support, or PyTorch 2.1.2+ for other GPUs
+- Optional (GPU): CUDA 12.8+ (RTX 50-series) or CUDA 12.1+ (other GPUs), NVIDIA driver 535+, cuDNN
+- **RTX 5060 Ti / RTX 5080**: Supported via PyTorch 2.8.0+cu128 (automatic detection)
 
 ### Quickstart (one command)
 
@@ -17,30 +17,26 @@ Semantic-driven, framework-level disaggregation for AI accelerators. Phase 1 pro
 
 # CPU-only development
 ./setup.sh --mode basic
-# CUDA 12.8 development (PyTorch 2.8 wheels)
+# RTX 50-series GPU development (PyTorch 2.8 + CUDA 12.8)
 ./setup.sh --mode basic --pytorch-cuda cu128
-# CUDA 12.1 development (PyTorch 2.2–2.5 wheels)
+# Other GPU development (PyTorch 2.2–2.5 + CUDA 12.1)
 ./setup.sh --mode basic --pytorch-cuda cu121
 # Full DPDK production setup
 ./setup.sh --mode dpdk
 ```
 
-#### Special Note for RTX 5060 Ti / RTX 5080 GPUs
+#### RTX 5060 Ti / RTX 5080 GPU Support
 
-These next-generation GPUs use CUDA Compute Capability 12.0 (sm_120), which is not yet supported by standard PyTorch releases. 
+These next-generation GPUs use CUDA Compute Capability 12.0 (sm_120) and are now **fully supported** via PyTorch 2.8.0+cu128.
 
-**Current Status**: PyTorch compilation with sm_120 faces system compatibility issues. We provide:
+**Current Status**: ✅ **Full GPU acceleration available**
 
-1. **Simulation Mode** for full functionality testing:
-```bash
-python test_with_simulation.py  # Tests all features without GPU
-```
+The system automatically detects and utilizes RTX 50-series GPUs for:
+- Matrix operations and tensor computations
+- Deep learning model training and inference
+- Zero-copy memory transfers (when available)
 
-2. **Automatic GPU support** once PyTorch adds sm_120 (check nightly builds periodically)
-
-3. **Full documentation** in `docs/rtx5060-support.md`
-
-The system is fully functional and will automatically utilize your RTX 5060 Ti once PyTorch support is available.
+**Performance**: RTX 5060 Ti provides excellent performance with 15.4 GB memory and fast matrix operations.
 
 ### DPDK Zero-Copy Setup (Advanced)
 

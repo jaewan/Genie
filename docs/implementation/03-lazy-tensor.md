@@ -5,7 +5,7 @@
 `LazyTensor` is the core abstraction that enables deferred execution and semantic capture in Genie. Instead of executing operations immediately, LazyTensors build a computation graph that can be analyzed and optimized before execution.
 
 **File**: `genie/core/lazy_tensor.py`  
-**Lines**: ~890 lines  
+**Lines**: ~684 lines  
 **Key Concept**: Proxy pattern with semantic enrichment
 
 ## Design Philosophy
@@ -171,178 +171,15 @@ def infer_via_meta(operation: str, inputs: List[Any],
     return result.shape, result.dtype
 ```
 
-## Semantic Metadata
+## Integration with Metadata System (Post-Refactoring #2)
 
-### Lazy Initialization
+After Refactoring #2, semantic metadata is managed separately:
 
-Metadata is created on first access to minimize overhead:
+- **Registry Integration**: Registers with MetadataRegistry in `__init__`
+- **Enrichment Trigger**: Calls SemanticEnricher to populate metadata
+- **Access**: `metadata` property retrieves from registry
 
-```python
-@property
-def metadata(self) -> SemanticMetadata:
-    """Get semantic metadata, creating it lazily."""
-    if self._metadata is None:
-        self._metadata = SemanticMetadata(
-            operation_type=self.operation,
-            tensor_shape=self.shape,
-            dtype=self.dtype,
-            device_hint=self.device,
-            
-            # Enhanced semantics (HotNets'25 §3.1)
-            semantic_role=self._infer_semantic_role(),
-            model_module=self._get_module_context(),
-            execution_phase=self._detect_phase(),
-            data_lineage=self._track_lineage(),
-            memory_pattern=self._analyze_memory_pattern(),
-            
-            # Performance hints
-            compute_intensity=self._estimate_compute_intensity(),
-            can_parallelize=self._can_parallelize(),
-            priority=self._calculate_priority()
-        )
-    return self._metadata
-```
-
-### Semantic Role Inference
-
-```python
-def _infer_semantic_role(self) -> Optional[str]:
-    """Infer the semantic role of this operation.
-    
-    Examples:
-        - matmul with 3D inputs -> "attention_score_computation"
-        - softmax -> "softmax_activation"
-        - linear -> "linear_projection"
-    """
-    try:
-        from genie.semantic.module_context import get_module_context_tracker
-        tracker = get_module_context_tracker()
-        context = tracker.get_current_context()
-        
-        if context:
-            return tracker.infer_semantic_role(self.operation, context)
-        
-        # Fallback heuristics
-        op_name = self.operation.split("::")[-1]
-        
-        # Attention patterns
-        if "matmul" in op_name and len(self.inputs) >= 2:
-            if self._looks_like_attention():
-                return "attention_score_computation"
-        
-        # Activation functions
-        if op_name in ["relu", "gelu", "sigmoid", "tanh", "softmax"]:
-            return f"{op_name}_activation"
-        
-        return None
-    except Exception:
-        return None
-```
-
-### Execution Phase Detection
-
-```python
-def _detect_phase(self) -> Optional[ExecutionPhase]:
-    """Detect execution phase (HotNets'25 Table 1).
-    
-    Phases:
-        - PREFILL: LLM initial token processing
-        - DECODE: LLM autoregressive generation
-        - VISION_BACKBONE: CNN feature extraction
-        - VISION_HEAD: Classification/detection
-        - MULTIMODAL_FUSION: Cross-modal attention
-    """
-    try:
-        from genie.semantic.phase_detector import get_phase_detector
-        detector = get_phase_detector()
-        
-        phase = detector.detect_phase(
-            self.operation,
-            self.inputs,
-            metadata={
-                'tensor_shape': self.shape,
-                'dtype': self.dtype,
-                'module_path': self._get_module_context()
-            }
-        )
-        
-        return phase if isinstance(phase, ExecutionPhase) else ExecutionPhase.UNKNOWN
-    except Exception:
-        return ExecutionPhase.UNKNOWN
-```
-
-### Memory Pattern Analysis
-
-```python
-def _analyze_memory_pattern(self) -> Optional[MemoryPattern]:
-    """Analyze memory access pattern for optimization.
-    
-    Patterns (HotNets'25 §3.2):
-        - STREAMING: One-time use (activations)
-        - REUSED: Multiple accesses (weights)
-        - PERSISTENT: Long-lived (KV cache)
-        - EPHEMERAL: Short-lived intermediates
-        - RANDOM: Random access (embeddings)
-    """
-    op_name = self.operation.split("::")[-1]
-    
-    # KV cache operations are persistent
-    if self._is_kv_cache_operation():
-        return MemoryPattern.PERSISTENT
-    
-    # Weights are typically reused
-    if self._is_weight_tensor():
-        return MemoryPattern.REUSED
-    
-    # Convolution and matmul have streaming patterns
-    if op_name in ["conv2d", "conv1d", "matmul", "mm", "bmm"]:
-        return MemoryPattern.STREAMING
-    
-    # Random operations
-    if "dropout" in op_name or "random" in op_name:
-        return MemoryPattern.RANDOM
-    
-    return MemoryPattern.STREAMING  # Default
-```
-
-### Data Lineage Tracking
-
-```python
-def _track_lineage(self) -> Optional[DataLineage]:
-    """Track data flow through the computation."""
-    lineage = DataLineage()
-    
-    # Track source tensors
-    for inp in self.inputs:
-        if isinstance(inp, LazyTensor):
-            lineage.source_tensors.append(inp.id)
-            
-            # Propagate from inputs
-            if inp.metadata and inp.metadata.data_lineage:
-                lineage.source_modules.extend(
-                    inp.metadata.data_lineage.source_modules
-                )
-                lineage.modality = inp.metadata.data_lineage.modality
-                lineage.transformation_chain.extend(
-                    inp.metadata.data_lineage.transformation_chain
-                )
-    
-    # Add current transformation
-    module_context = self._get_module_context()
-    if module_context:
-        lineage.source_modules.append(module_context)
-    
-    lineage.transformation_chain.append(self.operation)
-    
-    # Infer modality from context
-    if not lineage.modality and module_context:
-        if "vision" in module_context.lower():
-            lineage.modality = "vision"
-        elif "text" in module_context.lower():
-            lineage.modality = "text"
-    
-    return lineage
-```
+This separates execution concerns from semantic analysis.
 
 ## PyTorch Integration
 

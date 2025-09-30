@@ -12,9 +12,11 @@ import torch
 logger = logging.getLogger(__name__)
 
 
-from .semantic_metadata import SemanticMetadata, ExecutionPhase, MemoryPattern, DataLineage
 from .meta_utils import infer_via_meta
 from .exceptions import Result, ShapeInferenceError
+
+# Note: SemanticMetadata now comes from metadata_registry (Refactoring #2)
+# ExecutionPhase, MemoryPattern, DataLineage no longer used in LazyTensor
 
 
 class LazyTensor:
@@ -80,12 +82,17 @@ class LazyTensor:
 				if self.dtype is None:
 					self.dtype = meta_dtype
 		
-		# Lazy init metadata to avoid upfront object allocation
+		# No longer store metadata inline - use MetadataRegistry (Refactoring #2)
+		# Metadata is managed separately for clean separation of concerns
 		self._metadata = None
 
 		# Execution state
 		self.materialized = False
 		self.concrete_value: Optional[torch.Tensor] = None
+		
+		# Register with metadata registry for semantic analysis (Refactoring #2)
+		if not _is_elementwise_fastpath:
+			self._register_for_metadata()
 		
 		# Optional debug logging for intercepted ops
 		if os.getenv("GENIE_LOG_INTERCEPTS", "0") == "1":
@@ -503,300 +510,56 @@ class LazyTensor:
 			return self.shape[0]
 		return int(self.materialize().size(0))
 
-	@property
-	def metadata(self) -> SemanticMetadata:  # type: ignore[override]
-		if self._metadata is None:
-			# Create rich semantic metadata as per HotNets'25 paper
-			self._metadata = SemanticMetadata(
-				operation_type=self.operation,
-				tensor_shape=self.shape,
-				dtype=self.dtype,
-				device_hint=self.device,
-				# Enhanced semantic enrichment
-				semantic_role=self._infer_semantic_role(),
-				model_module=self._get_module_context(),
-				execution_phase=self._detect_phase(),
-				data_lineage=self._track_lineage(),
-				memory_pattern=self._analyze_memory_pattern(),
-				# Additional context
-				layer_depth=self._get_layer_depth(),
-				is_activation=self._is_activation(),
-				kv_cache_related=self._is_kv_cache_operation(),
-				# Performance hints
-				compute_intensity=self._estimate_compute_intensity(),
-				can_parallelize=self._can_parallelize(),
-				priority=self._calculate_priority()
-			)
-		return self._metadata
-	
-	def _infer_semantic_role(self) -> Optional[str]:
-		"""Infer the semantic role of this operation in the model."""
+	def _register_for_metadata(self):
+		"""Register this tensor with metadata registry for semantic analysis (Refactoring #2)."""
 		try:
-			from genie.semantic.module_context import get_module_context_tracker
-			tracker = get_module_context_tracker()
-			context = tracker.get_current_context()
+			from genie.semantic.metadata_registry import get_metadata_registry
+			from genie.semantic.enricher import get_semantic_enricher
 			
-			if context:
-				return tracker.infer_semantic_role(self.operation, context)
+			registry = get_metadata_registry()
+			registry.register(self.id, self)
 			
-			# Fallback heuristics based on operation type
-			op_name = self.operation.split("::")[-1]
+			# Trigger semantic enrichment (async/lazy)
+			enricher = get_semantic_enricher()
+			metadata_result = enricher.enrich(
+				operation=self.operation,
+				inputs=self.inputs,
+				kwargs=self.kwargs,
+				shape=self.shape,
+				dtype=self.dtype
+			)
 			
-			# Attention patterns
-			if "matmul" in op_name and len(self.inputs) >= 2:
-				# Check if this looks like attention
-				if hasattr(self.inputs[0], "shape") and hasattr(self.inputs[1], "shape"):
-					shape1 = self.inputs[0].shape
-					shape2 = self.inputs[1].shape
-					if len(shape1) >= 3 and len(shape2) >= 3:
-						if shape1[-1] == shape2[-2]:  # Compatible for matmul
-							return "attention_score_computation"
-			
-			# Activation functions
-			if op_name in ["relu", "gelu", "sigmoid", "tanh", "softmax"]:
-				return f"{op_name}_activation"
-			
-			# Normalization
-			if "norm" in op_name or "layer_norm" in op_name:
-				return "normalization"
-			
-			# Projection operations
-			if op_name == "linear" or (op_name == "matmul" and len(self.inputs) == 2):
-				return "linear_projection"
-			
-			return None
+			if metadata_result.is_ok:
+				registry.set_metadata(self.id, metadata_result.unwrap())
+			else:
+				logger.debug(f"Metadata enrichment failed for {self.id}: {metadata_result.error}")
+		
 		except Exception as e:
-			logger.debug(f"Failed to infer semantic role: {e}")
-			return None
+			logger.debug(f"Could not register metadata for {self.id}: {e}")
 	
-	def _get_module_context(self) -> Optional[str]:
-		"""Get the module context where this operation occurs."""
+	@property
+	def metadata(self) -> Optional[SemanticMetadata]:  # type: ignore[override]
+		"""
+		Get semantic metadata for this tensor (Refactoring #2).
+		
+		Metadata is stored separately in MetadataRegistry and retrieved on demand.
+		This coordinates with Refactoring #3: FX Graph stores tensor_id in meta dict.
+		"""
 		try:
-			from genie.semantic.module_context import get_module_context_tracker
-			tracker = get_module_context_tracker()
-			context = tracker.get_current_context()
-			
-			if context:
-				return context.module_path
-			
-			return None
+			from genie.semantic.metadata_registry import get_metadata_registry
+			registry = get_metadata_registry()
+			return registry.get_metadata(self.id)
 		except Exception:
 			return None
 	
-	def _detect_phase(self) -> Optional[ExecutionPhase]:
-		"""Detect the execution phase (prefill/decode/fusion etc)."""
+	def __del__(self):
+		"""Cleanup metadata when tensor is garbage collected (Refactoring #2)."""
 		try:
-			# Try the new phase detector first
-			from genie.semantic.phase_detector import get_phase_detector
-			detector = get_phase_detector()
-			
-			# Pass operation and inputs to detector
-			phase = detector.detect_phase(
-				self.operation,
-				self.inputs,
-				metadata={
-					'tensor_shape': self.shape,
-					'dtype': self.dtype,
-					'module_path': self._get_module_context()
-				}
-			)
-			
-			if isinstance(phase, ExecutionPhase):
-				return phase
-			
-			# Fallback to module context tracker
-			from genie.semantic.module_context import get_module_context_tracker
-			tracker = get_module_context_tracker()
-			phase_str = tracker.detect_execution_phase()
-			
-			# Map string to ExecutionPhase enum
-			phase_map = {
-				"prefill": ExecutionPhase.PREFILL,
-				"decode": ExecutionPhase.DECODE,
-				"vision_backbone": ExecutionPhase.VISION_BACKBONE,
-				"vision_head": ExecutionPhase.VISION_HEAD,
-				"multimodal_fusion": ExecutionPhase.MULTIMODAL_FUSION,
-				"embedding": ExecutionPhase.EMBEDDING
-			}
-			
-			return phase_map.get(phase_str, ExecutionPhase.UNKNOWN)
+			from genie.semantic.metadata_registry import get_metadata_registry
+			registry = get_metadata_registry()
+			registry.remove(self.id)
 		except Exception:
-			return ExecutionPhase.UNKNOWN
-	
-	def _track_lineage(self) -> Optional[DataLineage]:
-		"""Track data lineage through the computation."""
-		try:
-			lineage = DataLineage()
-			
-			# Track source tensors and propagate transformations
-			for inp in self.inputs:
-				if isinstance(inp, LazyTensor):
-					lineage.source_tensors.append(inp.id)
-					# Propagate lineage from inputs
-					if inp.metadata and inp.metadata.data_lineage:
-						lineage.source_modules.extend(inp.metadata.data_lineage.source_modules)
-						if inp.metadata.data_lineage.modality:
-							lineage.modality = inp.metadata.data_lineage.modality
-						# Propagate transformation chain from inputs
-						lineage.transformation_chain.extend(inp.metadata.data_lineage.transformation_chain)
-			
-			# Add current module to lineage
-			module_context = self._get_module_context()
-			if module_context:
-				lineage.source_modules.append(module_context)
-			
-			# Add current transformation
-			lineage.transformation_chain.append(self.operation)
-			
-			# Infer modality from context
-			if not lineage.modality:
-				if module_context:
-					if "vision" in module_context.lower() or "visual" in module_context.lower():
-						lineage.modality = "vision"
-					elif "text" in module_context.lower() or "language" in module_context.lower():
-						lineage.modality = "text"
-					elif "audio" in module_context.lower():
-						lineage.modality = "audio"
-			
-			return lineage
-		except Exception:
-			return None
-	
-	def _analyze_memory_pattern(self) -> Optional[MemoryPattern]:
-		"""Analyze the memory access pattern of this operation."""
-		try:
-			op_name = self.operation.split("::")[-1]
-			
-			# KV cache operations are persistent
-			if self._is_kv_cache_operation():
-				return MemoryPattern.PERSISTENT
-			
-			# Weights are typically reused
-			if self._is_weight_tensor():
-				return MemoryPattern.REUSED
-			
-			# Convolution and matmul have predictable streaming patterns
-			if op_name in ["conv2d", "conv1d", "matmul", "mm", "bmm"]:
-				return MemoryPattern.STREAMING
-			
-			# Random operations like dropout
-			if "dropout" in op_name or "random" in op_name:
-				return MemoryPattern.RANDOM
-			
-			# Intermediate activations (after checking specific ops)
-			if self._is_activation():
-				# Check if this feeds into multiple operations
-				# (Would need graph analysis for accurate detection)
-				return MemoryPattern.EPHEMERAL
-			
-			return MemoryPattern.STREAMING  # Default
-		except Exception:
-			return MemoryPattern.STREAMING
-	
-	def _get_layer_depth(self) -> Optional[int]:
-		"""Get the layer depth in the model."""
-		try:
-			from genie.semantic.module_context import get_module_context_tracker
-			tracker = get_module_context_tracker()
-			context = tracker.get_current_context()
-			
-			if context:
-				return context.layer_depth
-			
-			return None
-		except Exception:
-			return None
-	
-	def _is_activation(self) -> bool:
-		"""Check if this is an activation tensor vs weight."""
-		# Activations are typically outputs of operations on inputs
-		# Weights are parameters that don't change during forward pass
-		
-		# Check if any input is a parameter (would be a weight operation)
-		for inp in self.inputs:
-			if isinstance(inp, torch.nn.Parameter):
-				return False
-		
-		# Activation functions produce activations
-		op_name = self.operation.split("::")[-1]
-		if op_name in ["relu", "gelu", "sigmoid", "tanh", "softmax", "dropout"]:
-			return True
-		
-		# Default to activation for dynamic operations
-		return True
-	
-	def _is_weight_tensor(self) -> bool:
-		"""Check if this operates on weight tensors."""
-		for inp in self.inputs:
-			if isinstance(inp, torch.nn.Parameter):
-				return True
-		return False
-	
-	def _is_kv_cache_operation(self) -> bool:
-		"""Check if this is related to KV cache in LLMs."""
-		module_context = self._get_module_context()
-		if module_context:
-			context_lower = module_context.lower()
-			return any(kv in context_lower for kv in ["kv_cache", "past_key", "past_value", "key_cache", "value_cache"])
-		
-		# Check operation name
-		op_lower = self.operation.lower()
-		return any(kv in op_lower for kv in ["cache", "past"])
-	
-	def _estimate_compute_intensity(self) -> float:
-		"""Estimate compute intensity (FLOPs/byte ratio)."""
-		try:
-			op_name = self.operation.split("::")[-1]
-			
-			# High compute intensity operations
-			if op_name in ["matmul", "mm", "bmm", "conv2d", "conv1d"]:
-				return 10.0  # High
-			
-			# Medium compute intensity
-			if op_name in ["softmax", "layer_norm", "batch_norm"]:
-				return 5.0
-			
-			# Low compute intensity (memory bound)
-			if op_name in ["add", "mul", "concat", "transpose", "reshape"]:
-				return 1.0
-			
-			return 2.0  # Default medium
-		except Exception:
-			return 1.0
-	
-	def _can_parallelize(self) -> bool:
-		"""Check if this operation can be parallelized."""
-		op_name = self.operation.split("::")[-1]
-		
-		# Operations that typically can't be parallelized
-		sequential_ops = ["cumsum", "cumprod", "rnn", "lstm", "gru"]
-		if op_name in sequential_ops:
-			return False
-		
-		# Most operations can be parallelized
-		return True
-	
-	def _calculate_priority(self) -> int:
-		"""Calculate execution priority (higher = more urgent)."""
-		priority = 0
-		
-		# Critical path operations get higher priority
-		if self._is_kv_cache_operation():
-			priority += 10  # KV cache is critical for LLM decode
-		
-		# High compute operations
-		if self._estimate_compute_intensity() > 5.0:
-			# Ensure high-compute ops outrank phase-only bumps (e.g., fusion=+6)
-			priority += 7
-		
-		# Operations in certain phases
-		phase = self._detect_phase()
-		if phase == ExecutionPhase.DECODE:
-			priority += 8  # Decode is latency sensitive
-		elif phase == ExecutionPhase.MULTIMODAL_FUSION:
-			priority += 6  # Fusion is on critical path
-		
-		return priority
+			pass  # Ignore errors during cleanup
 	
 	def prepare_for_transfer(self) -> Dict:
 		"""Prepare tensor metadata for DPDK backend transfer."""

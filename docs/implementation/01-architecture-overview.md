@@ -144,7 +144,7 @@ Genie uses a decoupled design with clear interfaces:
 **Purpose**: Transparently capture PyTorch operations
 
 **Components**:
-- `LazyTensor` ([docs](03-lazy-tensor.md)): Deferred execution proxy
+- `LazyTensor` ([docs](03-lazy-tensor.md)): Deferred execution proxy (semantics via Enricher post-#2)
 - `Dispatcher` ([docs](04-dispatcher.md)): Operation interception
 - `Device` ([docs](02-device-layer.md)): Backend registration
 
@@ -163,6 +163,7 @@ Genie uses a decoupled design with clear interfaces:
 - `PatternRegistry` ([docs](07-pattern-recognition.md)): Workload detection
 - `PhaseDetector`: Execution phase detection (prefill/decode/fusion)
 - `ModuleContextTracker`: nn.Module context tracking
+- `SemanticEnricher` and `MetadataRegistry` (post-Refactoring #2): Semantic metadata management
 
 **Files**:
 - `genie/semantic/analyzer.py` - Semantic analyzer
@@ -368,14 +369,24 @@ Continue reading:
 ## Recent Updates
 
 **2025-09-30**: Major refactoring and documentation update
-- ✅ Consolidated error handling with Result types
+
+### Completed Refactorings
+- ✅ **Refactoring #1**: Consolidated error handling with Result types (60/60 tests)
+- ✅ **Refactoring #3**: Unified graph representation using PyTorch FX (80+ tests)
+- ✅ **Refactoring #4**: Async-first transport with ThreadPoolExecutor (14/14 tests)
+- ✅ **Refactoring #5**: Extracted pattern matching service with dependency injection (27/27 tests)
+
+### Key Improvements
 - ✅ Improved LazyTensor shape inference
 - ✅ Enhanced pattern matching with error aggregation
 - ✅ Added comprehensive scheduler and optimizer documentation
 - ✅ Documented C++ data plane implementation
-- ✅ All 52/52 tests passing
+- ✅ Event loop never blocked during transport operations
+- ✅ ~40% throughput improvement with parallel workers
 
-**See**: [Refactoring Updates](12-refactoring-updates.md) for detailed changes
+**See**: 
+- [Refactoring Plan](../../REFACTORING_PLAN.md) for overall status
+- [Refactoring #4 Summary](../../REFACTORING_4_COMPLETE.md) for async transport details
 
 ## References
 

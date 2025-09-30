@@ -1,191 +1,145 @@
-# Genie Setup Guide
+# Genie GPUdirect RDMA Setup Guide
 
-Genie provides a unified setup system for AI accelerator disaggregation with DPDK and GPU support.
+This guide covers setting up GPUdirect RDMA for high-performance GPU networking with DPDK gpu-dev support.
 
 ## Quick Start
 
-### Basic Setup (Development)
+### GPUdirect RDMA Setup
 ```bash
-./setup.sh --mode basic
-```
-This installs Python environment, PyTorch, and basic dependencies.
-
-### Full DPDK Setup (Production)
-```bash
-./setup.sh --mode dpdk
-```
-This installs everything including DPDK, GPU-dev support, and high-performance networking.
-
-### Fix Issues
-```bash
-./setup.sh --mode fix
-```
-Diagnoses and fixes common installation problems.
-
-## Setup Modes
-
-### 1. Basic Mode
-- ✅ Python virtual environment
-- ✅ PyTorch (auto-detects CUDA version)
-- ✅ Genie C++ extensions
-- ✅ Basic dependencies
-- 🎯 **Use for**: Development, testing, CPU-only workloads
-
-### 2. DPDK Mode  
-- ✅ Everything from Basic mode
-- ✅ DPDK 23.11 with GPU-dev support
-- ✅ CUDA Toolkit 12.8 (PyTorch 2.8), or 12.1 (PyTorch 2.2–2.5)
-- ✅ IOMMU configuration
-- ✅ Hugepages setup
-- ✅ NIC binding to DPDK
-- ✅ GPU Direct configuration
-- 🎯 **Use for**: Production, high-performance networking
-
-### 3. Fix Mode
-- 🔧 Diagnoses system issues
-- 🔧 Fixes DPDK problems
-- 🔧 Repairs driver issues
-- 🔧 Interactive or automatic fixing
-
-## Advanced Usage
-
-### Custom Configuration
-```bash
-# Copy and edit configuration
-cp genie.conf my_config.conf
-# Edit my_config.conf with your settings
-./setup.sh --mode dpdk --config my_config.conf
+# Run the comprehensive setup script (requires sudo)
+sudo /home/jaewan/Genie/scripts/setup_gpudirect_rdma_ultimate.sh
 ```
 
-### Specific Options
+This script handles everything needed for GPUdirect RDMA:
+- ✅ ConnectX-5 RNIC driver binding (vfio-pci → mlx5_core)
+- ✅ nvidia_peermem kernel module loading
+- ✅ RDMA device verification
+- ✅ GPU information reporting
+
+### Test GPU Dev Functionality
 ```bash
-# Force specific CUDA version for PyTorch wheels
-#   cu128 -> PyTorch 2.8 (CUDA 12.8)
-#   cu121 -> PyTorch 2.2–2.5 (CUDA 12.1)
-./setup.sh --mode basic --pytorch-cuda cu128
-
-# Skip driver installation
-./setup.sh --mode dpdk --skip-driver
-
-# Non-interactive mode
-./setup.sh --mode dpdk --non-interactive
+# Test the complete GPUdirect RDMA setup
+sudo /home/jaewan/Genie/scripts/run_gpu_dev_test.sh
 ```
 
-## System Requirements
+## What This Setup Provides
 
-### Basic Mode
-- Ubuntu 20.04+ (22.04+ recommended)
-- Python 3.8+
-- 4GB RAM minimum
-- Build tools (installed automatically)
+### Hardware Support
+- ✅ **RTX 5060 Ti** (Blackwell architecture) - GPUdirect RDMA capable
+- ✅ **ConnectX-5** RNIC - High-performance RDMA networking
+- ✅ **Kernel 6.8.0-79** - Compatible with GPUdirect RDMA
 
-### DPDK Mode
-- Ubuntu 22.04+ (24.04 recommended)
-- Kernel 5.15+ 
-- 8GB RAM minimum
-- IOMMU-capable CPU (Intel VT-d / AMD-Vi)
-- Compatible NIC (Mellanox ConnectX-5+, Intel E810+)
-- NVIDIA GPU (optional, for GPU Direct)
+### Software Stack
+- ✅ **nvidia_peermem** - Kernel module for GPU-RDMA memory registration
+- ✅ **mlx5_core/mlx5_ib** - ConnectX-5 RDMA drivers
+- ✅ **CUDA 12.6** - GPU compute runtime
+- ✅ **RDMA devices** - `rocep24s0` detected and functional
 
-## Hardware Compatibility
+### DPDK gpu-dev Capabilities
+- ✅ **Direct GPU-to-RNIC transfers** (zero-copy networking)
+- ✅ **High-performance GPU I/O** (GPU-accelerated networking)
+- ✅ **Low-latency GPU networking** (GPU-direct communication)
+- ✅ **AI/ML inference optimization** (GPU-direct data paths)
 
-### Tested NICs
-- ✅ Mellanox ConnectX-5, ConnectX-6, ConnectX-7
-- ✅ Intel E810, X710, XXV710
-- ⚠️ Other NICs may work but are untested
+## Setup Verification
 
-### Tested GPUs
-- ✅ NVIDIA RTX 40xx/50xx series (CUDA 12.1 / 12.8)
-- ✅ NVIDIA RTX 30xx series (CUDA 11.8)
-- ✅ NVIDIA Tesla/Quadro series
-- ⚠️ AMD GPUs not supported for GPU Direct
+### Check Status
+```bash
+# Verify nvidia_peermem is loaded
+lsmod | grep nvidia_peermem
+
+# Check RDMA devices
+ibv_devices
+
+# Verify GPU information
+nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv
+```
+
+### Expected Results
+```
+nvidia_peermem         12288  0
+    device                 node GUID
+    ------              ----------------
+    rocep24s0           08c0eb03007e9038
+name, driver_version, memory.total [MiB]
+NVIDIA GeForce RTX 5060 Ti, 575.64.03, 16311 MiB
+```
+
+## Usage Examples
+
+### Basic GPUdirect RDMA Test
+```bash
+# Run the comprehensive test
+/home/jaewan/Genie/test_gpudirect_rdma_comprehensive
+```
+
+### GPU Dev Test with Logging
+```bash
+# Run with detailed logging
+sudo /home/jaewan/Genie/scripts/run_gpu_dev_test.sh
+```
 
 ## Troubleshooting
 
-### Common Issues
-
-**"IOMMU not enabled"**
+### If nvidia_peermem Won't Load
 ```bash
-# Check BIOS settings for VT-d/AMD-Vi
-# Run fix mode to update GRUB
-./setup.sh --mode fix
-# Reboot required
+# Check for corrupted DKMS modules
+ls -la /lib/modules/$(uname -r)/updates/dkms/nvidia-peermem.ko
+
+# Remove corrupted module if too small (< 10KB)
+sudo rm /lib/modules/$(uname -r)/updates/dkms/nvidia-peermem.ko
+
+# Try loading again
+sudo modprobe nvidia_peermem
 ```
 
-**"No hugepages allocated"**
+### If ConnectX-5 Not Detected
 ```bash
-# Fix hugepages configuration
-sudo ./scripts/fix_installation.sh --auto
+# Check driver binding
+lspci -k -s 18:00.0
+
+# Should show: Kernel driver in use: mlx5_core
+# If showing vfio-pci, run the setup script again
 ```
 
-**"NIC not bound to DPDK"**
+### If RDMA Devices Not Found
 ```bash
-# Check available NICs
-lspci | grep -E "Ethernet|Network"
-# Manually specify NIC in config
-echo 'NIC_PCI_ADDR="0000:18:00.0"' >> genie.conf
+# Verify ConnectX-5 is in InfiniBand mode
+# Check firmware and driver configuration
+ibv_devices  # Should show ConnectX-5 interfaces
 ```
 
-**"CUDA not found"**
-```bash
-# Install CUDA toolkit
-./setup.sh --mode fix
-# Or run DPDK mode which includes CUDA
-./setup.sh --mode dpdk
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    DPDK gpu-dev Application                 │
+├─────────────────────────────────────────────────────────────┤
+│  CUDA Runtime + RDMA APIs  │  nvidia_peermem Kernel Module  │
+├─────────────────────────────────────────────────────────────┤
+│  mlx5_core/mlx5_ib Drivers │  ConnectX-5 RNIC Hardware     │
+├─────────────────────────────────────────────────────────────┤
+│              RTX 5060 Ti GPU (GPUdirect RDMA)              │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-### Getting Help
+## Performance Characteristics
 
-1. **Run diagnostics**:
-   ```bash
-   ./setup.sh --mode fix --diagnose
-   ```
+- **Zero-copy transfers**: GPU memory ↔ RNIC (no CPU involvement)
+- **Low latency**: Direct PCIe communication paths
+- **High bandwidth**: Full PCIe 4.0/5.0 speeds
+- **GPU acceleration**: Hardware-accelerated networking
 
-2. **Check logs**:
-   ```bash
-   # DPDK setup logs
-   sudo tail -f /var/log/genie_dpdk_setup.log
-   ```
+## Next Steps
 
-3. **Verify installation**:
-   ```bash
-   # Test DPDK + GPU
-   python3 test_dpdk_complete.py
-   ```
+1. **Deploy applications** using DPDK gpu-dev for GPU-accelerated networking
+2. **Benchmark performance** with your specific workloads
+3. **Optimize configuration** based on your use case
+4. **Scale deployment** across multiple nodes with GPUdirect RDMA
 
-## Migration from Old Scripts
+## Support
 
-If you were using the old setup scripts:
-
-- `setup_gpu_server.sh` → `./setup.sh --mode basic`
-- `setup_dpdk_server.sh` → `./setup.sh --mode dpdk` 
-- `setup_environment.sh` → `./setup.sh --mode dpdk`
-- `fix_dpdk_setup.sh` → `./setup.sh --mode fix`
-
-The old scripts are still available but deprecated.
-
-## Environment Activation
-
-After setup, activate the environment:
-
-```bash
-# Activate Python environment
-source .venv/bin/activate
-
-# Load DPDK environment (DPDK mode only)
-source /etc/profile.d/dpdk.sh
-
-# Load CUDA environment (DPDK mode only)  
-source /etc/profile.d/cuda.sh
-```
-
-## Performance Tuning
-
-For optimal performance with DPDK mode:
-
-1. **CPU isolation**: Add `isolcpus=2-7` to kernel parameters
-2. **NUMA awareness**: Use `numactl` to bind processes to NUMA nodes
-3. **Interrupt affinity**: Configure NIC interrupts to specific cores
-4. **Hugepage sizing**: Consider 1GB hugepages for large workloads
-
-See `genie.conf` for detailed configuration options.
+For issues or questions about GPUdirect RDMA setup:
+1. Check the comprehensive setup script handles most common issues
+2. Verify hardware compatibility (RTX 5060 Ti + ConnectX-5)
+3. Ensure proper driver binding and module loading

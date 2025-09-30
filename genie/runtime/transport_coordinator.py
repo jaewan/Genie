@@ -48,6 +48,7 @@ import json
 import logging
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Dict, List, Optional, Callable, Any, Tuple
@@ -644,6 +645,13 @@ class TransportCoordinator:
         self.active_transfers: Dict[str, TransferContext] = {}
         self.transfer_lock = threading.RLock()
         
+        # Thread pool for blocking C++ calls
+        max_workers = self.config.get('thread_pool_workers', 4)
+        self._thread_pool = ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix='genie-cpp-'
+        )
+        
         # Status monitoring
         self.running = False
         self.monitor_task: Optional[asyncio.Task] = None
@@ -711,16 +719,31 @@ class TransportCoordinator:
             logger.warning("C++ data plane not available, using fallback mode")
             return
         
-        # Create data plane instance
-        if not self.data_plane.create(self.data_plane_config):
+        loop = asyncio.get_event_loop()
+        
+        # Create data plane instance (blocking ctypes call)
+        create_result = await loop.run_in_executor(
+            self._thread_pool,
+            self.data_plane.create,
+            self.data_plane_config
+        )
+        if not create_result:
             raise RuntimeError("Failed to create C++ data plane")
         
-        # Initialize data plane
-        if not self.data_plane.initialize():
+        # Initialize data plane (blocking ctypes call)
+        init_result = await loop.run_in_executor(
+            self._thread_pool,
+            self.data_plane.initialize
+        )
+        if not init_result:
             raise RuntimeError("Failed to initialize C++ data plane")
         
-        # Start data plane
-        if not self.data_plane.start():
+        # Start data plane (blocking ctypes call)
+        start_result = await loop.run_in_executor(
+            self._thread_pool,
+            self.data_plane.start
+        )
+        if not start_result:
             raise RuntimeError("Failed to start C++ data plane")
         
         logger.info("C++ data plane initialized and started")
@@ -778,11 +801,17 @@ class TransportCoordinator:
         if not self.data_plane or not self.data_plane.is_available():
             return
         
+        loop = asyncio.get_event_loop()
+        
         with self.transfer_lock:
             for transfer_id, context in list(self.active_transfers.items()):
                 try:
-                    # Get status from C++ data plane
-                    cpp_status = self.data_plane.get_transfer_status(transfer_id)
+                    # Get status from C++ data plane (blocking ctypes call)
+                    cpp_status = await loop.run_in_executor(
+                        self._thread_pool,
+                        self.data_plane.get_transfer_status,
+                        transfer_id
+                    )
                     
                     if cpp_status:
                         # Update context with C++ status
@@ -904,16 +933,25 @@ class TransportCoordinator:
             context.state = TransferState.FAILED
             return
         
-        # Register GPU memory if needed
+        loop = asyncio.get_event_loop()
+        
+        # Register GPU memory if needed (blocking ctypes call)
         if context.gpu_ptr:
-            iova = self.data_plane.register_gpu_memory(context.gpu_ptr, context.size)
+            iova = await loop.run_in_executor(
+                self._thread_pool,
+                self.data_plane.register_gpu_memory,
+                context.gpu_ptr,
+                context.size
+            )
             if not iova:
                 logger.error("Failed to register GPU memory for transfer")
                 context.state = TransferState.FAILED
                 return
         
-        # Start C++ data plane transfer
-        success = self.data_plane.send_tensor(
+        # Start C++ data plane transfer (blocking ctypes call)
+        success = await loop.run_in_executor(
+            self._thread_pool,
+            self.data_plane.send_tensor,
             context.transfer_id,
             context.tensor_id,
             context.gpu_ptr,
@@ -961,8 +999,12 @@ class TransportCoordinator:
             # In full implementation, this would allocate GPU memory
             
             if self.data_plane and self.data_plane.is_available():
-                # Start C++ data plane receive
-                success = self.data_plane.receive_tensor(
+                loop = asyncio.get_event_loop()
+                
+                # Start C++ data plane receive (blocking ctypes call)
+                success = await loop.run_in_executor(
+                    self._thread_pool,
+                    self.data_plane.receive_tensor,
                     context.transfer_id,
                     context.tensor_id,
                     0,  # Will allocate GPU memory in C++
@@ -1074,8 +1116,17 @@ class TransportCoordinator:
         """Start a GPU zero-copy send (async API used by integration harness)."""
         try:
             if self.data_plane and self.data_plane.is_available():
-                success = self.data_plane.send_tensor(
-                    transfer_id, tensor_id, gpu_ptr, size, target_node
+                loop = asyncio.get_event_loop()
+                
+                # Send tensor (blocking ctypes call)
+                success = await loop.run_in_executor(
+                    self._thread_pool,
+                    self.data_plane.send_tensor,
+                    transfer_id,
+                    tensor_id,
+                    gpu_ptr,
+                    size,
+                    target_node
                 )
                 if not success:
                     return False
@@ -1153,12 +1204,33 @@ class TransportCoordinator:
             return self.active_transfers.get(transfer_id)
     
     def get_statistics(self) -> Dict[str, Any]:
-        """Get transport statistics"""
+        """Get transport statistics (synchronous for backward compatibility)"""
         stats = {}
         
         # Get C++ data plane statistics
+        # Note: This is kept synchronous for backward compatibility
+        # For truly async access, use get_statistics_async()
         if self.data_plane and self.data_plane.is_available():
             stats.update(self.data_plane.get_statistics())
+        
+        # Add Python-side statistics
+        with self.transfer_lock:
+            stats['active_transfers'] = len(self.active_transfers)
+        
+        return stats
+    
+    async def get_statistics_async(self) -> Dict[str, Any]:
+        """Get transport statistics (async version)"""
+        stats = {}
+        
+        # Get C++ data plane statistics (blocking ctypes call)
+        if self.data_plane and self.data_plane.is_available():
+            loop = asyncio.get_event_loop()
+            cpp_stats = await loop.run_in_executor(
+                self._thread_pool,
+                self.data_plane.get_statistics
+            )
+            stats.update(cpp_stats)
         
         # Add Python-side statistics
         with self.transfer_lock:
@@ -1204,13 +1276,24 @@ class TransportCoordinator:
         with self.transfer_lock:
             for transfer_id, context in self.active_transfers.items():
                 if context.gpu_ptr and self.data_plane and self.data_plane.is_available():
-                    self.data_plane.unregister_gpu_memory(context.gpu_ptr)
+                    # Run blocking unregister in thread pool
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(
+                        self._thread_pool,
+                        self.data_plane.unregister_gpu_memory,
+                        context.gpu_ptr
+                    )
             self.active_transfers.clear()
         
         # Stop C++ data plane
         if self.data_plane:
-            self.data_plane.stop()
-            self.data_plane.destroy()
+            # Run blocking stop/destroy in thread pool
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(self._thread_pool, self.data_plane.stop)
+            await loop.run_in_executor(self._thread_pool, self.data_plane.destroy)
+        
+        # Shutdown thread pool
+        self._thread_pool.shutdown(wait=True)
         
         logger.info("Transport coordinator shutdown complete")
 

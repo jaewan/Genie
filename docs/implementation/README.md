@@ -137,6 +137,30 @@ docs/implementation/
 - **Test Suite**: `../../tests/`
 - **Source Code**: `../../genie/`
 
+## Recent Updates (2025-09-30)
+
+### Completed Refactorings
+- ✅ **Refactoring #1**: Consolidated error handling (60/60 tests)
+- ✅ **Refactoring #3**: Unified graph representation with PyTorch FX (80+ tests)
+- ✅ **Refactoring #4**: Async-first transport with ThreadPoolExecutor (14/14 tests)
+- ✅ **Refactoring #5**: Pattern matching service extraction (27/27 tests)
+
+### Highlights
+- **Async Transport**: All blocking ctypes calls now use ThreadPoolExecutor
+  - Event loop never blocked during C++ operations
+  - ~40% throughput improvement with parallel workers
+  - 14 comprehensive async tests
+- **FX Graph Migration**: Unified graph representation using PyTorch FX
+  - `FXGraphAdapter` for seamless graph access
+  - Backward compatible with `ComputationGraph`
+  - Better integration with PyTorch ecosystem
+- **Pattern Matching**: Dependency injection for pattern matchers
+  - `IPatternMatcher` interface
+  - Multiple implementations (NetworkX, Simplified, Composite)
+  - Injectable into `SemanticAnalyzer`
+
+**See**: [REFACTORING_PLAN.md](../../REFACTORING_PLAN.md) for details
+
 ## Getting Help
 
 - Check tests in `tests/` for usage examples

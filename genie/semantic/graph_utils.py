@@ -1,13 +1,17 @@
-"""Graph analysis utilities using NetworkX for efficient pattern matching."""
+"""Graph analysis utilities using NetworkX for efficient pattern matching.
+
+Updated for Refactoring #3: Now supports both ComputationGraph and FX GraphModule.
+"""
 
 from __future__ import annotations
 
 import time
 from functools import wraps, lru_cache
-from typing import Dict, List, Set, Optional, Any, Tuple
+from typing import Dict, List, Set, Optional, Any, Tuple, Union
 from collections import Counter
 
 import networkx as nx
+import torch.fx as fx
 import logging
 import os
 import hashlib
@@ -90,8 +94,65 @@ def convert_to_networkx(graph_hash: str, nodes_tuple: tuple, edges_tuple: tuple)
     return G
 
 
-def graph_to_networkx(graph: ComputationGraph) -> nx.DiGraph:
-    """Convert ComputationGraph to NetworkX DiGraph with caching."""
+def fx_graph_to_networkx(fx_graph: fx.GraphModule) -> nx.DiGraph:
+    """Convert FX GraphModule to NetworkX DiGraph.
+    
+    Args:
+        fx_graph: FX GraphModule to convert
+        
+    Returns:
+        NetworkX DiGraph representation
+    """
+    try:
+        from genie.core.fx_graph_adapter import FXGraphAdapter
+        adapter = FXGraphAdapter(fx_graph)
+    except ImportError:
+        # Fallback to manual conversion if adapter not available
+        adapter = None
+    
+    G = nx.DiGraph()
+    
+    # Add nodes
+    for node in fx_graph.graph.nodes:
+        if node.op in ('call_function', 'call_method'):
+            # Extract operation name
+            if adapter:
+                operation = adapter.get_operation(node)
+            else:
+                # Fallback
+                if node.op == 'call_function':
+                    operation = f"aten::{getattr(node.target, '__name__', str(node.target))}"
+                else:
+                    operation = f"aten::{node.target}"
+            
+            G.add_node(node.name, operation=operation, node=node)
+            
+            # Add edges from dependencies
+            for arg in node.args:
+                if isinstance(arg, fx.Node) and arg.name in G:
+                    G.add_edge(arg.name, node.name)
+            
+            for kwarg in node.kwargs.values():
+                if isinstance(kwarg, fx.Node) and kwarg.name in G:
+                    G.add_edge(kwarg.name, node.name)
+    
+    return G
+
+
+def graph_to_networkx(graph: Union[ComputationGraph, fx.GraphModule]) -> nx.DiGraph:
+    """Convert ComputationGraph or FX GraphModule to NetworkX DiGraph with caching.
+    
+    Args:
+        graph: Either ComputationGraph (old format) or FX GraphModule (new format)
+        
+    Returns:
+        NetworkX DiGraph
+    """
+    # Check if it's an FX GraphModule
+    if isinstance(graph, fx.GraphModule):
+        return fx_graph_to_networkx(graph)
+    
+    # Old format - ComputationGraph
     # Create cache-friendly representation
     nodes_tuple = tuple(
         (node_id, node.operation, hash(str(node.metadata)))
@@ -134,9 +195,36 @@ def compute_graph_id_from_parts(nodes_tuple: Tuple[Tuple[str, str, int], ...], e
 
 
 @track_performance
-def analyze_operations_advanced(graph: ComputationGraph) -> Dict[str, Any]:
-    """Advanced operation analysis using statistical methods."""
-    ops = [node.operation for node in graph.nodes.values()]
+def analyze_operations_advanced(graph: Union[ComputationGraph, fx.GraphModule]) -> Dict[str, Any]:
+    """Advanced operation analysis using statistical methods.
+    
+    Args:
+        graph: Either ComputationGraph or FX GraphModule
+        
+    Returns:
+        Dictionary with operation statistics
+    """
+    # Extract operations based on graph type
+    if isinstance(graph, fx.GraphModule):
+        ops = []
+        num_nodes = 0
+        for node in graph.graph.nodes:
+            if node.op in ('call_function', 'call_method'):
+                num_nodes += 1
+                if node.op == 'call_function':
+                    op_name = f"aten::{getattr(node.target, '__name__', str(node.target))}"
+                else:
+                    op_name = f"aten::{node.target}"
+                ops.append(op_name)
+        num_edges = sum(1 for node in graph.graph.nodes 
+                       if node.op in ('call_function', 'call_method')
+                       for arg in node.all_input_nodes)
+    else:
+        # Old format - ComputationGraph
+        ops = [node.operation for node in graph.nodes.values()]
+        num_nodes = len(graph.nodes)
+        num_edges = len(graph.edges)
+    
     op_counts = Counter(ops)
     
     # Statistical analysis
@@ -148,8 +236,8 @@ def analyze_operations_advanced(graph: ComputationGraph) -> Dict[str, Any]:
     
     return {
         "op_histogram": dict(op_counts),
-        "num_nodes": len(graph.nodes),
-        "num_edges": len(graph.edges),
+        "num_nodes": num_nodes,
+        "num_edges": num_edges,
         "entropy": entropy,
         "diversity": len(op_counts),
         "avg_degree": sum(dict(G.degree()).values()) / len(G.nodes()) if G.nodes() else 0,
