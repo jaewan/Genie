@@ -4,6 +4,7 @@ import time
 from typing import Dict, List
 
 from genie.core.graph import ComputationGraph
+from genie.core.exceptions import Result, PatternMatchError
 import logging
 import os
 import importlib
@@ -123,9 +124,15 @@ class PatternRegistry:
 			except Exception:
 				pass
 
-	def match_patterns(self, graph: ComputationGraph) -> List[MatchedPattern]:
-		"""Match patterns with performance tracking."""
+	def match_patterns(self, graph: ComputationGraph) -> Result[List[MatchedPattern]]:
+		"""
+		Match patterns with performance tracking and error aggregation.
+		
+		Returns:
+			Result[List[MatchedPattern]]: Successful matches or aggregated errors
+		"""
 		matches: List[MatchedPattern] = []
+		errors: List[Exception] = []
 		logger = logging.getLogger(__name__)
 		debug_enabled = os.getenv("GENIE_ANALYZER_DEBUG", "0") == "1"
 
@@ -134,39 +141,63 @@ class PatternRegistry:
 
 		for pattern in patterns_to_try:
 			start_time = time.perf_counter()
-			match = pattern.match(graph)
-			latency = time.perf_counter() - start_time
-
-			# Track performance
-			self._performance_stats.setdefault(pattern.name, []).append(latency)
-
-			# Feature-flagged warnings
-			slow_ms_env = os.getenv("GENIE_ANALYZER_SLOW_MS", "50")
+			
 			try:
-				slow_threshold = float(slow_ms_env) / 1000.0
-			except Exception:
-				slow_threshold = 0.05
-			if latency > slow_threshold:
-				logger.debug("Pattern %s took %.1fms (>%.1fms)", pattern.name, latency * 1000.0, slow_threshold * 1000.0)
-			elif debug_enabled:
-				logger.debug("Pattern %s took %.3fms", pattern.name, latency * 1000.0)
+				match = pattern.match(graph)
+				latency = time.perf_counter() - start_time
 
-			if match is None:
-				# Early-exit: if fast path and we've tried core patterns without match, keep going
-				continue
+				# Track performance
+				self._performance_stats.setdefault(pattern.name, []).append(latency)
 
-			matches.append(
-				MatchedPattern(
-					pattern_name=pattern.name,
-					confidence=match.confidence,
-					subgraph=None,
-					optimization_hints=getattr(pattern, "get_hints", lambda: {})(),
-					metadata=getattr(match, "metadata", None),
+				# Feature-flagged warnings
+				slow_ms_env = os.getenv("GENIE_ANALYZER_SLOW_MS", "50")
+				try:
+					slow_threshold = float(slow_ms_env) / 1000.0
+				except Exception:
+					slow_threshold = 0.05
+				if latency > slow_threshold:
+					logger.debug("Pattern %s took %.1fms (>%.1fms)", pattern.name, latency * 1000.0, slow_threshold * 1000.0)
+				elif debug_enabled:
+					logger.debug("Pattern %s took %.3fms", pattern.name, latency * 1000.0)
+
+				if match is None:
+					# Pattern didn't match - not an error, just no match
+					continue
+
+				matches.append(
+					MatchedPattern(
+						pattern_name=pattern.name,
+						confidence=match.confidence,
+						subgraph=None,
+						optimization_hints=getattr(pattern, "get_hints", lambda: {})(),
+						metadata=getattr(match, "metadata", None),
+					)
 				)
-			)
+			except Exception as e:
+				# Pattern matching raised an exception
+				error = PatternMatchError(
+					f"Pattern {pattern.name} failed to match",
+					context={'pattern': pattern.name, 'error': str(e)}
+				)
+				errors.append(error)
+				logger.debug(f"Pattern {pattern.name} raised exception: {e}")
+		
 		# Sort by confidence
 		matches.sort(key=lambda m: m.confidence, reverse=True)
-		return matches
+		
+		# Return Result based on what we found
+		if matches:
+			# We have some matches - success (even if some patterns failed)
+			return Result.ok(matches)
+		elif errors:
+			# No matches and we have errors - return aggregated error
+			return Result.err(PatternMatchError(
+				f"All {len(errors)} patterns failed to match",
+				context={'error_count': len(errors), 'errors': [str(e) for e in errors]}
+			))
+		else:
+			# No matches but no errors either - return empty list as success
+			return Result.ok([])
 
 	def get_performance_report(self) -> Dict[str, Dict[str, float]]:
 		"""Get performance statistics for all patterns."""

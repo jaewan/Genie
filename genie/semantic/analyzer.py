@@ -47,7 +47,16 @@ class SemanticAnalyzer:
 		
 		structural_info = self.fx_analyzer.analyze_structure(graph)
 		semantic_context = self.hook_manager.get_context(graph)
-		patterns = self.pattern_registry.match_patterns(graph)
+		
+		# Match patterns (now returns Result)
+		pattern_result = self.pattern_registry.match_patterns(graph)
+		if pattern_result.is_ok:
+			patterns = pattern_result.unwrap()
+		else:
+			# Log error but continue with empty patterns
+			logger.warning(f"Pattern matching had errors: {pattern_result.error}")
+			patterns = []
+		
 		workload_type = WorkloadClassifier().classify(patterns)
 		
 		total_time = time.perf_counter() - start_time

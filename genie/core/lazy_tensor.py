@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 from .semantic_metadata import SemanticMetadata, ExecutionPhase, MemoryPattern, DataLineage
 from .meta_utils import infer_via_meta
+from .exceptions import Result, ShapeInferenceError
 
 
 class LazyTensor:
@@ -60,9 +61,17 @@ class LazyTensor:
 			_is_elementwise_fastpath = True
 		else:
 			# Infer tensor properties (still lightweight for non-elementwise ops)
-			self.shape = self._infer_shape()
+			shape_result = self._infer_shape()
+			if shape_result.is_ok:
+				self.shape = shape_result.unwrap()
+			else:
+				# Log error but don't fail construction
+				logger.debug(f"Shape inference failed for {self.operation}: {shape_result.error}")
+				self.shape = None
+			
 			self.dtype = self._infer_dtype()
 			self.device = self._infer_device()
+			
 			# Optional meta inference if unknown
 			if (self.shape is None or self.dtype is None) and os.getenv("GENIE_ENABLE_META_INFER", "1") == "1":
 				meta_shape, meta_dtype = infer_via_meta(operation, inputs, self.kwargs)
@@ -113,26 +122,44 @@ class LazyTensor:
 			except Exception:
 				pass
 
-	def _infer_shape(self) -> Optional[torch.Size]:
-		"""Infer output shape from operation and inputs."""
+	def _infer_shape(self) -> Result[torch.Size]:
+		"""
+		Infer output shape from operation and inputs.
+		
+		Returns:
+			Result[torch.Size]: Shape if successful, error otherwise
+		"""
 		try:
+			shape = None
+			
 			if self.operation in ["aten::add", "aten::sub", "aten::mul", "aten::div"]:
-				return self._infer_elementwise_shape()
+				shape = self._infer_elementwise_shape()
 			elif self.operation == "aten::matmul":
-				return self._infer_matmul_shape()
+				shape = self._infer_matmul_shape()
 			elif self.operation == "aten::mm":
-				return self._infer_mm_shape()
+				shape = self._infer_mm_shape()
 			elif self.operation == "aten::conv2d":
-				return self._infer_conv2d_shape()
+				shape = self._infer_conv2d_shape()
 			elif self.operation in ["aten::randn", "aten::zeros", "aten::ones"]:
-				return self._infer_creation_shape()
+				shape = self._infer_creation_shape()
 			elif self.operation in ["aten::relu", "aten::sigmoid", "aten::tanh"]:
 				# Activation functions preserve shape
 				first = self.inputs[0] if self.inputs else None
-				return getattr(first, "shape", None)
+				shape = getattr(first, "shape", None)
+			
+			if shape is None:
+				return Result.err(ShapeInferenceError(
+					f"Could not infer shape for {self.operation}",
+					context={'operation': self.operation, 'inputs': len(self.inputs)}
+				))
+			
+			return Result.ok(shape)
+			
 		except Exception as e:
-			logger.debug(f"Shape inference failed for {self.operation}: {e}")
-		return None
+			return Result.err(ShapeInferenceError(
+				f"Shape inference raised exception: {e}",
+				context={'operation': self.operation, 'error': str(e)}
+			))
 
 	def _infer_elementwise_shape(self) -> Optional[torch.Size]:
 		"""Infer shape for element-wise operations with broadcasting."""

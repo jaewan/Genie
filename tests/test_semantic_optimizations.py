@@ -184,7 +184,9 @@ def test_semantic_optimizer():
         metadata={'test': True}
     )
     
-    optimized_graph, optimization_plan = optimizer.optimize(llm_graph, llm_profile)
+    result = optimizer.optimize(llm_graph, llm_profile)
+    assert result.is_ok, f"Optimization failed: {result.error if result.is_err else 'unknown'}"
+    optimized_graph, optimization_plan = result.unwrap()
     
     print(f"LLM Optimizations applied: {[opt.value for opt in optimization_plan.optimizations]}")
     print(f"Colocation groups: {optimization_plan.colocation_groups}")
@@ -201,7 +203,9 @@ def test_semantic_optimizer():
         metadata={'test': True}
     )
     
-    optimized_graph, optimization_plan = optimizer.optimize(vision_graph, vision_profile)
+    result = optimizer.optimize(vision_graph, vision_profile)
+    assert result.is_ok, f"Optimization failed: {result.error if result.is_err else 'unknown'}"
+    optimized_graph, optimization_plan = result.unwrap()
     
     print(f"\nVision Optimizations applied: {[opt.value for opt in optimization_plan.optimizations]}")
     print(f"Pipeline stages: {len(optimization_plan.pipeline_stages)}")
@@ -217,7 +221,9 @@ def test_semantic_optimizer():
         metadata={'test': True}
     )
     
-    optimized_graph, optimization_plan = optimizer.optimize(mm_graph, mm_profile)
+    result = optimizer.optimize(mm_graph, mm_profile)
+    assert result.is_ok, f"Optimization failed: {result.error if result.is_err else 'unknown'}"
+    optimized_graph, optimization_plan = result.unwrap()
     
     print(f"\nMulti-modal Optimizations applied: {[opt.value for opt in optimization_plan.optimizations]}")
     print(f"Fusion points: {optimization_plan.fusion_points}")
@@ -249,7 +255,9 @@ def test_optimization_strategies():
         metadata={}
     )
     
-    optimized_graph, plan = optimizer.optimize(graph, profile)
+    result = optimizer.optimize(graph, profile)
+    assert result.is_ok, f"Optimization failed: {result.error if result.is_err else 'unknown'}"
+    optimized_graph, plan = result.unwrap()
     
     # Check KV cache colocation
     kv_cache_colocated = False
@@ -475,7 +483,9 @@ def test_adaptive_optimizer():
     )
     
     # First optimization
-    optimized_graph, plan = optimizer.optimize_with_feedback(graph, profile)
+    result = optimizer.optimize_with_feedback(graph, profile)
+    assert result.is_ok, f"Optimization failed: {result.error if result.is_err else 'unknown'}"
+    optimized_graph, plan = result.unwrap()
     
     print(f"Initial optimizations: {[opt.value for opt in plan.optimizations]}")
     
@@ -486,7 +496,9 @@ def test_adaptive_optimizer():
     }
     
     # Second optimization with feedback
-    optimized_graph, plan = optimizer.optimize_with_feedback(graph, profile, perf_metrics)
+    result = optimizer.optimize_with_feedback(graph, profile, perf_metrics)
+    assert result.is_ok, f"Optimization failed: {result.error if result.is_err else 'unknown'}"
+    optimized_graph, plan = result.unwrap()
     
     print(f"Adaptive optimizations: {[opt.value for opt in plan.optimizations]}")
     print(f"Performance history: {len(optimizer.performance_history)} entries")
@@ -532,7 +544,9 @@ def test_end_to_end_optimization():
     # Optimize
     optimizer = SemanticOptimizer()
     graph = fx_builder.to_graph_module()
-    optimized_graph, opt_plan = optimizer.optimize(graph, profile)
+    result = optimizer.optimize(graph, profile)
+    assert result.is_ok, f"Optimization failed: {result.error if result.is_err else 'unknown'}"
+    optimized_graph, opt_plan = result.unwrap()
     
     # Schedule
     scheduler = Scheduler()

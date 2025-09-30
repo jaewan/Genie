@@ -38,6 +38,7 @@ This directory contains comprehensive implementation documentation for the Genie
 ### Reference & Contributing
 10. **[Quick Reference](10-quick-reference.md)** - Common tasks and APIs
 11. **[Contributor Guide](11-contributor-guide.md)** - How to contribute
+12. **[Refactoring Updates](12-refactoring-updates.md)** - Recent code improvements
 
 ---
 
@@ -56,8 +57,9 @@ This directory contains comprehensive implementation documentation for the Genie
 | 09 | C++ Data Plane | ~2380 | ✅ |
 | 10 | Quick Reference | ~370 | ✅ |
 | 11 | Contributor Guide | ~200 | ✅ |
+| 12 | Refactoring Updates | ~650 | ✅ NEW! |
 
-**Total**: 10,090+ lines of implementation documentation
+**Total**: 10,740+ lines of implementation documentation
 
 ---
 
@@ -81,4 +83,8 @@ This directory contains comprehensive implementation documentation for the Genie
 
 **Last Updated**: 2025-09-30  
 **Status**: Ready for open-source release  
-**Total Docs**: 11 guides, 10,000+ lines
+**Total Docs**: 12 guides, 10,740+ lines  
+**Recent Updates**: 
+- Refactoring #1 (Error Handling) - 85% complete
+- Architecture overview updated with scheduler/optimizer details
+- Document 12 added for tracking refactoring progress

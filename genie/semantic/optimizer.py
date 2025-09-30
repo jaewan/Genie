@@ -15,6 +15,7 @@ from collections import defaultdict
 
 from ..core.semantic_metadata import ExecutionPhase, MemoryPattern
 from ..semantic.workload import WorkloadType, WorkloadProfile
+from ..core.exceptions import Result, OptimizationError
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +68,7 @@ class SemanticOptimizer:
         self._optimization_stats = defaultdict(int)
         self._cache = {}
     
-    def optimize(self, graph: fx.GraphModule, profile: WorkloadProfile) -> Tuple[fx.GraphModule, OptimizationPlan]:
+    def optimize(self, graph: fx.GraphModule, profile: WorkloadProfile) -> Result[Tuple[fx.GraphModule, OptimizationPlan]]:
         """Apply semantic optimizations to a graph.
         
         Args:
@@ -75,29 +76,53 @@ class SemanticOptimizer:
             profile: Workload profile with semantic information
             
         Returns:
-            Tuple of (optimized graph, optimization plan)
+            Result[Tuple[fx.GraphModule, OptimizationPlan]]: Optimized graph and plan, or error
         """
-        # Create optimization plan
-        plan = self._create_optimization_plan(graph, profile)
-        
-        # Apply optimizations based on workload type
-        if profile.workload_type == WorkloadType.LLM:
-            graph = self._apply_llm_optimizations(graph, plan)
-        elif profile.workload_type == WorkloadType.VISION:
-            graph = self._apply_vision_optimizations(graph, plan)
-        elif profile.workload_type == WorkloadType.MULTIMODAL:
-            graph = self._apply_multimodal_optimizations(graph, plan)
-        
-        # Apply general optimizations
-        graph = self._apply_general_optimizations(graph, plan)
-        
-        # Update statistics
-        for opt_type in plan.optimizations:
-            self._optimization_stats[opt_type.value] += 1
-        
-        logger.info(f"Applied {len(plan.optimizations)} optimizations to graph")
-        
-        return graph, plan
+        try:
+            # Validate inputs
+            if graph is None:
+                return Result.err(OptimizationError(
+                    "Graph cannot be None",
+                    context={'profile': profile.workload_type.value if profile else 'None'}
+                ))
+            
+            if profile is None:
+                return Result.err(OptimizationError(
+                    "Profile cannot be None",
+                    context={'graph_nodes': len(list(graph.graph.nodes)) if graph else 0}
+                ))
+            
+            # Create optimization plan
+            plan = self._create_optimization_plan(graph, profile)
+            
+            # Apply optimizations based on workload type
+            if profile.workload_type == WorkloadType.LLM:
+                graph = self._apply_llm_optimizations(graph, plan)
+            elif profile.workload_type == WorkloadType.VISION:
+                graph = self._apply_vision_optimizations(graph, plan)
+            elif profile.workload_type == WorkloadType.MULTIMODAL:
+                graph = self._apply_multimodal_optimizations(graph, plan)
+            
+            # Apply general optimizations
+            graph = self._apply_general_optimizations(graph, plan)
+            
+            # Update statistics
+            for opt_type in plan.optimizations:
+                self._optimization_stats[opt_type.value] += 1
+            
+            logger.info(f"Applied {len(plan.optimizations)} optimizations to graph")
+            
+            return Result.ok((graph, plan))
+            
+        except Exception as e:
+            return Result.err(OptimizationError(
+                f"Optimization failed: {e}",
+                context={
+                    'workload_type': profile.workload_type.value if profile else 'unknown',
+                    'error': str(e)
+                },
+                inner_exception=e
+            ))
     
     def _create_optimization_plan(self, graph: fx.GraphModule, profile: WorkloadProfile) -> OptimizationPlan:
         """Create an optimization plan based on graph analysis.
@@ -594,7 +619,7 @@ class AdaptiveOptimizer(SemanticOptimizer):
         self.optimization_effectiveness = defaultdict(float)
     
     def optimize_with_feedback(self, graph: fx.GraphModule, profile: WorkloadProfile,
-                              previous_perf: Optional[Dict[str, float]] = None) -> Tuple[fx.GraphModule, OptimizationPlan]:
+                              previous_perf: Optional[Dict[str, float]] = None) -> Result[Tuple[fx.GraphModule, OptimizationPlan]]:
         """Optimize with performance feedback.
         
         Args:
@@ -603,7 +628,7 @@ class AdaptiveOptimizer(SemanticOptimizer):
             previous_perf: Previous performance metrics
             
         Returns:
-            Tuple of (optimized graph, optimization plan)
+            Result[Tuple[fx.GraphModule, OptimizationPlan]]: Optimized graph and plan, or error
         """
         # Update effectiveness based on previous performance
         if previous_perf:
@@ -612,7 +637,7 @@ class AdaptiveOptimizer(SemanticOptimizer):
         # Adjust enabled optimizations based on effectiveness
         self._adjust_optimizations()
         
-        # Apply optimizations
+        # Apply optimizations (returns Result)
         return self.optimize(graph, profile)
     
     def _update_effectiveness(self, perf_metrics: Dict[str, float]):
