@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from genie.runtime.transport_coordinator import (
     TransportCoordinator, DataPlaneConfig, initialize_transport, shutdown_transport
 )
-from genie.runtime.async_bridge import get_async_bridge, shutdown_async_bridge
+from genie.runtime.async_zero_copy_bridge import AsyncZeroCopyBridge
 from genie.runtime.control_server import ControlPlaneServer
 
 logging.basicConfig(level=logging.INFO)

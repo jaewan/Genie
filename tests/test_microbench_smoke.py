@@ -4,7 +4,7 @@ sys.path.insert(0, "/home/jaewan/Genie")
 import pytest
 
 import genie
-from genie.core import benchmarks
+from tests import benchmarks
 
 
 def test_microbenchmarks_run():

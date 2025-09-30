@@ -15,8 +15,8 @@ except Exception:
 # Import side-effect modules to ensure registration
 from .core import device as _genie_device  # noqa: F401,E402
 from .core import library as _genie_library  # noqa: F401,E402
-from .core import factory_intercept as _genie_factory  # noqa: F401,E402
 from .core import enhanced_dispatcher as _genie_enhanced  # noqa: F401,E402
+from .core.lazy_tensor import install_factory_interceptors  # noqa: E402
 
 # Ensure a default device exists (triggers backend registration)
 try:
@@ -27,7 +27,7 @@ except Exception:
 
 # Install factory function interceptors (randn/zeros/ones/empty/full)
 try:
-	_genie_factory.install_all()
+	install_factory_interceptors()
 except Exception:
 	pass
 
@@ -44,8 +44,8 @@ def set_lazy_mode(enabled: bool) -> None:
 	except Exception:
 		pass
 	try:
-		from .core.dispatcher import set_lazy_mode as _set_enhanced  # noqa: WPS433
-		_set_enhanced(enabled)
+		from .core.enhanced_dispatcher import set_enhanced_lazy_mode  # noqa: WPS433
+		set_enhanced_lazy_mode(enabled)
 	except Exception:
 		pass
 

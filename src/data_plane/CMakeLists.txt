@@ -118,14 +118,8 @@ find_package(nlohmann_json 3.2.0 REQUIRED)
 # Source files
 set(SOURCES
     genie_data_plane.cpp
-    genie_data_plane_enhanced.cpp
-    genie_data_plane_factory.cpp
-    genie_zero_copy_rx.cpp
-    genie_extbuf_tx.cpp
-    genie_dpdk_thread_model.cpp  # Use DPDK native threading instead
+    genie_dpdk_thread_model.cpp
     genie_zero_copy_transport.cpp
-    genie_performance_tuning.cpp
-    genie_monitoring.cpp
     genie_c_api.cpp
     genie_kcp_wrapper.cpp
 )
@@ -185,30 +179,8 @@ install(TARGETS genie_data_plane
     ARCHIVE DESTINATION lib
 )
 
-# Add test executable for DPDK threading
-add_executable(test_dpdk_threading test_dpdk_threading.cpp genie_dpdk_thread_model.cpp)
-target_link_directories(test_dpdk_threading PRIVATE /opt/dpdk/dpdk-23.11/install/lib/x86_64-linux-gnu)
-target_link_libraries(test_dpdk_threading
-    ${DPDK_LIBRARIES}
-    pthread
-    numa
-    dl
-)
-target_compile_options(test_dpdk_threading PRIVATE ${DPDK_CFLAGS})
-
-# Install test executable
-install(TARGETS test_dpdk_threading
-    RUNTIME DESTINATION bin
-)
-
-# Add simple DPDK demo
-add_executable(test_dpdk_simple test_dpdk_simple.cpp)
-target_link_directories(test_dpdk_simple PRIVATE /opt/dpdk/dpdk-23.11/install/lib/x86_64-linux-gnu)
-target_link_libraries(test_dpdk_simple
-    ${DPDK_LIBRARIES}
-    pthread
-)
-target_compile_options(test_dpdk_simple PRIVATE ${DPDK_CFLAGS})
+# Removed test_dpdk_threading and test_dpdk_simple demo executables
+# These were demos, not actual tests
 
 install(FILES genie_data_plane.hpp
     DESTINATION include/genie

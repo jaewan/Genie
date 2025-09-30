@@ -842,3 +842,53 @@ class LazyTensor:
 		return LazyTensor("aten::alias", [tensor], {})
 
 
+# Factory function interception for torch.randn, torch.zeros, etc.
+def _is_remote_device(dev: Any) -> bool:
+	"""Check if device is remote_accelerator."""
+	if dev is None:
+		return False
+	if isinstance(dev, str):
+		return dev.startswith("remote_accelerator") or dev.startswith("privateuseone")
+	if isinstance(dev, torch.device):
+		return dev.type in ("privateuseone", "remote_accelerator")
+	return False
+
+
+def _install_factory_interceptor(fn_name: str) -> None:
+	"""Install interceptor for factory functions like torch.randn."""
+	original: Callable[..., Any] = getattr(torch, fn_name)
+
+	def wrapper(*args: Any, **kwargs: Any):
+		device = kwargs.get("device", None)
+		# Interception: remote device or LazyTensor inputs
+		has_lazy_input = any(isinstance(a, LazyTensor) for a in args) or any(isinstance(v, LazyTensor) for v in kwargs.values())
+		if _is_remote_device(device) or has_lazy_input:
+			op_name = f"aten::{fn_name}"
+			lt = LazyTensor(operation=op_name, inputs=list(args), kwargs=kwargs)
+			import os
+			if os.getenv("GENIE_LOG_INTERCEPTS", "0") == "1":
+				try:
+					shapes = [getattr(a, "shape", None) for a in args]
+					logger.info(f"[Genie] Factory intercepted torch.{fn_name} device={device}, args_shapes={shapes} -> {lt}")
+				except Exception:
+					logger.info(f"[Genie] Factory intercepted torch.{fn_name} device={device}")
+			return lt
+		return original(*args, **kwargs)
+
+	setattr(torch, fn_name, wrapper)
+	logger.debug(f"Installed factory interceptor for torch.{fn_name}")
+
+
+def install_factory_interceptors() -> None:
+	"""Install interceptors for common factory functions."""
+	for name in (
+		"randn", "rand", "randint", "zeros", "ones", "empty", "full", "empty_strided",
+		"rand_like", "randint_like", "zeros_like", "ones_like", "empty_like", "full_like",
+		"arange", "linspace", "logspace",
+	):
+		try:
+			_install_factory_interceptor(name)
+		except Exception:
+			logger.debug(f"Could not install interceptor for torch.{name}")
+
+

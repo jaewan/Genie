@@ -3,9 +3,6 @@
  */
 
 #include "genie_zero_copy_transport.hpp"
-#ifdef GENIE_WITH_SPDK
-#include "spdk_dma.hpp"
-#endif
 #include <iostream>
 #include <cstring>
 #include <chrono>

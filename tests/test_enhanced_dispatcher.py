@@ -11,7 +11,7 @@ from genie.core.enhanced_dispatcher import (
     set_enhanced_lazy_mode,
     get_enhanced_stats
 )
-from genie.core.dispatcher import dispatcher  # Backward compatibility
+from genie.core.enhanced_dispatcher import enhanced_dispatcher as dispatcher  # Backward compatibility
 from genie.core.lazy_tensor import LazyTensor
 
 logger = logging.getLogger(__name__)

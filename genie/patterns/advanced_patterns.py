@@ -338,6 +338,37 @@ class ResidualBlockPattern(PatternPlugin):
                 return PatternMatch(pattern_name=self.name, confidence=0.8, matched_nodes=[node_id])
         return None
 
+# Simple residual block pattern: conv -> bn/norm? -> relu -> conv -> add
+class ResidualBlockPattern(PatternPlugin):
+    @property
+    def name(self) -> str:
+        return "residual_block"
+
+    @track_performance
+    def match(self, graph: ComputationGraph) -> Optional[PatternMatch]:
+        G = graph_to_networkx(graph)
+        # Look for nodes with operation 'aten::add' having two parents, and parents include a conv path
+        for node_id in G.nodes:
+            if G.nodes[node_id].get('operation') != 'aten::add':
+                continue
+            preds = list(G.predecessors(node_id))
+            if len(preds) < 2:
+                continue
+            # Heuristic: one predecessor should have a conv ancestor within 3 hops
+            def has_conv_ancestor(n, depth=3):
+                if depth == 0:
+                    return False
+                for p in G.predecessors(n):
+                    if G.nodes[p].get('operation') == 'aten::conv2d':
+                        return True
+                    if has_conv_ancestor(p, depth-1):
+                        return True
+                return False
+            if any(has_conv_ancestor(p) for p in preds):
+                return PatternMatch(pattern_name=self.name, confidence=0.8, matched_nodes=[node_id])
+        return None
+
+
 # Performance tracking utilities
 def get_pattern_performance_stats(pattern_class) -> Dict[str, float]:
     """Get performance statistics for a pattern class."""

@@ -1,8 +1,9 @@
 """
-Enhanced dispatcher that improves upon the original while maintaining compatibility.
+Unified dispatcher for operation interception and lazy tensor creation.
 
-This approach focuses on practical improvements rather than complex torch.library integration
-that may not work reliably across PyTorch versions.
+This module provides the central dispatcher that intercepts PyTorch operations
+and creates LazyTensors for deferred execution on remote accelerators.
+Consolidates functionality from the original dispatcher, enhanced dispatcher, and library modules.
 """
 import functools
 import logging

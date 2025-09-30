@@ -14,12 +14,6 @@ except Exception:  # pragma: no cover
 	import importlib_metadata  # type: ignore
 from genie.semantic.workload import MatchedPattern
 from genie.patterns.base import PatternPlugin
-from genie.patterns.matmul_pattern import MatMulPattern, ConvolutionPattern
-from genie.patterns.llm_pattern import LLMAttentionPattern
-from genie.patterns.advanced_patterns import (
-	AdvancedLLMPattern, AdvancedVisionPattern, RecSysPattern, MultiModalPattern,
-	get_pattern_performance_stats, ResidualBlockPattern
-)
 
 
 class PatternRegistry:
@@ -37,16 +31,17 @@ class PatternRegistry:
 		self._performance_stats[pattern.name] = []
 
 	def register_builtin_patterns(self) -> None:
-		# Register advanced patterns (preferred)
+		# Import here to avoid circular dependency
+		from genie.patterns.advanced_patterns import (
+			AdvancedLLMPattern, AdvancedVisionPattern, RecSysPattern, MultiModalPattern,
+			ResidualBlockPattern
+		)
+		# Register advanced patterns
 		self.register_pattern(AdvancedLLMPattern())
 		self.register_pattern(AdvancedVisionPattern())
 		self.register_pattern(RecSysPattern())
 		self.register_pattern(MultiModalPattern())
 		self.register_pattern(ResidualBlockPattern())
-		
-		# Keep legacy patterns for fallback
-		self.register_pattern(MatMulPattern())
-		self.register_pattern(ConvolutionPattern())
 
 	def _load_external_plugins(self) -> None:
 		"""Load pattern plugins from entry points and environment variable.
@@ -134,18 +129,8 @@ class PatternRegistry:
 		logger = logging.getLogger(__name__)
 		debug_enabled = os.getenv("GENIE_ANALYZER_DEBUG", "0") == "1"
 
-		# Select a minimal, low-latency subset for small graphs
-		node_count = len(graph.nodes) if hasattr(graph, "nodes") else 0
-		fast_path = node_count <= 32 or os.getenv("GENIE_FAST_PATTERNS", "1") == "1"
-		if fast_path:
-			# Use lightweight patterns first
-			patterns_to_try: List[PatternPlugin] = [
-				LLMAttentionPattern(),
-				MatMulPattern(),
-				ConvolutionPattern(),
-			]
-		else:
-			patterns_to_try = list(self._patterns.values())
+		# Use all registered patterns
+		patterns_to_try = list(self._patterns.values())
 
 		for pattern in patterns_to_try:
 			start_time = time.perf_counter()
@@ -179,31 +164,8 @@ class PatternRegistry:
 					metadata=getattr(match, "metadata", None),
 				)
 			)
-			# If we are in fast path, one confident match is sufficient
-			if fast_path and match.confidence >= 0.5:
-				break
-
 		# Sort by confidence
 		matches.sort(key=lambda m: m.confidence, reverse=True)
-
-		# Fallback heuristics: ensure core patterns are recognized in minimal graphs
-		try:
-			from genie.patterns.matmul_pattern import MatMulPattern as _MatMul, ConvolutionPattern as _Conv  # noqa: WPS433
-			# If no LLM pattern matched, try simple matmul-softmax-matmul sequence
-			if not any(m.pattern_name.lower().startswith("llm") for m in matches):
-				basic_llm = _MatMul()
-				res = basic_llm.match(graph)
-				if res is not None:
-					matches.append(MatchedPattern(pattern_name="llm", confidence=max(0.51, getattr(res, 'confidence', 0.5)), subgraph=None, optimization_hints={}, metadata=getattr(res, 'metadata', None)))
-			# If no vision/conv pattern matched, try simple conv+relu
-			if not any(m.pattern_name in ("vision", "conv_pattern") for m in matches):
-				basic_vision = _Conv()
-				vres = basic_vision.match(graph)
-				if vres is not None:
-					matches.append(MatchedPattern(pattern_name="conv_pattern", confidence=max(0.51, getattr(vres, 'confidence', 0.5)), subgraph=None, optimization_hints={}, metadata=getattr(vres, 'metadata', None)))
-		except Exception:
-			pass
-
 		return matches
 
 	def get_performance_report(self) -> Dict[str, Dict[str, float]]:

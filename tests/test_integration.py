@@ -60,8 +60,8 @@ import pytest
 from genie.core.device import RemoteAcceleratorDevice
 from genie.core.lazy_tensor import LazyTensor
 from genie.core.graph import GraphBuilder
-from genie.core.dispatcher import dispatcher
-from genie.patterns.matmul_pattern import MatMulPattern, ConvolutionPattern
+from genie.core.enhanced_dispatcher import enhanced_dispatcher as dispatcher
+# Patterns are now in advanced_patterns
 from genie.core.fx_graph_builder import FXGraphBuilder
 
 

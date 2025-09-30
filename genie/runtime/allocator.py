@@ -5,8 +5,7 @@ from typing import Dict, Optional
 
 import torch
 
-from .dpdk_eal import DpdkRuntime
-from .gpudev import GPUDevInterface
+from .dpdk_bindings import get_dpdk
 
 @dataclass
 class DMABuffer:
@@ -28,8 +27,7 @@ class DPDKAllocator:
         self.eal_initialized = False
         self.memory_pools: Dict[str, object] = {}
         self.huge_page_size = "2MB"
-        self._dpdk = DpdkRuntime()
-        self._gpudev = GPUDevInterface()
+        self._dpdk = get_dpdk()
         self.initialize_dpdk()
 
     def initialize_dpdk(self) -> None:
@@ -43,8 +41,8 @@ class DPDKAllocator:
                 self.eal_initialized = False
         except Exception:
             # Fallback to Python-side probe
-            if self._dpdk.is_available() and self._dpdk.init_eal():
-                self.eal_initialized = True
+            if self._dpdk.is_available():
+                self.eal_initialized = self._dpdk.init_eal()
             else:
                 self.eal_initialized = False
         self.create_memory_pools()

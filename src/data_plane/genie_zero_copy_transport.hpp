@@ -34,7 +34,38 @@ typedef int cudaError_t;
 #include <functional>
 
 #include "genie_data_plane.hpp"
-#include "genie_monitoring.hpp"
+
+// Inline SPDK DMA helper (optional)
+#ifdef GENIE_WITH_SPDK
+#include <spdk/env.h>
+
+namespace genie { namespace data_plane {
+class SpdkDMA {
+public:
+    static bool initialize() {
+        static bool initialized = false;
+        if (initialized) return true;
+        spdk_env_opts opts;
+        spdk_env_opts_init(&opts);
+        opts.shm_id = 0;
+        opts.name = "genie-spdk";
+        if (spdk_env_init(&opts) == 0) {
+            initialized = true;
+        }
+        return initialized;
+    }
+    static void* alloc(size_t size, size_t align = 0x1000) {
+        return spdk_dma_zmalloc(size, align, nullptr);
+    }
+    static void free(void* ptr) {
+        if (ptr) spdk_dma_free(ptr);
+    }
+    static bool available() {
+        return initialize();
+    }
+};
+} }
+#endif
 
 namespace genie {
 namespace data_plane {
