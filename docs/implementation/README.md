@@ -21,6 +21,12 @@ Comprehensive implementation documentation for contributors to the Genie framewo
 - **[Scheduler & Optimizer](08-scheduler-optimizer.md)** - Workload optimizations
 - **[C++ Data Plane](09-data-plane-cpp.md)** - DPDK zero-copy implementation
 
+### Cluster Management (New)
+- **[Cluster Documentation](../../cluster/)** - Complete cluster management guide
+  - **[Cluster Init Index](../../cluster/CLUSTER_INIT_INDEX.md)** - Navigation hub for all cluster docs
+- **[Implementation Plan](../CLUSTER_INIT_IMPLEMENTATION_PLAN.md)** - Detailed implementation guide
+- **[Quick Start](../CLUSTER_INIT_QUICK_START.md)** - Developer quick start guide
+
 ### Reference & Contributing
 - **[Quick Reference](10-quick-reference.md)** - Common tasks and APIs
 - **[Contributor Guide](11-contributor-guide.md)** - How to contribute
@@ -59,6 +65,28 @@ Clear separation between Frontend (capture), SRG (semantics), and Backend (execu
 ## Code Examples
 
 ### Basic Usage
+
+**With Cluster Initialization** (Recommended):
+```python
+import genie
+import torch
+
+# Initialize connection to GPU cluster (one-time setup)
+await genie.init(master_addr='gpu-server.example.com')
+
+# Use remote accelerators transparently
+x = torch.randn(1000, 1000, device="remote_accelerator:0")
+y = torch.matmul(x, x)  # Builds graph, doesn't execute
+z = y.relu()            # Continues building graph
+
+# Materialize when needed
+result = z.cpu()  # Executes entire graph
+
+# Clean shutdown
+await genie.shutdown()
+```
+
+**Legacy Usage** (Manual setup):
 ```python
 import genie
 import torch
@@ -68,11 +96,9 @@ genie.set_lazy_mode(True)
 
 # Tensors on remote_accelerator become LazyTensors
 x = torch.randn(1000, 1000, device="remote_accelerator:0")
-y = torch.matmul(x, x)  # Builds graph, doesn't execute
-z = y.relu()            # Continues building graph
-
-# Materialize when needed
-result = z.cpu()  # Executes entire graph
+y = torch.matmul(x, x)
+z = y.relu()
+result = z.cpu()
 ```
 
 ### Checking Status
@@ -137,9 +163,18 @@ docs/implementation/
 - **Test Suite**: `../../tests/`
 - **Source Code**: `../../genie/`
 
-## Recent Updates (2025-09-30)
+## Recent Updates
 
-### Completed Refactorings
+### October 2025: Cluster Initialization Feature
+- 🆕 **Cluster Management**: Comprehensive cluster initialization system
+  - Single `genie.init()` call for transparent cluster connection
+  - Automatic network backend discovery (TCP/DPDK/RDMA)
+  - Built-in GPU monitoring and health checks
+  - Heartbeat-based failure detection
+  - Complete implementation plan with step-by-step guide
+  - See: [Cluster Init Documentation](../CLUSTER_INIT_INDEX.md)
+
+### September 2025: Completed Refactorings
 - ✅ **Refactoring #1**: Consolidated error handling (60/60 tests)
 - ✅ **Refactoring #3**: Unified graph representation with PyTorch FX (80+ tests)
 - ✅ **Refactoring #4**: Async-first transport with ThreadPoolExecutor (14/14 tests)

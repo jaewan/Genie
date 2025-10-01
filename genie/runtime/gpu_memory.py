@@ -161,9 +161,9 @@ class GPUDevMemoryManager:
             return
         
         try:
-            # rte_gpu_count() -> uint16_t
-            self._gpudev_lib.rte_gpu_count.argtypes = []
-            self._gpudev_lib.rte_gpu_count.restype = ctypes.c_uint16
+            # rte_gpu_count_avail() -> uint16_t
+            self._gpudev_lib.rte_gpu_count_avail.argtypes = []
+            self._gpudev_lib.rte_gpu_count_avail.restype = ctypes.c_uint16
             
             # rte_gpu_mem_register(gpu_id, ptr, size) -> int
             self._gpudev_lib.rte_gpu_mem_register.argtypes = [
@@ -191,7 +191,7 @@ class GPUDevMemoryManager:
             return
         
         try:
-            self._gpu_count = self._gpudev_lib.rte_gpu_count()
+            self._gpu_count = self._gpudev_lib.rte_gpu_count_avail()
             logger.info(f"Detected {self._gpu_count} GPUs via GPUDev")
         except Exception as e:
             logger.warning(f"Failed to detect GPUs: {e}")

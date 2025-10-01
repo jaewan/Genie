@@ -49,6 +49,15 @@ Genie enables transparent remote accelerator execution through a three-layer arc
 │  │ (Materialize)│  │  (Zero-Copy) │  │   (Phase 2+)    │  │
 │  └──────────────┘  └──────────────┘  └─────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│              Cluster Management Layer (NEW)                 │
+│  ┌──────────────┐  ┌──────────────┐  ┌─────────────────┐  │
+│  │ Cluster Init │  │   Network    │  │    Resource     │  │
+│  │ (genie.init) │  │  Discovery   │  │   Monitoring    │  │
+│  └──────────────┘  └──────────────┘  └─────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ## Recent Refactoring Updates (2025-09-30)
@@ -366,8 +375,116 @@ Continue reading:
 7. [Contributor Guide](11-contributor-guide.md) - Contributing
 8. [Refactoring Updates](12-refactoring-updates.md) - Recent improvements
 
+## Cluster Management Layer (October 2025)
+
+### Overview
+
+The cluster management layer provides transparent initialization and management of distributed GPU resources. It enables single-line cluster connection similar to PyTorch's `torch.distributed.init_process_group()`.
+
+**Quick Example**:
+```python
+import genie
+import torch
+
+# Initialize cluster connection
+await genie.init(master_addr='gpu-server.example.com')
+
+# Use remote accelerators transparently
+x = torch.randn(1000, 1000, device='remote_accelerator:0')
+result = (x @ x).cpu()
+
+# Clean shutdown
+await genie.shutdown()
+```
+
+### Key Components
+
+**Module**: `genie.cluster`
+
+1. **Cluster Initialization** (`cluster/init.py`)
+   - `genie.init()` - Main initialization function
+   - `genie.shutdown()` - Graceful cleanup
+   - `ClusterState` - Singleton cluster state management
+   - 5-phase initialization process
+
+2. **Network Discovery** (`runtime/network_discovery.py`)
+   - Automatic backend detection (TCP/DPDK/RDMA)
+   - Capability testing and selection
+   - Graceful fallback strategy
+
+3. **Resource Monitoring** (`cluster/monitoring.py`, `cluster/health.py`)
+   - **ResourceMonitor**: Event-driven GPU monitoring
+   - **HealthChecker**: Comprehensive health checks
+   - GPU status tracking (availability, temperature, power, memory)
+   - System health (CPU, memory, disk, network)
+   - Event notifications with callbacks
+   - Metrics history and statistics
+
+4. **Node Management** (`cluster/node_info.py`)
+   - Comprehensive node information
+   - GPU metrics collection
+   - Status tracking
+
+### Initialization Flow
+
+```
+User calls genie.init(master_addr='server')
+   │
+   ├─ Phase 1: Create local node info (detect GPUs)
+   ├─ Phase 2: Discover network (test TCP/DPDK/RDMA)
+   ├─ Phase 3: Initialize backend (select optimal)
+   ├─ Phase 4: Connect to cluster (master + peers)
+   └─ Phase 5: Start monitoring (GPU/health/heartbeat)
+   
+   ✅ Returns ClusterState (ready to use!)
+```
+
+### Network Backend Selection
+
+**Priority**: DPDK GPUDirect > RDMA > DPDK > TCP (fallback)
+
+| Backend | Bandwidth | Latency | Zero-Copy | Requirements |
+|---------|-----------|---------|-----------|--------------|
+| TCP | 10 Gbps | 1.0 ms | No | None (always available) |
+| DPDK | 90 Gbps | 0.05 ms | Yes | DPDK libraries |
+| DPDK GPUDev | 95 Gbps | 0.03 ms | Yes | DPDK + GPUs |
+| RDMA | 100 Gbps | 0.001 ms | Yes | RDMA hardware |
+
+### Monitoring Services
+
+**Background tasks** started by `genie.init()`:
+
+1. **Heartbeat Monitor** (every 10s)
+   - Send/receive heartbeats to detect node failures
+   - Detect node failures (timeout: 60s)
+   - Update node status
+
+2. **GPU Monitor** (every 5s)
+   - Query nvidia-smi
+   - Track utilization, memory, temperature
+   - Emit availability events
+
+3. **Health Checker** (every 30s)
+   - Check GPU health
+   - Check network connectivity
+   - Check peer status
+   - Update overall node status
+
+### Documentation
+
+**Complete implementation guide**:
+- [Cluster Init Index](../../cluster/CLUSTER_INIT_INDEX.md) - Documentation navigation
+- [Implementation Plan](../../cluster/CLUSTER_INIT_IMPLEMENTATION_PLAN.md) - Step-by-step guide
+- [Quick Start](../../cluster/CLUSTER_INIT_QUICK_START.md) - Developer reference
+- [Visual Guide](../../cluster/CLUSTER_INIT_VISUAL_GUIDE.md) - Architecture diagrams
+
+**Status**: Implementation plan complete, ready to start
+
+---
+
 ## Recent Updates
 
+**2025-10-01**: Cluster initialization design complete
 **2025-09-30**: Major refactoring and documentation update
 
 ### Completed Refactorings

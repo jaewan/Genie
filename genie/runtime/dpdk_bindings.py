@@ -254,9 +254,9 @@ class DpdkBindings:
 
     def _setup_gpudev_functions(self):
         """Setup GPU device function signatures."""
-        # int rte_gpu_count(void)
-        self.libs.gpudev.rte_gpu_count.argtypes = []
-        self.libs.gpudev.rte_gpu_count.restype = ctypes.c_int
+        # int rte_gpu_count_avail(void)
+        self.libs.gpudev.rte_gpu_count_avail.argtypes = []
+        self.libs.gpudev.rte_gpu_count_avail.restype = ctypes.c_int
 
     # Public API Methods
     
@@ -461,7 +461,7 @@ class DpdkBindings:
         """Get number of available GPU devices."""
         if not self.libs.gpudev_ok:
             return 0
-        return self.libs.gpudev.rte_gpu_count()
+        return self.libs.gpudev.rte_gpu_count_avail()
 
     def __del__(self):
         """Cleanup resources on destruction."""

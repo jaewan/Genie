@@ -761,12 +761,15 @@ class TransportCoordinator:
             data_port=self.data_plane_config.data_port if self.data_plane_config else 5556
         )
         
-        self.control_server = get_control_server(
-            node_id=self.node_id,
-            host=control_config.get('host', '0.0.0.0'),
-            port=control_config.get('port', 5555),
-            capabilities=capabilities
-        )
+        # Get control server (only accepts node_id)
+        self.control_server = get_control_server(node_id=self.node_id)
+        
+        # Update host/port if different from defaults
+        host = control_config.get('host', '0.0.0.0')
+        port = control_config.get('port', 5555)
+        if host != self.control_server.host or port != self.control_server.port:
+            self.control_server.host = host
+            self.control_server.port = port
         
         # Add transfer callbacks
         self.control_server.add_transfer_callback('request', self._handle_transfer_request)

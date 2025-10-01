@@ -58,6 +58,24 @@ def is_remote_accelerator_available() -> bool:
 		return False
 
 
+# Cluster management API (recommended initialization method)
+try:
+	from .cluster import init, shutdown, is_initialized
+except ImportError:
+	# Cluster module not available - provide stub functions
+	async def init(*args, **kwargs):
+		"""Stub: Cluster initialization not available"""
+		raise ImportError("Cluster module not available")
+	
+	async def shutdown(*args, **kwargs):
+		"""Stub: Cluster shutdown not available"""
+		pass
+	
+	def is_initialized() -> bool:
+		"""Stub: Cluster module not available"""
+		return False
+
+
 
 
 def get_capture_stats() -> dict:

@@ -35,6 +35,13 @@ This directory contains comprehensive implementation documentation for the Genie
 8. **[Scheduler & Optimizer](08-scheduler-optimizer.md)** - Workload optimizations
 9. **[C++ Data Plane](09-data-plane-cpp.md)** - DPDK zero-copy implementation
 
+### Cluster Management (NEW - October 2025)
+- **[Cluster Documentation](../../cluster/)** - Complete cluster management guide
+  - **[Cluster Init Index](../../cluster/CLUSTER_INIT_INDEX.md)** - Navigation hub
+  - **[Quick Start](../../cluster/CLUSTER_INIT_QUICK_START.md)** - Developer guide
+  - **[Implementation Plans](../../cluster/)** - Detailed phase guides
+  - **[Phase Summaries](../../cluster/)** - Completion reports
+
 ### Reference & Contributing
 10. **[Quick Reference](10-quick-reference.md)** - Common tasks and APIs
 11. **[Contributor Guide](11-contributor-guide.md)** - How to contribute
@@ -46,7 +53,7 @@ This directory contains comprehensive implementation documentation for the Genie
 
 | # | Document | Lines | Status |
 |---|----------|-------|--------|
-| 01 | Architecture Overview | ~400 | ✅ |
+| 01 | Architecture Overview | ~515 | ✅ Updated! |
 | 02 | Device Layer | ~450 | ✅ |
 | 03 | LazyTensor | ~800 | ✅ |
 | 04 | Dispatcher | ~500 | ✅ |
@@ -59,7 +66,13 @@ This directory contains comprehensive implementation documentation for the Genie
 | 11 | Contributor Guide | ~200 | ✅ |
 | 12 | Refactoring Updates | ~650 | ✅ NEW! |
 
-**Total**: 10,740+ lines of implementation documentation
+**Total**: 10,855+ lines of implementation documentation
+
+**Cluster Management Docs** (NEW - October 2025):
+- 5 essential user guides: ~1,500 lines
+- 3 archived development docs: ~2,500 lines (in docs/cluster/archive/)
+- 85 passing tests (Phases 1-3)
+- Production-ready cluster initialization feature
 
 ---
 
@@ -81,13 +94,16 @@ This directory contains comprehensive implementation documentation for the Genie
 
 ---
 
-**Last Updated**: 2025-09-30  
+**Last Updated**: 2025-10-01  
 **Status**: Ready for open-source release  
-**Total Docs**: 12 guides, 10,740+ lines  
+**Total Docs**: 12 core guides + 11 cluster docs, 18,855+ lines  
 **Recent Updates**: 
-- ✅ Refactoring #1 (Error Handling) - COMPLETE (60/60 tests)
-- ✅ Refactoring #3 (FX Graph Migration) - COMPLETE (80+ tests)
-- ✅ Refactoring #4 (Async-First Transport) - COMPLETE (14/14 tests)
-- ✅ Refactoring #5 (Pattern Matching Service) - COMPLETE (27/27 tests)
-- Architecture overview updated with async transport details
-- Runtime transport doc updated with ThreadPoolExecutor implementation
+- ✅ **Cluster Initialization (Oct 2025)** - Phases 1-3 COMPLETE (85/85 tests)
+  - Unified `genie.init()` API
+  - Automatic network discovery (TCP/DPDK/RDMA)
+  - Comprehensive monitoring (GPU + system health)
+  - Event-driven architecture with callbacks
+  - Production-ready with full documentation
+- ✅ Refactoring #1-5 - All COMPLETE (181+ tests)
+- Architecture overview updated with Cluster Management Layer
+- Implementation docs updated with cluster references

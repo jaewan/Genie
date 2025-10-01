@@ -56,16 +56,26 @@ class RemoteAcceleratorDevice:
 
 ##### `_register_backend()`
 
-Registers the backend with PyTorch's C++ core:
+Registers the backend with PyTorch's C++ core, with graceful fallback to Python-only mode:
 
 ```python
 def _register_backend(self):
     """Register the remote_accelerator backend with PyTorch."""
     if not RemoteAcceleratorDevice._backend_registered:
-        from genie import _C
-        _C.register_remote_accelerator_device()
-        self._register_python_hooks()
-        RemoteAcceleratorDevice._backend_registered = True
+        try:
+            from genie import _C
+            _C.register_remote_accelerator_device()
+            self._register_python_hooks()
+            RemoteAcceleratorDevice._backend_registered = True
+            logger.info("Successfully registered remote_accelerator backend")
+        except Exception as e:
+            # Graceful fallback: Python-level __torch_function__ still works
+            logger.warning(f"C++ backend registration failed, using Python-only mode: {e}")
+            logger.warning("This is expected if the C++ extension has ABI compatibility issues")
+            logger.info("LazyTensor interception via __torch_function__ will still work")
+            
+            RemoteAcceleratorDevice._backend_registered = True
+            self._register_python_hooks()
 ```
 
 **C++ Implementation** (`device.cpp`):
@@ -78,6 +88,8 @@ void register_remote_accelerator_device() {
     }
 }
 ```
+
+**Fallback Behavior**: If C++ registration fails (e.g., due to ABI incompatibility), Genie falls back to Python-only mode using the `__torch_function__` protocol. This provides full functionality without the C++ performance optimizations.
 
 ##### `get_device(index)` (Class Method)
 

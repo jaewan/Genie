@@ -208,8 +208,10 @@ else
     rm -rf build
     
     # Configure build
+    # Complete dependency chain: bus/auxiliary → common/mlx5 → net/mlx5 + gpu/cuda
     meson setup build \
         --prefix="$INSTALL_PREFIX" \
+        -Denable_drivers=bus/auxiliary,common/mlx5,net/mlx5,gpu/cuda \
         -Dmax_numa_nodes=2 \
         -Dmax_lcores=128 \
         -Dmachine=native \

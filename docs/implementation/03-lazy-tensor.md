@@ -310,9 +310,13 @@ def materialize(self) -> torch.Tensor:
     """Force materialization of this tensor.
     
     Process:
-        1. Check if already materialized
+        1. Check if already materialized (returns cached result)
         2. Execute computation graph up to this tensor
         3. Cache result for future access
+    
+    Note: Caching is CRITICAL for correctness. Operations like torch.randn
+    are deferred, so without caching, each materialize() call would produce
+    different random values. The executor MUST respect this caching.
     """
     if not self.materialized:
         from .executor import execute_subgraph
@@ -323,6 +327,8 @@ def materialize(self) -> torch.Tensor:
     
     return self.concrete_value
 ```
+
+**Key Correctness Requirement**: Any executor implementing `execute_subgraph()` MUST check the `materialized` flag and return `concrete_value` if already materialized. Failing to do so will cause non-deterministic behavior for operations with side effects (e.g., random number generation).
 
 ### Partial Materialization
 
