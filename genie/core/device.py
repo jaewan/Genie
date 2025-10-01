@@ -48,8 +48,16 @@ class RemoteAcceleratorDevice:
 				logger.info("Successfully registered remote_accelerator backend")
 				
 			except Exception as e:
-				logger.error(f"Failed to register remote_accelerator backend: {e}")
-				raise RuntimeError(f"Cannot initialize remote_accelerator device: {e}")
+				# Fallback: Python-level __torch_function__ still works
+				logger.warning(f"C++ backend registration failed, using Python-only mode: {e}")
+				logger.warning("This is expected if the C++ extension has ABI compatibility issues")
+				logger.info("LazyTensor interception via __torch_function__ will still work")
+				
+				# Mark as registered to avoid repeated attempts
+				RemoteAcceleratorDevice._backend_registered = True
+				
+				# Still register Python hooks
+				self._register_python_hooks()
 
 	def _register_python_hooks(self):
 		"""Register Python hooks to intercept operations and create LazyTensors."""

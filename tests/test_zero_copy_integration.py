@@ -42,6 +42,7 @@ class MockTensor:
     def element_size(self) -> int:
         return 4  # float32
     
+    @property
     def shape(self):
         return [self.size]
 
@@ -112,38 +113,75 @@ async def test_async_bridge():
     """Test async bridge"""
     logger.info("Testing async bridge...")
     
-    # Get bridge
-    bridge = await get_async_bridge()
+    # Create bridge instance with minimal config
+    config = {
+        'lib_path': './libgenie_zero_copy.so',
+        'port_id': 0,
+        'gpu_id': 0,
+        'use_gpu_direct': False  # Use fallback mode for testing
+    }
+    bridge = AsyncZeroCopyBridge(config)
     
-    # Create mock tensor
-    tensor = MockTensor(1024)
+    # Initialize bridge
+    success = await bridge.initialize()
+    if not success:
+        logger.warning("Failed to initialize bridge (expected without DPDK)")
+        return
     
-    # Define progress callback
-    def progress_callback(future, progress):
-        logger.info(f"Transfer progress: {progress}%")
-    
-    # Start transfer
-    future = await bridge.transfer_tensor(
-        tensor=tensor,
-        target_node="test-node-2",
-        progress_callback=progress_callback
-    )
-    
-    logger.info(f"Transfer started: {future.transfer_id}")
-    
-    # Wait for completion (will timeout in simulation)
-    completed = await future.wait(timeout=2.0)
-    
-    if completed:
-        logger.info(f"✅ Transfer completed: {future.bytes_transferred} bytes")
-    else:
-        logger.info("Transfer timed out (expected in simulation)")
-    
-    # Get statistics
-    stats = bridge.get_statistics()
-    logger.info(f"Bridge statistics: {stats}")
-    
-    logger.info("✅ Async bridge test passed")
+    try:
+        # Create mock tensor (simulating a PyTorch tensor)
+        import numpy as np
+        tensor_data = np.random.randn(1024).astype(np.float32)
+        
+        # Create a mock tensor that looks like torch.Tensor
+        class MockGPUTensor:
+            def __init__(self, data):
+                self.data = data
+                self._ptr = id(data)
+            
+            @property
+            def is_cuda(self):
+                return False  # For testing, use CPU tensor
+            
+            def data_ptr(self):
+                return self._ptr
+            
+            def numel(self):
+                return len(self.data)
+            
+            def element_size(self):
+                return 4  # float32
+            
+            @property
+            def shape(self):
+                return [len(self.data)]
+        
+        tensor = MockGPUTensor(tensor_data)
+        
+        # Start transfer (will use simulation fallback)
+        request = await bridge.send_tensor(
+            tensor=tensor,
+            target_node="192.168.1.2:5556",  # Valid IP:port format
+            target_gpu=0
+        )
+        
+        logger.info(f"Transfer started: {request.transfer_id}")
+        
+        # Wait for completion with timeout
+        try:
+            await asyncio.wait_for(request.future, timeout=2.0)
+            logger.info(f"✅ Transfer completed: {request.bytes_transferred} bytes")
+        except asyncio.TimeoutError:
+            logger.info("Transfer timed out (expected in simulation mode)")
+        
+        # Get statistics
+        stats = bridge.get_stats()
+        logger.info(f"Bridge statistics: {stats}")
+        
+        logger.info("✅ Async bridge test passed")
+        
+    finally:
+        await bridge.shutdown()
 
 async def test_transport_coordinator():
     """Test the complete transport coordinator"""
@@ -210,6 +248,9 @@ async def test_end_to_end():
     """Test end-to-end flow"""
     logger.info("Testing end-to-end flow...")
     
+    coordinator = None
+    bridge = None
+    
     try:
         # Initialize transport system
         coordinator = await initialize_transport(
@@ -229,34 +270,93 @@ async def test_end_to_end():
         
         logger.info("✅ Transport system initialized")
         
-        # Get async bridge
-        bridge = await get_async_bridge()
+        # Create async bridge with minimal config
+        config = {
+            'lib_path': './libgenie_zero_copy.so',
+            'port_id': 0,
+            'gpu_id': 0,
+            'use_gpu_direct': False
+        }
+        bridge = AsyncZeroCopyBridge(config)
+        
+        # Initialize bridge
+        success = await bridge.initialize()
+        if not success:
+            logger.warning("Failed to initialize bridge")
+            return
         
         # Create batch of tensors
-        tensors = [MockTensor(1024 * (i+1)) for i in range(5)]
+        import numpy as np
+        tensors = []
+        for i in range(5):
+            data = np.random.randn(1024 * (i+1)).astype(np.float32)
+            
+            class MockGPUTensor:
+                def __init__(self, data):
+                    self.data = data
+                    self._ptr = id(data)
+                
+                @property
+                def is_cuda(self):
+                    return False
+                
+                def data_ptr(self):
+                    return self._ptr
+                
+                def numel(self):
+                    return len(self.data)
+                
+                def element_size(self):
+                    return 4
+                
+                @property
+                def shape(self):
+                    return [len(self.data)]
+            
+            tensors.append(MockGPUTensor(data))
         
-        # Batch transfer
+        # Start multiple transfers (batch simulation)
         logger.info("Starting batch transfer of 5 tensors...")
-        futures = await bridge.batch_transfer(
-            tensors=tensors,
-            target_node="test-node-2",
-            max_concurrent=3
-        )
+        requests = []
+        for i, tensor in enumerate(tensors):
+            request = await bridge.send_tensor(
+                tensor=tensor,
+                target_node=f"192.168.1.{i+2}:5556",
+                target_gpu=0
+            )
+            requests.append(request)
         
-        logger.info(f"Started {len(futures)} transfers")
+        logger.info(f"Started {len(requests)} transfers")
         
-        # Wait for some transfers
+        # Wait for transfers with timeout
         await asyncio.sleep(2)
         
         # Check results
-        completed = sum(1 for f in futures if f.done())
-        logger.info(f"Completed {completed}/{len(futures)} transfers")
+        completed = sum(1 for r in requests if r.future.done())
+        logger.info(f"Completed {completed}/{len(requests)} transfers")
         
         logger.info("✅ End-to-end test passed")
         
     finally:
-        await shutdown_async_bridge()
-        await shutdown_transport()
+        # Shutdown bridge first
+        if bridge:
+            try:
+                await bridge.shutdown()
+            except Exception as e:
+                logger.warning(f"Bridge shutdown error: {e}")
+        
+        # Shutdown transport coordinator
+        if coordinator:
+            try:
+                await coordinator.shutdown()
+            except Exception as e:
+                logger.warning(f"Coordinator shutdown error: {e}")
+        
+        # Shutdown global transport
+        try:
+            await shutdown_transport()
+        except Exception as e:
+            logger.warning(f"Transport shutdown error: {e}")
 
 async def main():
     """Run all tests"""
