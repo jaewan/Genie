@@ -6,7 +6,9 @@ Genie is a GPU disaggregation framework for PyTorch that operates at the ML fram
 
 ## System Overview
 
-Genie enables transparent remote accelerator execution through a three-layer architecture:
+Genie is currently a research prototype for GPU disaggregation that demonstrates semantic capture capabilities through a three-layer architecture.
+
+**Note: The zero-copy transport layer is not currently implemented and requires manual C++ compilation and DPDK setup. The current implementation focuses on semantic analysis and graph construction.**
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -298,41 +300,43 @@ LazyTensor.metadata = {
 **Goal**: Semantic capture and local execution
 
 - ✅ LazyTensor with semantic metadata
-- ✅ FX-based graph construction
-- ✅ Pattern recognition
-- ✅ Local execution with fallback
+- ✅ FX-based graph construction (manual, not symbolic tracing)
+- ✅ Pattern recognition and workload classification
+- ✅ Local CPU execution with fallback
 - ✅ Comprehensive operation coverage (>95%)
 
 **Execution**: CPU-based for validation
+
+**Current Limitations**: No remote execution, no zero-copy transport, optimizations are metadata-only
 
 ### Phase 2+ (Future)
 
 **Goal**: Actual remote disaggregation
 
-- ✅ Semantic-driven optimizations (implemented):
-  - LLM decode co-location (HotNets'25 §3.2)
-  - Prefill parallelization
-  - Pipelined CNN inference
-  - Multi-modal parallel branches
-  - Dynamic recomputation
-- 🔄 DPDK zero-copy data path (C++ implemented, Python integration in progress)
-- 🔄 Remote execution via transport coordinator
-- 🔄 Multi-tenant coordination
-- 🔄 Global resource manager
+- ❌ Semantic-driven optimizations (metadata-only currently):
+  - LLM decode co-location (HotNets'25 §3.2) - only adds metadata hints
+  - Prefill parallelization - only adds metadata hints
+  - Pipelined CNN inference - only adds metadata hints
+  - Multi-modal parallel branches - only adds metadata hints
+  - Dynamic recomputation - only adds metadata hints
+- ❌ DPDK zero-copy data path (requires manual C++ build and DPDK setup)
+- ❌ Remote execution via transport coordinator (fallback raises NotImplementedError)
+- ❌ Multi-tenant coordination (not implemented)
+- ❌ Global resource manager (not implemented)
 
 ## Alignment with HotNets'25 Paper
 
 | Paper Section | Implementation |
 |---------------|----------------|
-| §2.1 Semantic Translation Gap | LazyTensor metadata, Three-tier capture |
-| §3.1 Frontend (Lazy Tensor) | `genie/core/lazy_tensor.py` |
-| §3.1 Three-Tier Capture | Dispatcher + FX + Hooks |
-| §3.2 Core Scheduler | `genie/semantic/optimizer.py`, `scheduling.py` |
-| §3.2 LLM Optimizations | KV cache co-location, prefill parallelization |
-| §3.2 Vision Optimizations | CNN pipelining, conv-bn-relu fusion |
-| §3.2 Multi-Modal | Parallel modalities, JIT fusion transfer |
-| §3.3 Zero-Copy Data Path | `src/data_plane/` (C++), `genie/runtime/` (Python) |
-| §3.4 Global Scheduling | Future work |
+| §2.1 Semantic Translation Gap | ✅ LazyTensor metadata, Three-tier capture |
+| §3.1 Frontend (Lazy Tensor) | ✅ `genie/core/lazy_tensor.py` |
+| §3.1 Three-Tier Capture | ⚠️ Dispatcher + FX + Hooks (FX doesn't use symbolic tracing) |
+| §3.2 Core Scheduler | ❌ `genie/semantic/optimizer.py`, `scheduling.py` (metadata-only) |
+| §3.2 LLM Optimizations | ❌ KV cache co-location (metadata-only), prefill parallelization (metadata-only) |
+| §3.2 Vision Optimizations | ❌ CNN pipelining (metadata-only), conv-bn-relu fusion (metadata-only) |
+| §3.2 Multi-Modal | ❌ Parallel modalities (metadata-only), JIT fusion transfer (metadata-only) |
+| §3.3 Zero-Copy Data Path | ❌ `src/data_plane/` (C++) requires manual build, `genie/runtime/` (Python) incomplete |
+| §3.4 Global Scheduling | ❌ Future work (not implemented) |
 
 ## Performance Considerations
 
@@ -346,8 +350,10 @@ LazyTensor.metadata = {
 
 - Factory interception: ~1-2% for creation ops
 - `__torch_function__`: Intercepts >95% of operations
-- FX tracing: One-time cost, reusable graph
+- FX tracing: One-time cost, reusable graph (manual construction, not symbolic tracing)
 - Fallback path: Uses torch.ops.aten for unknown ops
+
+**Note**: These overhead measurements are theoretical. No actual performance benchmarks exist for the transport layer or end-to-end execution.
 
 ## Testing Strategy
 
@@ -357,7 +363,7 @@ See `tests/` directory:
 - `test_device_registration.py` - Device backend tests
 - `test_torch_function_protocol.py` - Operation coverage
 - `test_enhanced_dispatcher.py` - Dispatcher functionality
-- `test_integration.py` - End-to-end scenarios
+- `test_integration.py` - Component integration scenarios
 - `test_exceptions.py` - Error handling and Result types (22 tests)
 - `test_analyzer_*.py` - Semantic analysis (multiple files)
 - `test_phase_detection.py` - Phase detection
@@ -372,28 +378,31 @@ Continue reading:
 4. [Semantic Layer](06-semantic-layer.md) - Three-tier semantic capture
 5. [Pattern Recognition](07-pattern-recognition.md) - Workload detection
 6. [Scheduler & Optimizer](08-scheduler-optimizer.md) - Semantic optimizations
-7. [Contributor Guide](11-contributor-guide.md) - Contributing
-8. [Refactoring Updates](12-refactoring-updates.md) - Recent improvements
+7. [Implementation Status](13-implementation-status.md) - What actually works vs planned
+8. [Contributor Guide](11-contributor-guide.md) - Contributing
+9. [Refactoring Updates](12-refactoring-updates.md) - Recent improvements
 
 ## Cluster Management Layer (October 2025)
 
 ### Overview
 
-The cluster management layer provides transparent initialization and management of distributed GPU resources. It enables single-line cluster connection similar to PyTorch's `torch.distributed.init_process_group()`.
+The cluster management layer is planned to provide transparent initialization and management of distributed GPU resources, similar to PyTorch's `torch.distributed.init_process_group()`.
 
-**Quick Example**:
+**Note: This functionality is not currently implemented. The cluster management code exists but requires the transport layer to be functional first.**
+
+**Planned Example** (not currently working):
 ```python
 import genie
 import torch
 
-# Initialize cluster connection
+# Initialize cluster connection (NOT IMPLEMENTED)
 await genie.init(master_addr='gpu-server.example.com')
 
-# Use remote accelerators transparently
+# Use remote accelerators transparently (NOT IMPLEMENTED)
 x = torch.randn(1000, 1000, device='remote_accelerator:0')
 result = (x @ x).cpu()
 
-# Clean shutdown
+# Clean shutdown (NOT IMPLEMENTED)
 await genie.shutdown()
 ```
 
@@ -478,7 +487,7 @@ User calls genie.init(master_addr='server')
 - [Quick Start](../../cluster/CLUSTER_INIT_QUICK_START.md) - Developer reference
 - [Visual Guide](../../cluster/CLUSTER_INIT_VISUAL_GUIDE.md) - Architecture diagrams
 
-**Status**: Implementation plan complete, ready to start
+**Status**: Design complete, implementation requires transport layer development
 
 ---
 

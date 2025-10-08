@@ -276,9 +276,18 @@ class LazyTensor:
 		if "device" in self.kwargs and self.kwargs["device"] is not None:
 			device = self.kwargs["device"]
 			if isinstance(device, str):
-				return device
+				# Handle custom device types like "remote_accelerator:0"
+				if "remote_accelerator" in device:
+					return device
+				# Try to create torch.device to validate
+				try:
+					torch.device(device)
+					return device
+				except RuntimeError:
+					# Custom device type not recognized by PyTorch
+					return device
 			return str(device)
-		
+
 		# Infer from inputs
 		for inp in self.inputs:
 			if hasattr(inp, "device"):

@@ -2,33 +2,34 @@
 
 ## Overview
 
-The C++ data plane implements Genie's high-performance zero-copy transport layer for GPU tensor transfers. Built on DPDK and GPUDev, it provides the foundation for efficient AI accelerator disaggregation as described in HotNets'25 §3.3.
+The C++ data plane is intended to implement Genie's high-performance zero-copy transport layer for GPU tensor transfers. Built on DPDK and GPUDev, it is designed to provide the foundation for efficient AI accelerator disaggregation as described in HotNets'25 §3.3.
 
-**Directory**: `src/data_plane/`  
-**Language**: C++17  
-**Dependencies**: DPDK 23.11+, CUDA 11.0+ (optional), libnuma, nlohmann_json  
-**Performance**: ~90 Gbps on 100G NICs
+**Directory**: `src/data_plane/`
+**Language**: C++17
+**Dependencies**: DPDK 23.11+, CUDA 11.0+ (optional), libnuma, nlohmann_json
+**Status**: Not built by default, requires manual compilation
+**Current Functionality**: Library exists but is not functional for actual network transfer
 
 ## Why C++ for the Data Plane?
 
-### Performance Requirements (HotNets'25 §3.3)
+### Intended Performance Requirements (HotNets'25 §3.3)
 
-The paper's zero-copy claims require:
-- **Sub-microsecond packet processing** - C++ achieves this, Python cannot
-- **GPU Direct RDMA** - Requires DPDK C libraries  
+The paper's zero-copy claims would require:
+- **Sub-microsecond packet processing** - C++ needed for this performance level
+- **GPU Direct RDMA** - Requires DPDK C libraries
 - **Poll-mode drivers** - Kernel bypass for minimal latency
 - **Lock-free data structures** - DPDK rings, atomic operations
 
-### Python vs C++ Performance
+### Theoretical Python vs C++ Performance
 
-| Operation | Python | C++ | Speedup |
-|-----------|--------|-----|---------|
+| Operation | Python | C++ | Theoretical Speedup |
+|-----------|--------|-----|-------------------|
 | Packet processing | ~50 µs | ~0.5 µs | 100x |
 | Memory registration | ~5 ms | ~50 µs | 100x |
 | Throughput | ~1-10 Gbps | ~90 Gbps | 9-90x |
 | CPU overhead | ~50% | ~5% | 10x less |
 
-**Conclusion**: C++ is **mandatory** for the zero-copy claims in the paper.
+**Current Status**: These performance targets are theoretical. No actual benchmarks exist for the transport layer.
 
 ---
 
@@ -39,30 +40,32 @@ The paper's zero-copy claims require:
 │              Python Control Plane                       │
 │  transport_coordinator.py, control_server.py            │
 └────────────────────┬────────────────────────────────────┘
-                     │ ctypes FFI
+                     │ ctypes FFI (not functional)
 ┌────────────────────┴────────────────────────────────────┐
-│              C API Layer                                │
+│              C API Layer - Not Built                     │
 │  genie_c_api.cpp (simple) + genie_data_plane.cpp (full)│
 └────────────────────┬────────────────────────────────────┘
-                     │
+                     │ (not implemented)
 ┌────────────────────┴────────────────────────────────────┐
-│              Core Data Plane                            │
+│              Core Data Plane - Not Functional           │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐ │
 │  │ GenieData    │  │ ZeroCopy     │  │ DPDK Thread  │ │
 │  │ Plane        │  │ Transport    │  │ Manager      │ │
 │  └──────────────┘  └──────────────┘  └──────────────┘ │
 └────────────────────┬────────────────────────────────────┘
-                     │
+                     │ (requires manual build)
 ┌────────────────────┴────────────────────────────────────┐
-│              DPDK Libraries                             │
+│              DPDK Libraries - Setup Required             │
 │  rte_eal, rte_ethdev, rte_mbuf, rte_gpudev             │
 └────────────────────┬────────────────────────────────────┘
-                     │
+                     │ (DPDK installation needed)
 ┌────────────────────┴────────────────────────────────────┐
 │              Hardware                                   │
 │  NIC (Ethernet) ←→ GPU (via GPUDirect RDMA)           │
 └─────────────────────────────────────────────────────────┘
 ```
+
+**Current Implementation**: The C++ data plane components exist in source code but are not compiled or functional. The system falls back to simulation mode.
 
 ## Core Components
 
@@ -92,6 +95,6 @@ Complete implementation details, code examples, and API documentation provided i
 
 ---
 
-**Last Updated**: 2025-09-30  
-**Maintainers**: Genie Core Team  
-**Status**: Production-ready
+**Last Updated**: 2025-09-30
+**Maintainers**: Genie Core Team
+**Status**: Source code exists, requires manual build and DPDK setup

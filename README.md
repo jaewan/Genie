@@ -1,6 +1,10 @@
 ## Genie
 
-Semantic-driven, framework-level disaggregation for AI accelerators. Phase 1 provides a custom device, LazyTensor engine, FX integration, basic patterns, and a runnable example.
+**Research Prototype**: Semantic-driven, framework-level disaggregation for AI accelerators.
+
+**Current Status**: Phase 1 provides semantic capture capabilities (LazyTensor, FX graphs, pattern recognition) but lacks working transport layer for remote execution.
+
+**Note**: Zero-copy transport and remote GPU execution are not currently implemented.
 
 ### Requirements
 
@@ -27,20 +31,20 @@ Semantic-driven, framework-level disaggregation for AI accelerators. Phase 1 pro
 
 #### RTX 5060 Ti / RTX 5080 GPU Support
 
-These next-generation GPUs use CUDA Compute Capability 12.0 (sm_120) and are now **fully supported** via PyTorch 2.8.0+cu128.
+These next-generation GPUs use CUDA Compute Capability 12.0 (sm_120) and are **supported by PyTorch 2.8.0+cu128**.
 
-**Current Status**: ✅ **Full GPU acceleration available**
+**Current Status**: ⚠️ **Local GPU acceleration available, remote execution not implemented**
 
-The system automatically detects and utilizes RTX 50-series GPUs for:
+The system can utilize RTX 50-series GPUs for local computations:
 - Matrix operations and tensor computations
 - Deep learning model training and inference
-- Zero-copy memory transfers (when available)
+- Local GPU memory usage
 
-**Performance**: RTX 5060 Ti provides excellent performance with 15.4 GB memory and fast matrix operations.
+**Remote GPU execution and zero-copy transfers are not currently implemented.**
 
-### DPDK Zero-Copy Setup (Advanced)
+### DPDK Zero-Copy Setup (Advanced - Not Currently Functional)
 
-For high-performance zero-copy tensor transfers using DPDK and GPUDev:
+**Note**: The DPDK-based zero-copy transport layer is not currently implemented. The following describes the intended setup process:
 
 #### Setup Instructions
 

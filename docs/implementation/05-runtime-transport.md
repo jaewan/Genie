@@ -805,16 +805,25 @@ GPU Memory → CPU Buffer → Pinned Buffer → NIC
          Copy 1      Copy 2           DMA
 ```
 
-**Genie Solution**: True zero-copy path:
+**Intended Genie Solution**: True zero-copy path:
 ```
 GPU Memory → NIC (via GPUDirect RDMA)
            ↑
           DMA (no CPU involvement)
 ```
 
+**Current Implementation**: CPU staging with multiple copies:
+```
+GPU Memory → CPU Buffer → Network Send
+           ↑
+         Copy (no zero-copy implemented)
+```
+
 ### Implementation Details
 
-**1. GPU Memory Registration**:
+**Note**: The following sections describe the intended implementation. The current code includes these components but they are not functional.
+
+**1. GPU Memory Registration** (Intended):
 ```cpp
 // C++ side (via GPUDev)
 int rte_gpu_mem_register(
@@ -824,12 +833,12 @@ int rte_gpu_mem_register(
 ) -> Returns IOVA for DMA
 ```
 
-**2. DPDK Integration**:
+**2. DPDK Integration** (Intended):
 ```python
-# Python coordinates
+# Python coordinates (not currently functional)
 handle = manager.register_tensor_memory(tensor, gpu_id=0)
 
-# C++ performs zero-copy DMA
+# C++ performs zero-copy DMA (not currently implemented)
 success = data_plane.send_tensor(
     transfer_id=id,
     gpu_ptr=handle.gpu_ptr,  # Direct GPU memory
@@ -853,20 +862,22 @@ Remote GPU Memory
 
 ## Performance Optimizations
 
-### 1. Proactive Memory Allocation
+### 1. Proactive Memory Allocation (Intended)
 
-**Benefit**: Eliminate staging copies
+**Intended Benefit**: Eliminate staging copies
 ```python
 # Traditional (2 copies)
 t = torch.randn(N, N)              # 1. Pageable allocation
 pinned = t.pin_memory()            # 2. Copy to pinned
 # DMA from pinned
 
-# Genie (0 copies)
+# Intended Genie (0 copies)
 allocator = DPDKAllocator()
 buffer = allocator.allocate(size)  # 1. Direct pinned allocation
 # DMA directly
 ```
+
+**Current Implementation**: Uses CPU staging with copies (not zero-copy)
 
 ### 2. GPU Memory Caching
 
