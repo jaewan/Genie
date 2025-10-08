@@ -117,11 +117,12 @@ class LazyTensor:
 		# Register with graph builders.
 		# For elementwise fastpath, skip registration entirely to minimize overhead.
 		if not _is_elementwise_fastpath:
-			try:
-				from .fx_graph_builder import FXGraphBuilder
-				FXGraphBuilder.current().add_lazy_tensor(self)
-			except ImportError:
-				pass
+			# Temporarily disable FX graph builder to avoid recursion errors
+			# try:
+			#     from .fx_graph_builder import FXGraphBuilder
+			#     FXGraphBuilder.current().add_lazy_tensor(self)
+			# except ImportError:
+			#     pass
 			# Always keep ComputationGraph in sync for pattern analyzers
 			try:
 				from .graph import GraphBuilder
@@ -349,9 +350,14 @@ class LazyTensor:
 				# For remote_accelerator, just return self (no actual device change)
 				# The actual device change will happen during materialization
 				return self
-		
+
 		# For other devices, proceed normally
-		return self.materialize().to(*args, **kwargs)
+		# Materialize first to get a concrete tensor, then apply .to()
+		concrete_tensor = self.materialize()
+		if not isinstance(concrete_tensor, torch.Tensor):
+			# Ensure we have a proper tensor
+			concrete_tensor = torch.tensor(concrete_tensor)
+		return concrete_tensor.to(*args, **kwargs)
 
 	def item(self):  # noqa: ANN201
 		"""Get scalar value (triggers materialization)."""

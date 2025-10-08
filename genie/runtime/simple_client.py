@@ -94,6 +94,11 @@ class RemoteExecutionClient:
             # Serialize tensor
             tensor_bytes = io.BytesIO()
 
+            # Handle LazyTensor inputs - materialize first
+            if hasattr(tensor, 'materialize'):
+                logger.debug("Materializing LazyTensor for transfer")
+                tensor = tensor.materialize()
+
             # Move to CPU if on GPU (Phase 1 limitation)
             if isinstance(tensor, torch.Tensor) and tensor.is_cuda:
                 logger.warning(

@@ -130,7 +130,10 @@ async def execute_operation(
         tensor = torch.load(io.BytesIO(tensor_bytes))
         logger.info(f"   Loaded tensor: shape={tensor.shape}, dtype={tensor.dtype}")
 
-        # Move to GPU
+        # Move to GPU (handle both torch.Tensor and LazyTensor)
+        if hasattr(tensor, 'materialize'):
+            # It's a LazyTensor - materialize first
+            tensor = tensor.materialize()
         tensor = tensor.to(DEVICE)
 
         # Execute operation
