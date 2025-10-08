@@ -1,0 +1,36 @@
+INFO:__main__:============================================================
+INFO:__main__:LazyTensor Remote Execution Tests
+INFO:__main__:============================================================
+INFO:__main__:
+/mnt/2_1/jaewan/jae/Genie/genie/version_validator.py:23: UserWarning: Genie targets PyTorch 2.2.x–2.5.x or 2.8+; found 2.1.2+cpu
+  warnings.warn(f"Genie targets PyTorch 2.2.x–2.5.x or 2.8+; found {torch.__version__}")
+INFO:genie.core.enhanced_dispatcher:Enhanced dispatcher loaded: 0/50 operations registered successfully (0.0% coverage)
+INFO:genie.core.library:Phase 1 library loaded: 0 ops registered, 0 failed (impls disabled)
+INFO:genie.core.device:Successfully registered remote_accelerator backend
+INFO:genie.core.device:Initialized default remote_accelerator device
+INFO:__main__:✅ LazyTensor device set correctly: remote_accelerator:0
+INFO:__main__:✅ Operations stay lazy
+INFO:__main__:
+INFO:__main__:============================================================
+INFO:__main__:🧪 Testing Remote Execution
+INFO:__main__:============================================================
+INFO:__main__:
+INFO:__main__:IMPORTANT: Make sure server is running!
+INFO:__main__:  python -m genie.runtime.simple_server
+INFO:__main__:
+INFO:__main__:1. Created LazyTensor: remote_accelerator:0
+INFO:__main__:2. Applied relu (still lazy): materialized=False
+INFO:__main__:3. Materializing (will execute remotely)...
+INFO:genie.core.executor:Routing lt_5 to remote execution
+Traceback (most recent call last):
+  File "tests/test_lazy_tensor_remote.py", line 122, in <module>
+    test_remote_execution()
+  File "tests/test_lazy_tensor_remote.py", line 76, in test_remote_execution
+    result = y.materialize()
+  File "/mnt/2_1/jaewan/jae/Genie/genie/core/lazy_tensor.py", line 307, in materialize
+    self.concrete_value = execute_subgraph(self)
+  File "/mnt/2_1/jaewan/jae/Genie/genie/core/executor.py", line 754, in execute_subgraph
+    return _executor.execute_subgraph(target_lazy_tensor)
+  File "/mnt/2_1/jaewan/jae/Genie/genie/core/executor.py", line 79, in execute_subgraph
+    return self._execute_remote(target_lazy_tensor)
+AttributeError: 'SimpleExecutor' object has no attribute '_execute_remote'

@@ -6,6 +6,11 @@ File: tests/test_lazy_tensor_remote.py
 import pytest
 import torch
 import logging
+import sys
+import os
+
+# Add project root to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -22,7 +27,7 @@ def test_lazy_tensor_device():
     assert isinstance(x, LazyTensor), f"Expected LazyTensor, got {type(x)}"
 
     # Check device
-    assert x.device == "remote_accelerator:0", f"Device is {x.device}"
+    assert x.device == torch.device("remote_accelerator:0"), f"Device is {x.device}"
 
     logger.info(f"✅ LazyTensor device set correctly: {x.device}")
 

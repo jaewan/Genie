@@ -270,30 +270,34 @@ class LazyTensor:
 		
 		return None
 
-	def _infer_device(self) -> str:
+	def _infer_device(self) -> torch.device:
 		"""Infer device from inputs or kwargs."""
 		# Check kwargs first
 		if "device" in self.kwargs and self.kwargs["device"] is not None:
 			device = self.kwargs["device"]
-			if isinstance(device, str):
+			if isinstance(device, torch.device):
+				return device
+			elif isinstance(device, str):
 				# Handle custom device types like "remote_accelerator:0"
-				if "remote_accelerator" in device:
-					return device
-				# Try to create torch.device to validate
 				try:
-					torch.device(device)
-					return device
+					return torch.device(device)
 				except RuntimeError:
-					# Custom device type not recognized by PyTorch
-					return device
-			return str(device)
+					# Custom device type not recognized by PyTorch - create manually
+					return torch.device(device)
+			elif isinstance(device, int):
+				return torch.device(f"cuda:{device}")
+			else:
+				logger.warning(f"Unknown device type: {type(device)}")
+				return torch.device("cpu")  # Safe default
 
 		# Infer from inputs
 		for inp in self.inputs:
 			if hasattr(inp, "device"):
-				return str(inp.device)
-		
-		return "remote_accelerator:0"
+				if isinstance(inp.device, torch.device):
+					return inp.device
+				return torch.device(str(inp.device))
+
+		return torch.device("remote_accelerator:0")
 
 	def materialize(self) -> torch.Tensor:
 		"""Force materialization of this tensor."""

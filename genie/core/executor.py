@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Dict, Optional
 
 import torch
@@ -64,12 +65,25 @@ class SimpleExecutor:
 	def execute_subgraph(self, target_lazy_tensor) -> torch.Tensor:  # noqa: ANN001
 		"""Execute computation graph up to target tensor."""
 		self.execution_count += 1
-		
+
+		# Check if this is a remote execution (Week 2 enhancement)
+		if hasattr(target_lazy_tensor, 'device') and target_lazy_tensor.device:
+			if isinstance(target_lazy_tensor.device, torch.device):
+				is_remote = target_lazy_tensor.device.type == "remote_accelerator"
+			elif isinstance(target_lazy_tensor.device, str):
+				is_remote = "remote_accelerator" in target_lazy_tensor.device
+			else:
+				is_remote = False
+
+			if is_remote:
+				logger.info(f"Routing {target_lazy_tensor.id} to remote execution")
+				return self._execute_remote(target_lazy_tensor)
+
 		# Try to use FXGraphBuilder first if available
 		try:
 			from .fx_graph_builder import FXGraphBuilder
 			fx_builder = FXGraphBuilder.current()
-			
+
 			# Check if FX builder has any nodes
 			if len(fx_builder.lazy_tensor_map) > 0:
 				# If target is sensitive op, skip FX to avoid placeholder ordering issues
@@ -619,6 +633,117 @@ class SimpleExecutor:
 				return node_results.get(arg0, torch.tensor(0.0))
 		
 		return torch.tensor(0.0)
+
+
+# Global device assignment (for co-location)
+_device_assignments = {}  # colocation_group -> device
+
+
+def _get_device_for_node(lazy_tensor) -> str:
+	"""
+	Get device assignment for a node.
+
+	Respects co-location hints from optimizer.
+	"""
+	# Check if node has co-location metadata
+	if hasattr(lazy_tensor, 'metadata') and lazy_tensor.metadata:
+		metadata = lazy_tensor.metadata
+
+		# Check for colocation_group
+		if hasattr(metadata, 'colocation_group') and metadata.colocation_group:
+			group = metadata.colocation_group
+
+			# Get or assign device for this group
+			if group not in _device_assignments:
+				_device_assignments[group] = os.getenv('GENIE_SERVER_URL', 'http://localhost:8888')
+				logger.info(f"Assigned colocation group '{group}' to {_device_assignments[group]}")
+
+			return _device_assignments[group]
+
+	# Default: use env variable or default
+	return os.getenv('GENIE_SERVER_URL', 'http://localhost:8888')
+
+
+def _execute_remote(lazy_tensor) -> torch.Tensor:
+	"""
+	Execute LazyTensor on remote server via HTTP.
+
+	Phase 1 limitations:
+	- Only single-input operations
+	- Only supported operations (relu, sigmoid, tanh, abs)
+	"""
+	from genie.runtime.simple_client import get_client
+	from genie.core.lazy_tensor import LazyTensor
+	import os
+
+	logger.info(f"🌐 Remote execution: {lazy_tensor.operation}")
+	logger.debug(f"   Tensor ID: {lazy_tensor.id}")
+
+	# Get device for this node (respects co-location)
+	server_url = _get_device_for_node(lazy_tensor)
+	logger.debug(f"   Server: {server_url}")
+
+	# Check for co-location metadata
+	if hasattr(lazy_tensor, 'metadata') and lazy_tensor.metadata:
+		if hasattr(lazy_tensor.metadata, 'colocation_group') and lazy_tensor.metadata.colocation_group:
+			logger.info(f"   🔗 Co-location enabled: group={lazy_tensor.metadata.colocation_group}")
+
+	# Materialize inputs first (recursive)
+	materialized_inputs = []
+	for inp in lazy_tensor.inputs:
+		if isinstance(inp, LazyTensor):
+			logger.debug(f"   Materializing input: {inp.id}")
+			materialized_inputs.append(inp.materialize())
+		elif isinstance(inp, torch.Tensor):
+			materialized_inputs.append(inp)
+		else:
+			# Convert scalars to tensors
+			materialized_inputs.append(torch.tensor(inp))
+
+	# Phase 1: Only support single-input operations
+	if len(materialized_inputs) != 1:
+		raise NotImplementedError(
+			f"Remote execution currently supports single-input operations only. "
+			f"Got {len(materialized_inputs)} inputs for {lazy_tensor.operation}. "
+			f"\n"
+			f"This will be fixed in Phase 2 (multi-input support)."
+		)
+
+	input_tensor = materialized_inputs[0]
+
+	# Get operation name (remove aten:: prefix)
+	operation = lazy_tensor.operation.replace("aten::", "")
+
+	# Define supported operations
+	SUPPORTED_OPS = {'relu', 'sigmoid', 'tanh', 'abs', 'neg', 'exp', 'log', 'sqrt'}
+
+	if operation not in SUPPORTED_OPS:
+		raise NotImplementedError(
+			f"Operation '{operation}' not supported for remote execution. "
+			f"Supported: {SUPPORTED_OPS}. "
+			f"\n"
+			f"This will be expanded in Phase 2."
+		)
+
+	# Execute via HTTP
+	client = get_client(server_url=server_url)
+
+	try:
+		result = client.execute(
+			operation=operation,
+			tensor=input_tensor,
+			timeout=30.0
+		)
+
+		logger.info(f"✅ Remote execution successful: {input_tensor.shape} -> {result.shape}")
+		return result
+
+	except Exception as e:
+		logger.error(f"❌ Remote execution failed: {e}")
+		raise RuntimeError(
+			f"Remote execution of {operation} failed: {e}\n"
+			f"Make sure server is running: python -m genie.runtime.simple_server"
+		)
 
 
 # Global executor instance
