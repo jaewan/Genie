@@ -77,7 +77,7 @@ class SimpleExecutor:
 
 			if is_remote:
 				logger.info(f"Routing {target_lazy_tensor.id} to remote execution")
-				return self._execute_remote(target_lazy_tensor)
+				return _execute_remote(target_lazy_tensor)
 
 		# Try to use FXGraphBuilder first if available
 		try:
@@ -664,6 +664,54 @@ def _get_device_for_node(lazy_tensor) -> str:
 	return os.getenv('GENIE_SERVER_URL', 'http://localhost:8888')
 
 
+def _execute_local_creation(lazy_tensor) -> torch.Tensor:
+	"""
+	Execute tensor creation operations locally.
+	These operations need to run locally first, then can be moved to remote device.
+	"""
+	from genie.core.lazy_tensor import LazyTensor
+
+	logger.debug(f"Local creation: {lazy_tensor.operation}")
+
+	# Materialize inputs (should be shape/dtype parameters)
+	materialized_inputs = []
+	for inp in lazy_tensor.inputs:
+		if isinstance(inp, LazyTensor):
+			materialized_input = inp.materialize()
+			# Ensure we get a concrete tensor, not another LazyTensor
+			if isinstance(materialized_input, LazyTensor):
+				materialized_input = materialized_input.materialize()
+			materialized_inputs.append(materialized_input)
+		elif isinstance(inp, torch.Tensor):
+			materialized_inputs.append(inp)
+		else:
+			# Convert scalars to tensors
+			materialized_inputs.append(torch.tensor(inp))
+
+	# Execute locally using torch operations
+	operation = lazy_tensor.operation.replace("aten::", "")
+	operation_base = operation.replace('aten::', '') if operation.startswith('aten::') else operation
+
+	try:
+		if operation_base == "randn":
+			result = torch.randn(*materialized_inputs, **lazy_tensor.kwargs)
+		elif operation_base == "zeros":
+			result = torch.zeros(*materialized_inputs, **lazy_tensor.kwargs)
+		elif operation_base == "ones":
+			result = torch.ones(*materialized_inputs, **lazy_tensor.kwargs)
+		elif operation_base == "empty":
+			result = torch.empty(*materialized_inputs, **lazy_tensor.kwargs)
+		else:
+			raise ValueError(f"Unknown creation operation: {operation}")
+
+		logger.debug(f"Created tensor: shape={result.shape}, dtype={result.dtype}")
+		return result
+
+	except Exception as e:
+		logger.error(f"Local creation failed: {e}")
+		raise
+
+
 def _execute_remote(lazy_tensor) -> torch.Tensor:
 	"""
 	Execute LazyTensor on remote server via HTTP.
@@ -688,12 +736,34 @@ def _execute_remote(lazy_tensor) -> torch.Tensor:
 		if hasattr(lazy_tensor.metadata, 'colocation_group') and lazy_tensor.metadata.colocation_group:
 			logger.info(f"   🔗 Co-location enabled: group={lazy_tensor.metadata.colocation_group}")
 
+	# Get operation name first for early checks
+	operation = lazy_tensor.operation.replace("aten::", "")
+
+	# Check if this is a tensor creation operation (needs local execution first)
+	TENSOR_CREATION_OPS = {'randn', 'zeros', 'ones', 'empty'}
+	operation_base = operation.replace('aten::', '') if operation.startswith('aten::') else operation
+
+	if operation_base in TENSOR_CREATION_OPS:
+		# Execute locally first, then we'll handle the device placement
+		logger.info(f"Local tensor creation: {operation}")
+		input_tensor = _execute_local_creation(lazy_tensor)
+		# For tensor creation, we don't need to send to remote - just return the tensor
+		# But we need to mark it as materialized and return it
+		lazy_tensor.concrete_value = input_tensor
+		lazy_tensor.materialized = True
+		return input_tensor
+
 	# Materialize inputs first (recursive)
 	materialized_inputs = []
 	for inp in lazy_tensor.inputs:
 		if isinstance(inp, LazyTensor):
 			logger.debug(f"   Materializing input: {inp.id}")
-			materialized_inputs.append(inp.materialize())
+			materialized_input = inp.materialize()
+			# Ensure we get a concrete tensor, not another LazyTensor
+			if isinstance(materialized_input, LazyTensor):
+				# If we got a LazyTensor back, materialize it again
+				materialized_input = materialized_input.materialize()
+			materialized_inputs.append(materialized_input)
 		elif isinstance(inp, torch.Tensor):
 			materialized_inputs.append(inp)
 		else:
@@ -711,16 +781,28 @@ def _execute_remote(lazy_tensor) -> torch.Tensor:
 
 	input_tensor = materialized_inputs[0]
 
-	# Get operation name (remove aten:: prefix)
-	operation = lazy_tensor.operation.replace("aten::", "")
+	# Ensure input_tensor is a concrete torch.Tensor, not a LazyTensor
+	if isinstance(input_tensor, LazyTensor):
+		input_tensor = input_tensor.materialize()
 
 	# Define supported operations
-	SUPPORTED_OPS = {'relu', 'sigmoid', 'tanh', 'abs', 'neg', 'exp', 'log', 'sqrt'}
+	SUPPORTED_OPS = {'relu', 'sigmoid', 'tanh', 'abs', 'neg', 'exp', 'log', 'sqrt', 'alias'}
 
-	if operation not in SUPPORTED_OPS:
+	if operation_base == "alias":
+		# Alias operation - just return the input tensor
+		logger.info(f"Alias operation: {operation}")
+		input_tensor = materialized_inputs[0]
+		lazy_tensor.concrete_value = input_tensor
+		lazy_tensor.materialized = True
+		return input_tensor
+	elif operation_base in SUPPORTED_OPS:
+		# These operations will be executed remotely via HTTP
+		pass  # Continue to HTTP execution below
+	else:
 		raise NotImplementedError(
-			f"Operation '{operation}' not supported for remote execution. "
+			f"Operation '{operation_base}' not supported for remote execution. "
 			f"Supported: {SUPPORTED_OPS}. "
+			f"Tensor creation ops: {TENSOR_CREATION_OPS}. "
 			f"\n"
 			f"This will be expanded in Phase 2."
 		)

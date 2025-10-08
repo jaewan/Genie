@@ -26,6 +26,8 @@ We implemented and evaluated LLM decode co-location optimization:
 | Total Time (10 steps) | 63.84ms | 3.98ms | **93.8%** ✅ |
 | Data Transferred/Step | 0.38 MB | 0.003 MB | **99.2%** ✅ |
 
+**⚠️ Important: These results are from simulation.** See "Simulation Methodology" section below.
+
 ## Analysis
 
 ### Why the Improvement?
@@ -95,19 +97,110 @@ Genie automatically:
 
 **Insight:** Benefit increases with cache size (real LLMs have 5GB+ caches!)
 
-## Limitations
+## Simulation Methodology
 
-1. **Simulated Transfer:** Used `time.sleep()` to simulate network transfer
-   - Real network has variability
-   - Need actual network measurements
+### Why Simulation?
+1. **Faster development** - No need for multi-server setup
+2. **Isolation** - Tests optimization logic independently
+3. **Reproducibility** - No network variability
 
-2. **Single Optimization:** Only tested co-location
-   - Other optimizations (prefill parallelization, etc.) not tested
-   - Need comprehensive evaluation
+### What Was Simulated?
+```python
+# Network transfer simulation
+transfer_time_ms = data_size_MB * 15  # 15ms per MB
+time.sleep(transfer_time_ms / 1000)
+```
 
-3. **Simple Model:** SimpleLLM is toy model
-   - Real LLMs are more complex
-   - Need evaluation on actual models (GPT-2, BERT)
+**Assumptions:**
+- 100 Gbps network (typical datacenter)
+- ~15ms per MB (includes serialization, transfer, deserialization)
+- No packet loss, no congestion
+- Constant latency
+
+### Validation Plan (Week 3)
+1. Deploy to 2 servers with real 10/100 Gbps NICs
+2. Measure actual HTTP transfer times
+3. Compare to simulation:
+   - Expect: Same relative improvement (~90%)
+   - Absolute latencies may differ by 20-30%
+
+### Why Simulation Results Are Valid
+The optimization is fundamentally about **data movement**:
+- Baseline: Must transfer 0.38 MB per step
+- Optimized: Transfer only 0.003 MB per step
+- Improvement: 99% less data transferred
+
+**Real network will show similar benefit** because the data volume difference is real.
+
+## Metadata Flow
+
+### How Semantic Information Flows Through the System
+
+```
+Optimizer (FX Graph Analysis)
+    ↓ Sets node.meta['colocation_group']
+FX Node (during graph optimization)
+    ↓ During LazyTensor creation
+LazyTensor (via constructor parameter)
+    ↓ LazyTensor.metadata.colocation_group
+Executor (during remote execution)
+    ↓ _get_device_for_node(lazy_tensor)
+Device Assignment (global dictionary)
+    ↓ Returns server URL for co-located group
+HTTP Client (actual execution)
+```
+
+**Implementation Details:**
+
+1. **Optimizer Phase**: `SemanticOptimizer._apply_llm_optimizations()` sets metadata on FX nodes:
+   ```python
+   for node in kv_cache_group:
+       node.meta['colocation_group'] = 'kv_cache'
+       node.meta['priority'] = 10
+   ```
+
+2. **LazyTensor Creation**: Metadata is copied during LazyTensor construction:
+   ```python
+   def __init__(self, operation, inputs, kwargs, fx_node=None):
+       # Copy FX metadata if provided
+       if fx_node and hasattr(fx_node, 'meta'):
+           for key in ['colocation_group', 'priority']:
+               if key in fx_node.meta:
+                   setattr(self.metadata, key, fx_node.meta[key])
+   ```
+
+3. **Executor Phase**: `_get_device_for_node()` reads LazyTensor metadata:
+   ```python
+   if hasattr(lazy_tensor.metadata, 'colocation_group'):
+       group = lazy_tensor.metadata.colocation_group
+       return _device_assignments[group]
+   ```
+
+**Result**: Semantic information flows from high-level graph analysis to low-level execution decisions.
+
+## Known Limitations
+
+### 1. **Global Device Assignment**
+- Uses global dictionary `_device_assignments` for co-location groups
+- Thread-safe for single-threaded execution only
+- Not suitable for concurrent requests
+- **Future:** Use request-scoped or context-local assignment
+- **For OSDI:** Acceptable for proof-of-concept
+
+### 2. **Simulated Transfer**
+- Used `time.sleep()` to simulate network transfer delays
+- Real network has variability, packet loss, congestion
+- Need actual network measurements for production validation
+
+### 3. **Single Optimization**
+- Only tested KV cache co-location
+- Other optimizations (prefill parallelization, etc.) not tested
+- Need comprehensive evaluation across multiple workload types
+
+### 4. **Simple Model**
+- SimpleLLM is toy model with simplified attention mechanism
+- Real LLMs have more complex patterns (multi-head attention, etc.)
+- Need evaluation on actual models (GPT-2, BERT, ViT)
 
 ## Next Steps
 

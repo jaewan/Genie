@@ -9,12 +9,15 @@ This simulates semantic-aware placement:
 
 import sys
 import os
-sys.path.append('../examples')
+
+# Add the parent directory (project root) to path
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, project_root)
 
 import torch
 import time
 import logging
-from simple_llm import SimpleLLM, estimate_transfer_size
+from examples.simple_llm import SimpleLLM, estimate_transfer_size
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

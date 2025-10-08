@@ -95,7 +95,7 @@ class RemoteExecutionClient:
             tensor_bytes = io.BytesIO()
 
             # Move to CPU if on GPU (Phase 1 limitation)
-            if tensor.is_cuda:
+            if isinstance(tensor, torch.Tensor) and tensor.is_cuda:
                 logger.warning(
                     "Moving GPU tensor to CPU for transfer "
                     "(Phase 1 limitation)"

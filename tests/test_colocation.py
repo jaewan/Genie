@@ -51,6 +51,21 @@ def test_colocation_device_assignment():
     logger.info(f"✅ Co-located operations assigned to same device: {device_x}")
 
 
+def test_colocation_function_call():
+    """Test that _get_device_for_node can be called as a function."""
+    from genie.core.executor import _get_device_for_node
+
+    # Test calling as function (not method)
+    x = torch.randn(10, 10, device="remote_accelerator:0")
+    if x.metadata:
+        x.metadata.colocation_group = 'test_group'
+
+    device = _get_device_for_node(x)
+    assert device == "http://localhost:8888"
+
+    logger.info("✅ Function call works correctly")
+
+
 if __name__ == "__main__":
     logger.info("=" * 70)
     logger.info("Testing Co-Location Implementation")
