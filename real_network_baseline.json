@@ -1,0 +1,35 @@
+{
+  "num_steps": 10,
+  "latencies_ms": [
+    0.8130073547363281,
+    0.3066062927246094,
+    0.24557113647460938,
+    0.2429485321044922,
+    0.2315044403076172,
+    0.2315044403076172,
+    0.2434253692626953,
+    0.22840499877929688,
+    0.22912025451660156,
+    0.2307891845703125
+  ],
+  "avg_latency_ms": 0.30028820037841797,
+  "median_latency_ms": 0.2372264862060547,
+  "min_latency_ms": 0.22840499877929688,
+  "max_latency_ms": 0.8130073547363281,
+  "std_latency_ms": 0.18164697796259113,
+  "total_ms": 3.0028820037841797,
+  "strategy": "baseline_no_colocation",
+  "server_url": "http://localhost:8888",
+  "model_config": {
+    "hidden_size": 768,
+    "cache_seq_len": 128,
+    "batch_size": 1
+  },
+  "transfer_sizes": {
+    "kv_cache_mb": 0.375,
+    "decoder_mb": 4.505859375,
+    "token_mb": 0.0029296875,
+    "total_per_step_without_colocation": 0.3779296875,
+    "total_per_step_with_colocation": 0.0029296875
+  }
+}
