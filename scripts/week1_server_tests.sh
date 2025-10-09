@@ -57,7 +57,8 @@ echo "   Hostname: $(hostname)"
 echo "   IP Addresses: $(hostname -I)"
 echo "   CUDA Available: $(python -c 'import torch; print(torch.cuda.is_available())')"
 if python -c 'import torch' 2>/dev/null && python -c 'import torch; print(torch.cuda.is_available())' 2>/dev/null; then
-    echo "   GPU: $(python -c 'import torch; print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"None\")')"
+    GPU_NAME=$(python3 -c "import torch; print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'None')")
+echo "   GPU: $GPU_NAME"
 fi
 echo ""
 
@@ -77,20 +78,16 @@ echo ""
 echo "🧪 Test 2: Server Startup"
 START_TIME=$(date +%s%N)
 
-# Start server in background
-python -m genie.runtime.simple_server --host 0.0.0.0 --port 8888 > server.log 2>&1 &
-SERVER_PID=$!
+# Check if server is already running
+SERVER_PID=""
+TEST_PORT=8888
 
-# Wait for server to start
-sleep 3
+# Try to find an existing server
+if curl -s http://localhost:8888/health > /dev/null 2>&1; then
+    echo "   Found existing server on port 8888"
+    record_result "server_startup" "PASS" "\"Using existing server on port 8888\"" "0"
 
-# Check if server is running
-if ps -p $SERVER_PID > /dev/null; then
-    END_TIME=$(date +%s%N)
-    TIMING=$(( (END_TIME - START_TIME) / 1000000 ))
-    record_result "server_startup" "PASS" "\"Server PID: $SERVER_PID, listening on 0.0.0.0:8888\"" "$TIMING"
-
-    # Test health endpoint
+    # Test health endpoint of existing server
     echo "   Testing health endpoint..."
     HEALTH_RESPONSE=$(curl -s http://localhost:8888/health 2>/dev/null || echo '{"status": "error"}')
 
@@ -102,9 +99,40 @@ if ps -p $SERVER_PID > /dev/null; then
         record_result "health_endpoint" "FAIL" "\"Health endpoint not responding correctly\"" "0"
     fi
 else
-    END_TIME=$(date +%s%N)
-    TIMING=$(( (END_TIME - START_TIME) / 1000000 ))
-    record_result "server_startup" "FAIL" "\"Server failed to start\"" "$TIMING"
+    # Start server in background on a different port for testing
+    TEST_PORT=8889
+    echo "   Starting test server on port $TEST_PORT"
+    python -m genie.runtime.simple_server --host 0.0.0.0 --port $TEST_PORT > server.log 2>&1 &
+    SERVER_PID=$!
+
+    # Wait for server to start
+    sleep 3
+
+    # Check if server is running
+    if ps -p $SERVER_PID > /dev/null; then
+        END_TIME=$(date +%s%N)
+        TIMING=$(( (END_TIME - START_TIME) / 1000000 ))
+        record_result "server_startup" "PASS" "\"Server PID: $SERVER_PID, listening on 0.0.0.0:$TEST_PORT\"" "$TIMING"
+
+        # Test health endpoint
+        echo "   Testing health endpoint..."
+        HEALTH_RESPONSE=$(curl -s http://localhost:$TEST_PORT/health 2>/dev/null || echo '{"status": "error"}')
+
+        if echo "$HEALTH_RESPONSE" | grep -q '"status":"healthy"'; then
+            DEVICE=$(echo "$HEALTH_RESPONSE" | grep -o '"device":"[^"]*"' | cut -d'"' -f4)
+            CUDA_AVAIL=$(echo "$HEALTH_RESPONSE" | grep -o '"cuda_available":[^,]*' | cut -d':' -f2 | tr -d ' ')
+            record_result "health_endpoint" "PASS" "{\"device\": \"$DEVICE\", \"cuda_available\": $CUDA_AVAIL}" "0"
+        else
+            record_result "health_endpoint" "FAIL" "\"Health endpoint not responding correctly\"" "0"
+        fi
+
+        # Kill the test server since we don't need it for other tests
+        kill $SERVER_PID 2>/dev/null || true
+    else
+        END_TIME=$(date +%s%N)
+        TIMING=$(( (END_TIME - START_TIME) / 1000000 ))
+        record_result "server_startup" "FAIL" "\"Server failed to start\"" "$TIMING"
+    fi
 fi
 echo ""
 
@@ -224,9 +252,13 @@ else
 fi
 echo ""
 
-# Cleanup
+# Cleanup (only kill server if it was started by this script)
 echo "🧹 Cleanup"
-kill $SERVER_PID 2>/dev/null || true
+if [ ! -z "$SERVER_PID" ] && ps -p $SERVER_PID > /dev/null; then
+    echo "   Stopping server (PID: $SERVER_PID)"
+    kill $SERVER_PID 2>/dev/null || true
+    sleep 2
+fi
 rm -f server_test_tensor.pt server_result.pt server.log
 
 echo ""

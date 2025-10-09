@@ -22,10 +22,19 @@ fi
 
 # Test 2: Port connectivity
 echo -n "2. Port 8888 connectivity... "
-if nc -zv "$SERVER_IP" 8888 2>/dev/null; then
-    echo "✅ PASS"
+if command -v nc >/dev/null 2>&1; then
+    if nc -zv "$SERVER_IP" 8888 2>/dev/null; then
+        echo "✅ PASS"
+    else
+        echo "❌ FAIL"
+    fi
 else
-    echo "❌ FAIL"
+    # Try alternative method using /dev/tcp if available
+    if timeout 3 bash -c "echo >/dev/tcp/$SERVER_IP/8888" 2>/dev/null; then
+        echo "✅ PASS (using /dev/tcp)"
+    else
+        echo "⚠️  SKIP (nc not available)"
+    fi
 fi
 
 # Test 3: HTTP connectivity

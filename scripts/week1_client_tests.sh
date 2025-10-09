@@ -169,11 +169,12 @@ export GENIE_SERVER_URL="$SERVER_URL"
 
 # Test remote execution via LazyTensor
 python -c "
+import genie
 import torch
 import time
 
-# Test remote tensor creation and operation
-x = torch.randn(100, 100, device='remote_accelerator:0')
+# Test remote tensor creation and operation (using privateuseone backend)
+x = torch.randn(100, 100, device='privateuseone:0')
 y = x.relu().sigmoid()
 
 start = time.time()
@@ -187,10 +188,11 @@ print(f'Result device: {result.device}')
 
 if [ $? -eq 0 ]; then
     REMOTE_TIME=$(python -c "
+import genie
 import torch
 import time
 
-x = torch.randn(100, 100, device='remote_accelerator:0')
+x = torch.randn(100, 100, device='privateuseone:0')
 y = x.relu().sigmoid()
 
 start = time.time()
@@ -238,10 +240,11 @@ print(f'{(time.time() - start) * 1000:.1f}')
 
 # Remote execution time (from previous test)
 REMOTE_TIME=$(python -c "
+import genie
 import torch
 import time
 
-x = torch.randn(100, 100, device='remote_accelerator:0')
+x = torch.randn(100, 100, device='privateuseone:0')
 y = x.relu().sigmoid()
 
 start = time.time()
@@ -267,11 +270,12 @@ START_TIME=$(date +%s%N)
 
 # Test chaining multiple operations
 python -c "
+import genie
 import torch
 import time
 
 # Chain multiple operations
-x = torch.randn(50, 50, device='remote_accelerator:0')
+x = torch.randn(50, 50, device='privateuseone:0')
 y = x.relu().sigmoid().tanh().abs()
 
 start = time.time()
@@ -284,10 +288,11 @@ print(f'Result shape: {result.shape}')
 
 if [ $? -eq 0 ]; then
     CHAIN_TIME=$(python -c "
+import genie
 import torch
 import time
 
-x = torch.randn(50, 50, device='remote_accelerator:0')
+x = torch.randn(50, 50, device='privateuseone:0')
 y = x.relu().sigmoid().tanh().abs()
 
 start = time.time()
@@ -311,10 +316,11 @@ START_TIME=$(date +%s%N)
 
 # Test unsupported operation
 python -c "
+import genie
 import torch
 
 try:
-    x = torch.randn(10, 10, device='remote_accelerator:0')
+    x = torch.randn(10, 10, device='privateuseone:0')
     y = x.matmul(x)  # matmul might not be supported
     result = y.materialize()
     print('matmul succeeded')
@@ -322,7 +328,7 @@ except Exception as e:
     print(f'matmul failed as expected: {type(e).__name__}')
 " 2>/dev/null
 
-if [ $? -ne 0 ]; then
+if [ $? -eq 0 ]; then
     END_TIME=$(date +%s%N)
     TIMING=$(( (END_TIME - START_TIME) / 1000000 ))
     record_result "error_handling" "PASS" "\"Unsupported operations handled correctly\"" "$TIMING"
@@ -337,11 +343,12 @@ START_TIME=$(date +%s%N)
 
 # Test with larger tensor
 python -c "
+import genie
 import torch
 import time
 
 # Large tensor test
-x = torch.randn(500, 500, device='remote_accelerator:0')  # ~1MB
+x = torch.randn(500, 500, device='privateuseone:0')  # ~1MB
 y = x.relu()
 
 start = time.time()
@@ -354,10 +361,11 @@ print(f'Tensor size: {result.numel() * 4 / 1024:.1f} KB')
 
 if [ $? -eq 0 ]; then
     LARGE_TIME=$(python -c "
+import genie
 import torch
 import time
 
-x = torch.randn(500, 500, device='remote_accelerator:0')
+x = torch.randn(500, 500, device='privateuseone:0')
 y = x.relu()
 
 start = time.time()

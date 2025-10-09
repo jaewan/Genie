@@ -3,6 +3,14 @@ torch>=2.8.0
 torchvision>=0.19.0
 torchaudio>=2.4.0
 
+# Server dependencies
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+
+# Client dependencies
+requests>=2.31.0
+
 # Development dependencies
 numpy>=1.24.0,<2.0.0
 networkx>=3.0
