@@ -271,7 +271,7 @@ class LazyTensor:
 		
 		return None
 
-	def _infer_device(self) -> torch.device:
+	def _infer_device(self) -> Union[torch.device, str]:
 		"""Infer device from inputs or kwargs."""
 		# Check kwargs first
 		if "device" in self.kwargs and self.kwargs["device"] is not None:
@@ -280,11 +280,17 @@ class LazyTensor:
 				return device
 			elif isinstance(device, str):
 				# Handle custom device types like "remote_accelerator:0"
-				try:
-					return torch.device(device)
-				except RuntimeError:
-					# Custom device type not recognized by PyTorch - create manually
-					return torch.device(device)
+				if device.startswith("remote_accelerator"):
+					# Custom device type - create as string for now, will be handled by executor
+					# This avoids PyTorch device creation issues
+					return device  # Return as string, not torch.device
+				else:
+					try:
+						return torch.device(device)
+					except RuntimeError:
+						# Fallback for unrecognized device types
+						logger.warning(f"Unrecognized device type: {device}")
+						return torch.device("cpu")  # Safe default
 			elif isinstance(device, int):
 				return torch.device(f"cuda:{device}")
 			else:
@@ -296,9 +302,19 @@ class LazyTensor:
 			if hasattr(inp, "device"):
 				if isinstance(inp.device, torch.device):
 					return inp.device
-				return torch.device(str(inp.device))
+				elif isinstance(inp.device, str):
+					if inp.device.startswith("remote_accelerator"):
+						return inp.device  # Return as string for remote_accelerator
+					else:
+						try:
+							return torch.device(inp.device)
+						except RuntimeError:
+							logger.warning(f"Unrecognized device type in input: {inp.device}")
+							return torch.device("cpu")
+				else:
+					return torch.device(str(inp.device))
 
-		return torch.device("remote_accelerator:0")
+		return "remote_accelerator:0"  # Default remote device as string
 
 	def materialize(self) -> torch.Tensor:
 		"""Force materialization of this tensor."""

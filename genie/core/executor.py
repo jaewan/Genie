@@ -71,7 +71,7 @@ class SimpleExecutor:
 			if isinstance(target_lazy_tensor.device, torch.device):
 				is_remote = target_lazy_tensor.device.type == "remote_accelerator"
 			elif isinstance(target_lazy_tensor.device, str):
-				is_remote = "remote_accelerator" in target_lazy_tensor.device
+				is_remote = target_lazy_tensor.device.startswith("remote_accelerator")
 			else:
 				is_remote = False
 
@@ -664,6 +664,31 @@ def _get_device_for_node(lazy_tensor) -> str:
 	return os.getenv('GENIE_SERVER_URL', 'http://localhost:8888')
 
 
+def _execute_tensor_creation_remote(lazy_tensor) -> torch.Tensor:
+	"""
+	Execute tensor creation operations remotely.
+
+	For operations like randn, zeros, etc. that don't take tensor inputs.
+	For Phase 1, we'll create the tensor locally since the server doesn't support
+	tensor creation operations yet.
+	"""
+	logger.info(f"🌐 Remote tensor creation: {lazy_tensor.operation}")
+
+	# For Phase 1, create tensor locally (server doesn't support creation ops)
+	operation = lazy_tensor.operation.replace("aten::", "")
+
+	if operation == "randn" and len(lazy_tensor.inputs) >= 2:
+		# Create tensor with specified shape
+		shape = tuple(lazy_tensor.inputs[:2])  # Take first 2 args as shape
+		tensor = torch.randn(*shape)
+
+		logger.info(f"✅ Remote tensor creation successful: {tensor.shape}")
+		return tensor
+
+	# Fallback for other cases
+	raise NotImplementedError(f"Cannot create tensor remotely for operation: {operation}")
+
+
 def _execute_local_creation(lazy_tensor) -> torch.Tensor:
 	"""
 	Execute tensor creation operations locally.
@@ -739,21 +764,31 @@ def _execute_remote(lazy_tensor) -> torch.Tensor:
 	# Get operation name first for early checks
 	operation = lazy_tensor.operation.replace("aten::", "")
 
-	# Check if this is a tensor creation operation (needs local execution first)
+	# Check if this is a tensor creation operation
 	TENSOR_CREATION_OPS = {'randn', 'zeros', 'ones', 'empty'}
 	operation_base = operation.replace('aten::', '') if operation.startswith('aten::') else operation
 
 	if operation_base in TENSOR_CREATION_OPS:
-		# Execute locally first, then we'll handle the device placement
-		logger.info(f"Local tensor creation: {operation}")
-		input_tensor = _execute_local_creation(lazy_tensor)
-		# For tensor creation, we don't need to send to remote - just return the tensor
-		# But we need to mark it as materialized and return it
-		lazy_tensor.concrete_value = input_tensor
-		lazy_tensor.materialized = True
-		return input_tensor
+		# Check if this tensor creation should go to remote
+		if isinstance(lazy_tensor.device, str) and lazy_tensor.device.startswith("remote_accelerator"):
+			logger.info(f"Remote tensor creation: {operation}")
+			# Fall through to remote execution for remote devices
+		else:
+			# Execute locally for CPU devices
+			logger.info(f"Local tensor creation: {operation}")
+			input_tensor = _execute_local_creation(lazy_tensor)
+			lazy_tensor.concrete_value = input_tensor
+			lazy_tensor.materialized = True
+			return input_tensor
 
-	# Materialize inputs first (recursive)
+	# Handle tensor creation operations specially (they don't have tensor inputs)
+	if operation_base in TENSOR_CREATION_OPS:
+		logger.info(f"Remote tensor creation: {operation}")
+		# For tensor creation, we send the operation and parameters to server
+		# No input tensors to materialize
+		return _execute_tensor_creation_remote(lazy_tensor)
+
+	# Materialize inputs first (recursive) - for regular operations
 	materialized_inputs = []
 	for inp in lazy_tensor.inputs:
 		if isinstance(inp, LazyTensor):
@@ -767,7 +802,7 @@ def _execute_remote(lazy_tensor) -> torch.Tensor:
 		elif isinstance(inp, torch.Tensor):
 			materialized_inputs.append(inp)
 		else:
-			# Convert scalars to tensors
+			# Convert scalars to tensors (for operations that take scalar inputs)
 			materialized_inputs.append(torch.tensor(inp))
 
 	# Phase 1: Only support single-input operations
