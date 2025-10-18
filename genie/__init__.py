@@ -1,115 +1,134 @@
-from .version_validator import validate_environment  # noqa: F401
+"""
+Genie: Semantic Disaggregated Execution Framework
 
-# Initialize core subsystems on package import
-# - Validate environment (non-strict)
-# - Register backend + default device
-# - Register torch.library implementations
+Clean initialization:
+1. Register device backend (optional, non-blocking)
+2. Wrap factory functions
+3. Set up LazyTensor graph builder
+"""
 
-# Perform a soft environment validation
-try:
-	validate_environment(strict=False)
-except Exception:
-	# Do not block import on validation issues
-	pass
+import logging
+logger = logging.getLogger(__name__)
 
-# Import side-effect modules to ensure registration
-from .core import device as _genie_device  # noqa: F401,E402
-from .core import library as _genie_library  # noqa: F401,E402
-from .core import enhanced_dispatcher as _genie_enhanced  # noqa: F401,E402
-from .core.lazy_tensor import install_factory_interceptors  # noqa: E402
+# Version
+__version__ = "0.2.0"
 
-# Ensure a default device exists (triggers backend registration)
-try:
-	_genie_device.get_device(0)
-except Exception:
-	# Keep import resilient even if backend not fully available
-	pass
+# Core interception setup
+def _initialize():
+    """Initialize Genie interception layer."""
+    try:
+        # Step 1: Try to register C++ backend (optional)
+        try:
+            from . import _C
+            _C.register_remote_accelerator_device()
+            logger.info("C++ backend registered")
+        except ImportError:
+            logger.info("C++ backend not available (Python-only mode)")
 
-# Install factory function interceptors (randn/zeros/ones/empty/full)
-try:
-	install_factory_interceptors()
-except Exception:
-	pass
+        # Step 2: Wrap factory functions (REQUIRED)
+        from .core.factory_interceptor import wrap_factories
+        wrap_factories()
 
+        # Step 3: Initialize graph builder
+        from .core.graph_builder import initialize_global_builder
+        initialize_global_builder()
 
-# Public convenience API
-def set_lazy_mode(enabled: bool) -> None:
-	"""Enable or disable lazy execution globally.
+        logger.info("Genie initialized successfully")
 
-	This toggles both the torch.library-based path and the enhanced dispatcher
-	for consistent behavior across code paths.
-	"""
-	try:
-		_genie_library.set_lazy_mode(enabled)
-	except Exception:
-		pass
-	try:
-		from .core.enhanced_dispatcher import set_enhanced_lazy_mode  # noqa: WPS433
-		set_enhanced_lazy_mode(enabled)
-	except Exception:
-		pass
+    except Exception as e:
+        logger.error(f"Genie initialization failed: {e}")
+        raise
 
+# Initialize on import
+_initialize()
 
-def is_remote_accelerator_available() -> bool:
-	"""Return whether the remote_accelerator backend is available."""
-	try:
-		return _genie_device.is_available()
-	except Exception:
-		return False
+# Public API - Phase 1 (Core)
+from .core.lazy_tensor import LazyTensor
+from .core.capture import capture, get_graph, is_capturing
 
+# Public API - Phase 2 (Semantic Analysis & Scheduling)
+from .semantic import (
+    SemanticAnalyzer,
+    Scheduler,
+    WorkloadProfile,
+    WorkloadType,
+    PatternRegistry,
+    ExecutionSchedule,
+    SchedulingStrategy,
+)
 
-# Cluster management API (recommended initialization method)
-try:
-	from .cluster import init, shutdown, is_initialized
-except ImportError:
-	# Cluster module not available - provide stub functions
-	async def init(*args, **kwargs):
-		"""Stub: Cluster initialization not available"""
-		raise ImportError("Cluster module not available")
-	
-	async def shutdown(*args, **kwargs):
-		"""Stub: Cluster shutdown not available"""
-		pass
-	
-	def is_initialized() -> bool:
-		"""Stub: Cluster module not available"""
-		return False
+# Convenience functions for common workflows
+def analyze(graph=None):
+    """
+    Analyze a computation graph for semantic information.
 
+    Args:
+        graph: Graph to analyze. If None, uses the most recently captured graph.
 
+    Returns:
+        WorkloadProfile with semantic analysis results
+    """
+    if graph is None:
+        graph = get_graph()
+        if graph is None:
+            raise RuntimeError("No graph available. Call get_graph() after capture or pass graph explicitly.")
 
+    analyzer = SemanticAnalyzer()
+    # For LazyDAG graphs, we'll need to handle this differently
+    # For now, return a basic profile
+    return WorkloadProfile(
+        workload_type=WorkloadType.UNKNOWN,
+        patterns=[],
+        metadata={'graph_type': graph.backend_type}
+    )
 
-def get_capture_stats() -> dict:
-	"""Return combined capture statistics from the unified dispatcher and library.
+def schedule(graph=None, profile=None):
+    """
+    Create an execution schedule for a computation graph.
 
-	Includes counts of registered operations, fallback-captured operations, and
-	other helpful signals for understanding coverage and behavior.
-	"""
-	stats = {}
-	try:
-		from .core.enhanced_dispatcher import get_enhanced_stats  # noqa: WPS433
-		disp = get_enhanced_stats()
-		stats["dispatcher"] = disp
-	except Exception:
-		stats["dispatcher"] = {}
-	try:
-		from .core.library import get_library_stats  # noqa: WPS433
-		lib = get_library_stats()
-		stats["library"] = lib
-	except Exception:
-		stats["library"] = {}
-	# Convenience rollups
-	try:
-		d_registered = int(stats["dispatcher"].get("successful_registrations", 0))
-		d_failed = int(stats["dispatcher"].get("failed_registrations", 0))
-		d_fallback_ops = int(stats["dispatcher"].get("fallback_ops", 0))
-		d_fallback_caps = int(stats["dispatcher"].get("fallback_capture_count", 0))
-		stats["summary"] = {
-			"dispatcher_registered_ops": d_registered,
-			"dispatcher_failed_ops": d_failed,
-			"dispatcher_fallback_ops": d_fallback_ops,
-			"dispatcher_fallback_capture_count": d_fallback_caps,
-		}
-	except Exception:
-		stats["summary"] = {}
-	return stats
+    Args:
+        graph: Graph to schedule. If None, uses the most recently captured graph.
+        profile: WorkloadProfile from semantic analysis. If None, runs analysis first.
 
+    Returns:
+        ExecutionSchedule with scheduling decisions
+    """
+    if graph is None:
+        graph = get_graph()
+        if graph is None:
+            raise RuntimeError("No graph available. Call get_graph() after capture or pass graph explicitly.")
+
+    if profile is None:
+        profile = analyze(graph)
+
+    scheduler = Scheduler()
+    # For LazyDAG graphs, create a simple schedule
+    return ExecutionSchedule(
+        stages=[],
+        node_to_stage={},
+        node_to_group={},
+        total_stages=1,
+        strategy=SchedulingStrategy.SEQUENTIAL,
+        metadata={'graph_type': graph.backend_type}
+    )
+
+__all__ = [
+    # Phase 1 (Core)
+    'LazyTensor',
+    'capture',
+    'get_graph',
+    'is_capturing',
+
+    # Phase 2 (Semantic Analysis & Scheduling)
+    'SemanticAnalyzer',
+    'Scheduler',
+    'WorkloadProfile',
+    'WorkloadType',
+    'PatternRegistry',
+    'ExecutionSchedule',
+    'SchedulingStrategy',
+
+    # Convenience Functions
+    'analyze',
+    'schedule',
+]

@@ -1,703 +1,1021 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Union
-from uuid import uuid4
-from itertools import count
 import os
-
+import threading
+from itertools import count
+from typing import Any, Dict, List, Optional, Tuple
 import torch
 
 logger = logging.getLogger(__name__)
 
-
-from .meta_utils import infer_via_meta
-from .exceptions import Result, ShapeInferenceError
-
-# Note: SemanticMetadata now comes from metadata_registry (Refactoring #2)
-# ExecutionPhase, MemoryPattern, DataLineage no longer used in LazyTensor
-
-
-class LazyTensor:
-	"""Deferred execution tensor with rich semantic metadata.
-	
-	LazyTensor captures PyTorch operations and builds a computation graph
-	instead of executing immediately, enabling semantic analysis and 
-	optimization before remote execution.
-	"""
-
-	# Micro-optimization: reduce per-instance dict by using slots
-	__slots__ = (
-		"id", "operation", "inputs", "kwargs",
-		"shape", "dtype", "device",
-		"materialized", "concrete_value", "_metadata",
-	)
-
-	# Faster lightweight ids
-	_id_counter = count(1)
-	
-	@classmethod
-	def reset_id_counter(cls):
-		"""Reset ID counter for testing."""
-		cls._id_counter = count(1)
-
-	def __init__(self, operation: str, inputs: List[Any], kwargs: Optional[Dict[str, Any]] = None) -> None:
-		self.id = f"lt_{next(self._id_counter)}"
-		self.operation = self._normalize_aten_name(operation)
-		self.inputs = inputs
-		self.kwargs = kwargs or {}
-
-		# Fast path for common element-wise ops to minimize per-op overhead
-		self.shape = None
-		self.dtype = None
-		self.device = "remote_accelerator:0"
-		_is_elementwise_fastpath = False
-		_enable_fastpath = os.getenv("GENIE_ENABLE_ELEMENTWISE_FASTPATH", "0") == "1"
-		if _enable_fastpath and self.operation in ("aten::add", "aten::sub", "aten::mul", "aten::div") and inputs:
-			first = inputs[0]
-			# Avoid function calls; copy from first input when available
-			self.shape = getattr(first, "shape", None)
-			self.dtype = getattr(first, "dtype", None)
-			self.device = getattr(first, "device", self.device)
-			_is_elementwise_fastpath = True
-		else:
-			# Infer tensor properties (still lightweight for non-elementwise ops)
-			shape_result = self._infer_shape()
-			if shape_result.is_ok:
-				self.shape = shape_result.unwrap()
-			else:
-				# Log error but don't fail construction
-				logger.debug(f"Shape inference failed for {self.operation}: {shape_result.error}")
-				self.shape = None
-			
-			self.dtype = self._infer_dtype()
-			self.device = self._infer_device()
-			
-			# Optional meta inference if unknown
-			if (self.shape is None or self.dtype is None) and os.getenv("GENIE_ENABLE_META_INFER", "1") == "1":
-				meta_shape, meta_dtype = infer_via_meta(operation, inputs, self.kwargs)
-				if self.shape is None:
-					self.shape = meta_shape
-				if self.dtype is None:
-					self.dtype = meta_dtype
-		
-		# No longer store metadata inline - use MetadataRegistry (Refactoring #2)
-		# Metadata is managed separately for clean separation of concerns
-		self._metadata = None
-
-		# Execution state
-		self.materialized = False
-		self.concrete_value: Optional[torch.Tensor] = None
-		
-		# Register with metadata registry for semantic analysis (Refactoring #2)
-		if not _is_elementwise_fastpath:
-			self._register_for_metadata()
-		
-		# Optional debug logging for intercepted ops
-		if os.getenv("GENIE_LOG_INTERCEPTS", "0") == "1":
-			try:
-				in_shapes = []
-				for arg in inputs:
-					shape = getattr(arg, "shape", None)
-					in_shapes.append(tuple(shape) if shape is not None else None)
-				logger.info(f"[Genie] Intercepted {self.operation} -> id={self.id}, in_shapes={in_shapes}, out_shape={self.shape}")
-			except Exception:
-				logger.info(f"[Genie] Intercepted {self.operation} -> id={self.id}")
-
-		# Notify enhanced dispatcher only for non-fastpath ops
-		if not _is_elementwise_fastpath:
-			try:
-				from .enhanced_dispatcher import enhanced_dispatcher
-				if not enhanced_dispatcher.is_operation_registered(self.operation):
-					enhanced_dispatcher.record_fallback_capture(self.operation)
-			except Exception:
-				pass
-
-		# Register with graph builders.
-		# For elementwise fastpath, skip registration entirely to minimize overhead.
-		if not _is_elementwise_fastpath:
-			# Temporarily disable FX graph builder to avoid recursion errors
-			# try:
-			#     from .fx_graph_builder import FXGraphBuilder
-			#     FXGraphBuilder.current().add_lazy_tensor(self)
-			# except ImportError:
-			#     pass
-			# Always keep ComputationGraph in sync for pattern analyzers
-			try:
-				from .graph import GraphBuilder
-				GraphBuilder.current().add_tensor(self)
-			except Exception:
-				pass
-
-	def _infer_shape(self) -> Result[torch.Size]:
-		"""
-		Infer output shape from operation and inputs.
-		
-		Returns:
-			Result[torch.Size]: Shape if successful, error otherwise
-		"""
-		try:
-			shape = None
-			
-			if self.operation in ["aten::add", "aten::sub", "aten::mul", "aten::div"]:
-				shape = self._infer_elementwise_shape()
-			elif self.operation == "aten::matmul":
-				shape = self._infer_matmul_shape()
-			elif self.operation == "aten::mm":
-				shape = self._infer_mm_shape()
-			elif self.operation == "aten::conv2d":
-				shape = self._infer_conv2d_shape()
-			elif self.operation in ["aten::randn", "aten::zeros", "aten::ones"]:
-				shape = self._infer_creation_shape()
-			elif self.operation in ["aten::relu", "aten::sigmoid", "aten::tanh"]:
-				# Activation functions preserve shape
-				first = self.inputs[0] if self.inputs else None
-				shape = getattr(first, "shape", None)
-			
-			if shape is None:
-				return Result.err(ShapeInferenceError(
-					f"Could not infer shape for {self.operation}",
-					context={'operation': self.operation, 'inputs': len(self.inputs)}
-				))
-			
-			return Result.ok(shape)
-			
-		except Exception as e:
-			return Result.err(ShapeInferenceError(
-				f"Shape inference raised exception: {e}",
-				context={'operation': self.operation, 'error': str(e)}
-			))
-
-	def _infer_elementwise_shape(self) -> Optional[torch.Size]:
-		"""Infer shape for element-wise operations with broadcasting."""
-		if len(self.inputs) < 2:
-			return None
-		
-		x_shape = getattr(self.inputs[0], "shape", None)
-		y_shape = getattr(self.inputs[1], "shape", None)
-		
-		if x_shape is None or y_shape is None:
-			return x_shape or y_shape
-		
-		# Simple broadcasting logic
-		if x_shape == y_shape:
-			return x_shape
-		
-		# Return the larger shape (simplified)
-		if len(x_shape) >= len(y_shape):
-			return x_shape
-		return y_shape
-
-	def _infer_matmul_shape(self) -> Optional[torch.Size]:
-		"""Infer shape for matrix multiplication."""
-		if len(self.inputs) < 2:
-			return None
-			
-		x_shape = getattr(self.inputs[0], "shape", None)
-		y_shape = getattr(self.inputs[1], "shape", None)
-		
-		if not (x_shape and y_shape):
-			return None
-		
-		if len(x_shape) >= 2 and len(y_shape) >= 2:
-			# Basic matmul: (..., a, b) @ (..., b, c) -> (..., a, c)
-			return torch.Size([*x_shape[:-1], y_shape[-1]])
-		
-		return None
-
-	def _infer_mm_shape(self) -> Optional[torch.Size]:
-		"""Infer shape for 2D matrix multiplication."""
-		if len(self.inputs) < 2:
-			return None
-			
-		x_shape = getattr(self.inputs[0], "shape", None)
-		y_shape = getattr(self.inputs[1], "shape", None)
-		
-		if x_shape and y_shape and len(x_shape) == 2 and len(y_shape) == 2:
-			return torch.Size([x_shape[0], y_shape[1]])
-		
-		return None
-
-	def _infer_conv2d_shape(self) -> Optional[torch.Size]:
-		"""Infer shape for 2D convolution (simplified)."""
-		if len(self.inputs) < 2:
-			return None
-		
-		input_shape = getattr(self.inputs[0], "shape", None)
-		weight_shape = getattr(self.inputs[1], "shape", None)
-		
-		if input_shape and weight_shape and len(input_shape) == 4 and len(weight_shape) == 4:
-			# Simplified: assume same spatial dimensions (would need stride/padding for exact)
-			N, C_in, H, W = input_shape
-			C_out, C_in_w, K_h, K_w = weight_shape
-			return torch.Size([N, C_out, H, W])  # Simplified
-		
-		return None
-
-	def _infer_creation_shape(self) -> Optional[torch.Size]:
-		"""Infer shape for tensor creation operations."""
-		# For creation ops, shape is typically in the first arguments
-		if self.inputs:
-			# Handle both tuple and individual args
-			if isinstance(self.inputs[0], (tuple, list)):
-				return torch.Size(self.inputs[0])
-			else:
-				# Individual size arguments
-				size_args = []
-				for arg in self.inputs:
-					if isinstance(arg, int):
-						size_args.append(arg)
-					else:
-						break
-				if size_args:
-					return torch.Size(size_args)
-		return None
-
-	def _infer_dtype(self) -> Optional[torch.dtype]:
-		"""Infer output dtype from inputs."""
-		# Check kwargs first (explicit dtype)
-		if "dtype" in self.kwargs and self.kwargs["dtype"] is not None:
-			return self.kwargs["dtype"]
-		
-		# Infer from inputs
-		for inp in self.inputs:
-			if hasattr(inp, "dtype"):
-				return inp.dtype  # type: ignore[return-value]
-		
-		# Default for creation operations
-		if self.operation in ["aten::randn", "aten::zeros", "aten::ones"]:
-			return torch.float32
-		
-		return None
-
-	def _infer_device(self) -> torch.device:
-		"""Infer device from inputs or kwargs."""
-		# Check kwargs first
-		if "device" in self.kwargs and self.kwargs["device"] is not None:
-			device = self.kwargs["device"]
-			if isinstance(device, torch.device):
-				return device
-			elif isinstance(device, str):
-				# Handle custom device types like "remote_accelerator:0"
-				try:
-					return torch.device(device)
-				except RuntimeError:
-					# Custom device type not recognized by PyTorch - create manually
-					return torch.device(device)
-			elif isinstance(device, int):
-				return torch.device(f"cuda:{device}")
-			else:
-				logger.warning(f"Unknown device type: {type(device)}")
-				return torch.device("cpu")  # Safe default
-
-		# Infer from inputs
-		for inp in self.inputs:
-			if hasattr(inp, "device"):
-				if isinstance(inp.device, torch.device):
-					return inp.device
-				return torch.device(str(inp.device))
-
-		return torch.device("remote_accelerator:0")
-
-	def materialize(self) -> torch.Tensor:
-		"""Force materialization of this tensor."""
-		if not self.materialized:
-			from .executor import execute_subgraph
-
-			self.concrete_value = execute_subgraph(self)
-			self.materialized = True
-		return self.concrete_value  # type: ignore[return-value]
-
-	def add_metadata(self, key: str, value: Any, source: str = "user") -> None:
-		"""Add custom metadata to this tensor."""
-		md = self.metadata
-		if not hasattr(md, 'custom'):
-			md.custom = {}
-		md.custom[key] = {"value": value, "source": source}
-
-	def get_memory_footprint(self) -> int:
-		"""Estimate memory footprint in bytes."""
-		if self.shape and self.dtype:
-			element_size = torch.tensor([], dtype=self.dtype).element_size()
-			try:
-				from math import prod
-				return int(prod(self.shape)) * element_size
-			except Exception:
-				return int(torch.prod(torch.tensor(self.shape)).item()) * element_size
-		return 0
-
-	def is_materialized(self) -> bool:
-		"""Check if tensor has been materialized."""
-		return self.materialized
-
-	# Tensor-like interface methods
-	def cpu(self) -> torch.Tensor:
-		"""Move tensor to CPU (triggers materialization)."""
-		return self.materialize().cpu()
-
-	def cuda(self, device: Optional[Union[int, str]] = None) -> torch.Tensor:
-		"""Move tensor to CUDA (triggers materialization)."""
-		return self.materialize().cuda(device)
-
-	def to(self, *args, **kwargs) -> torch.Tensor:
-		"""Convert tensor type/device (triggers materialization)."""
-		# Special handling for remote_accelerator device to prevent allocation errors
-		if args and isinstance(args[0], (str, torch.device)):
-			device = args[0]
-			if (isinstance(device, str) and device.startswith("remote_accelerator")) or \
-			   (isinstance(device, torch.device) and device.type == "remote_accelerator"):
-				# For remote_accelerator, just return self (no actual device change)
-				# The actual device change will happen during materialization
-				return self
-
-		# For other devices, proceed normally
-		# Materialize first to get a concrete tensor, then apply .to()
-		concrete_tensor = self.materialize()
-		if not isinstance(concrete_tensor, torch.Tensor):
-			# Ensure we have a proper tensor
-			concrete_tensor = torch.tensor(concrete_tensor)
-		return concrete_tensor.to(*args, **kwargs)
-
-	def item(self):  # noqa: ANN201
-		"""Get scalar value (triggers materialization)."""
-		return self.materialize().item()
-
-	def numpy(self):  # noqa: ANN201
-		"""Convert to numpy (triggers materialization)."""
-		return self.materialize().numpy()
-
-	# Printing should not force a full tensor dump; keep representation light
-	def __format__(self, format_spec: str) -> str:  # noqa: D401
-		return self.__repr__()
-
-	def size(self, dim: Optional[int] = None):  # noqa: ANN201
-		"""Get tensor size."""
-		if self.shape is not None:
-			if dim is not None:
-				return self.shape[dim]
-			return self.shape
-		# Fallback to materialization
-		return self.materialize().size(dim)
-
-	def dim(self) -> int:
-		"""Get number of dimensions."""
-		if self.shape is not None:
-			return len(self.shape)
-		return self.materialize().dim()
-
-	def numel(self) -> int:
-		"""Get total number of elements."""
-		if self.shape is not None:
-			try:
-				from math import prod
-				return int(prod(self.shape))
-			except Exception:
-				return int(torch.prod(torch.tensor(self.shape)).item())
-		return self.materialize().numel()
-
-	# Arithmetic operators
-	def __add__(self, other):  # noqa: ANN001, ANN201
-		return LazyTensor("aten::add", [self, other])
-
-	def __sub__(self, other):  # noqa: ANN001, ANN201
-		return LazyTensor("aten::sub", [self, other])
-
-	def __mul__(self, other):  # noqa: ANN001, ANN201
-		return LazyTensor("aten::mul", [self, other])
-
-	def __truediv__(self, other):  # noqa: ANN001, ANN201
-		return LazyTensor("aten::div", [self, other])
-
-	def __matmul__(self, other):  # noqa: ANN001, ANN201
-		return LazyTensor("aten::matmul", [self, other])
-
-	# Activation functions
-	def relu(self):  # noqa: ANN201
-		return LazyTensor("aten::relu", [self])
-
-	def sigmoid(self):  # noqa: ANN201
-		return LazyTensor("aten::sigmoid", [self])
-
-	def tanh(self):  # noqa: ANN201
-		return LazyTensor("aten::tanh", [self])
-
-	# Common tensor methods that should create new LazyTensors
-	def unsqueeze(self, dim: int):  # noqa: ANN201
-		return LazyTensor("aten::unsqueeze", [self, dim])
-	
-	def squeeze(self, dim: Optional[int] = None):  # noqa: ANN201
-		if dim is None:
-			return LazyTensor("aten::squeeze", [self])
-		return LazyTensor("aten::squeeze", [self, dim])
-	
-	def reshape(self, *shape):  # noqa: ANN201
-		return LazyTensor("aten::reshape", [self, shape])
-	
-	def view(self, *shape):  # noqa: ANN201
-		return LazyTensor("aten::view", [self, shape])
-	
-	def transpose(self, dim0: int, dim1: int):  # noqa: ANN201
-		return LazyTensor("aten::transpose", [self, dim0, dim1])
-	
-	def permute(self, *dims):  # noqa: ANN201
-		return LazyTensor("aten::permute", [self, dims])
-	
-	def sum(self, dim=None, keepdim=False, dtype=None):  # noqa: ANN201
-		return LazyTensor("aten::sum", [self], {"dim": dim, "keepdim": keepdim, "dtype": dtype})
-	
-	def mean(self, dim=None, keepdim=False, dtype=None):  # noqa: ANN201
-		return LazyTensor("aten::mean", [self], {"dim": dim, "keepdim": keepdim, "dtype": dtype})
-	
-	def max(self, dim=None, keepdim=False):  # noqa: ANN201
-		return LazyTensor("aten::max", [self], {"dim": dim, "keepdim": keepdim})
-	
-	def prod(self, dim=None, keepdim=False, dtype=None):  # noqa: ANN201
-		return LazyTensor("aten::prod", [self], {"dim": dim, "keepdim": keepdim, "dtype": dtype})
-
-	def var(self, dim=None, keepdim=False, unbiased=True):  # noqa: ANN201
-		return LazyTensor("aten::var", [self], {"dim": dim, "keepdim": keepdim, "unbiased": unbiased})
-
-	def std(self, dim=None, keepdim=False, unbiased=True):  # noqa: ANN201
-		return LazyTensor("aten::std", [self], {"dim": dim, "keepdim": keepdim, "unbiased": unbiased})
-
-	def all(self, dim=None, keepdim=False):  # noqa: ANN201
-		return LazyTensor("aten::all", [self], {"dim": dim, "keepdim": keepdim})
-
-	def any(self, dim=None, keepdim=False):  # noqa: ANN201
-		return LazyTensor("aten::any", [self], {"dim": dim, "keepdim": keepdim})
-
-	def argmax(self, dim=None, keepdim=False):  # noqa: ANN201
-		return LazyTensor("aten::argmax", [self], {"dim": dim, "keepdim": keepdim})
-
-	def argmin(self, dim=None, keepdim=False):  # noqa: ANN201
-		return LazyTensor("aten::argmin", [self], {"dim": dim, "keepdim": keepdim})
-
-	def softmax(self, dim, dtype=None):  # noqa: ANN201
-		return LazyTensor("aten::softmax", [self], {"dim": dim, "dtype": dtype})
-	
-	def abs(self):  # noqa: ANN201
-		return LazyTensor("aten::abs", [self])
-	
-	def exp(self):  # noqa: ANN201
-		return LazyTensor("aten::exp", [self])
-	
-	def log(self):  # noqa: ANN201
-		return LazyTensor("aten::log", [self])
-	
-	def sin(self):  # noqa: ANN201
-		return LazyTensor("aten::sin", [self])
-	
-	def cos(self):  # noqa: ANN201
-		return LazyTensor("aten::cos", [self])
-	
-	def sqrt(self):  # noqa: ANN201
-		return LazyTensor("aten::sqrt", [self])
-	
-	def pow(self, exponent):  # noqa: ANN201
-		return LazyTensor("aten::pow", [self, exponent])
-	
-	def clamp(self, min=None, max=None):  # noqa: ANN201
-		return LazyTensor("aten::clamp", [self], {"min": min, "max": max})
-
-	# String representation
-	def __repr__(self) -> str:
-		status = "materialized" if self.materialized else "lazy"
-		return f"LazyTensor(op={self.operation}, shape={self.shape}, dtype={self.dtype}, {status})"
-
-	def __str__(self) -> str:
-		# Optional: print-based materialization (explicit trigger)
-		if os.getenv("GENIE_PRINT_MATERIALIZE", "0") == "1":
-			try:
-				val = self.materialize()
-				return f"LazyTensor(value={val}, shape={tuple(val.shape)}, dtype={val.dtype})"
-			except Exception:
-				pass
-		return self.__repr__()
-
-	# Control-flow triggers (implicit)
-	def __bool__(self) -> bool:  # noqa: D401
-		"""Truthiness triggers materialization to support control flow."""
-		try:
-			val = self.materialize()
-			return bool(val.numel())
-		except Exception:
-			return True
-
-	def __len__(self) -> int:
-		if self.shape is not None and len(self.shape) > 0:
-			return self.shape[0]
-		return int(self.materialize().size(0))
-
-	def _register_for_metadata(self):
-		"""Register this tensor with metadata registry for semantic analysis (Refactoring #2)."""
-		try:
-			from genie.semantic.metadata_registry import get_metadata_registry
-			from genie.semantic.enricher import get_semantic_enricher
-			
-			registry = get_metadata_registry()
-			registry.register(self.id, self)
-			
-			# Trigger semantic enrichment (async/lazy)
-			enricher = get_semantic_enricher()
-			metadata_result = enricher.enrich(
-				operation=self.operation,
-				inputs=self.inputs,
-				kwargs=self.kwargs,
-				shape=self.shape,
-				dtype=self.dtype
-			)
-			
-			if metadata_result.is_ok:
-				registry.set_metadata(self.id, metadata_result.unwrap())
-			else:
-				logger.debug(f"Metadata enrichment failed for {self.id}: {metadata_result.error}")
-		
-		except Exception as e:
-			logger.debug(f"Could not register metadata for {self.id}: {e}")
-	
-	@property
-	def metadata(self) -> Optional[SemanticMetadata]:  # type: ignore[override]
-		"""
-		Get semantic metadata for this tensor (Refactoring #2).
-		
-		Metadata is stored separately in MetadataRegistry and retrieved on demand.
-		This coordinates with Refactoring #3: FX Graph stores tensor_id in meta dict.
-		"""
-		try:
-			from genie.semantic.metadata_registry import get_metadata_registry
-			registry = get_metadata_registry()
-			return registry.get_metadata(self.id)
-		except Exception:
-			return None
-	
-	def __del__(self):
-		"""Cleanup metadata when tensor is garbage collected (Refactoring #2)."""
-		try:
-			from genie.semantic.metadata_registry import get_metadata_registry
-			registry = get_metadata_registry()
-			registry.remove(self.id)
-		except Exception:
-			pass  # Ignore errors during cleanup
-	
-	def prepare_for_transfer(self) -> Dict:
-		"""Prepare tensor metadata for DPDK backend transfer."""
-		return {
-			"tensor_id": self.id,
-			"shape": list(self.shape) if self.shape else [],
-			"dtype": str(self.dtype) if self.dtype else None,
-			"device": self.device,
-			"semantic_metadata": self.metadata.to_dict() if self.metadata else {}
-		}
-
-	# PyTorch Function Protocol for comprehensive operation interception
-	@classmethod
-	def __torch_function__(cls, func, types, args=(), kwargs=None):
-		"""Intercept all torch function calls involving LazyTensor.
-		
-		This implements PyTorch's __torch_function__ protocol to automatically
-		capture >95% of operations without manual registration, as per the spec.
-		"""
-		kwargs = kwargs or {}
-		
-		# Extract function name for operation tracking
-		func_name = getattr(func, '__name__', str(func))
-		if hasattr(func, '_schema'):
-			# Use schema name if available (more precise)
-			op_name = str(func._schema).split('(')[0]
-		else:
-			# Fallback to function name
-			op_name = f"aten::{func_name}" if not func_name.startswith("aten::") else func_name
-		# Normalize to canonical aten::op
-		op_name = cls._normalize_aten_name(op_name)
-		
-		# Check if any arguments are LazyTensors
-		has_lazy = any(isinstance(arg, cls) for arg in args) or any(isinstance(v, cls) for v in kwargs.values())
-		
-		if has_lazy:
-			# Create new LazyTensor for this operation
-			return cls(operation=op_name, inputs=list(args), kwargs=kwargs)
-		else:
-			# No LazyTensors involved, execute normally
-			return func(*args, **kwargs)
-
-	@staticmethod
-	def _normalize_aten_name(full_op: str) -> str:
-		"""Normalize aten op names by stripping overload suffixes.
-
-		Example: "aten::add.Tensor" -> "aten::add"
-		         "aten::softmax.int" -> "aten::softmax"
-		         "matmul" -> "aten::matmul"
-		"""
-		try:
-			if not full_op:
-				return full_op
-			if not full_op.startswith("aten::"):
-				full_op = f"aten::{full_op}"
-			_, name = full_op.split("::", 1)
-			base = name.split(".", 1)[0]
-			return f"aten::{base}"
-		except Exception:
-			return full_op
-
-	@staticmethod
-	def lift(tensor: torch.Tensor) -> "LazyTensor":
-		"""Create a LazyTensor that aliases a concrete CPU tensor without allocating on remote.
-
-		This wraps the tensor using a no-op alias op, enabling graphs that start from
-		concrete tensors (for correctness comparisons) while still flowing through the
-		lazy pipeline.
-		"""
-		return LazyTensor("aten::alias", [tensor], {})
-
-
-# Factory function interception for torch.randn, torch.zeros, etc.
-def _is_remote_device(dev: Any) -> bool:
-	"""Check if device is remote_accelerator."""
-	if dev is None:
-		return False
-	if isinstance(dev, str):
-		return dev.startswith("remote_accelerator") or dev.startswith("privateuseone")
-	if isinstance(dev, torch.device):
-		return dev.type in ("privateuseone", "remote_accelerator")
-	return False
-
-
-def _install_factory_interceptor(fn_name: str) -> None:
-	"""Install interceptor for factory functions like torch.randn."""
-	original: Callable[..., Any] = getattr(torch, fn_name)
-
-	def wrapper(*args: Any, **kwargs: Any):
-		device = kwargs.get("device", None)
-		# Interception: remote device or LazyTensor inputs
-		has_lazy_input = any(isinstance(a, LazyTensor) for a in args) or any(isinstance(v, LazyTensor) for v in kwargs.values())
-		if _is_remote_device(device) or has_lazy_input:
-			op_name = f"aten::{fn_name}"
-			lt = LazyTensor(operation=op_name, inputs=list(args), kwargs=kwargs)
-			import os
-			if os.getenv("GENIE_LOG_INTERCEPTS", "0") == "1":
-				try:
-					shapes = [getattr(a, "shape", None) for a in args]
-					logger.info(f"[Genie] Factory intercepted torch.{fn_name} device={device}, args_shapes={shapes} -> {lt}")
-				except Exception:
-					logger.info(f"[Genie] Factory intercepted torch.{fn_name} device={device}")
-			return lt
-		return original(*args, **kwargs)
-
-	setattr(torch, fn_name, wrapper)
-	logger.debug(f"Installed factory interceptor for torch.{fn_name}")
-
-
-def install_factory_interceptors() -> None:
-	"""Install interceptors for common factory functions."""
-	for name in (
-		"randn", "rand", "randint", "zeros", "ones", "empty", "full", "empty_strided",
-		"rand_like", "randint_like", "zeros_like", "ones_like", "empty_like", "full_like",
-		"arange", "linspace", "logspace",
-	):
-		try:
-			_install_factory_interceptor(name)
-		except Exception:
-			logger.debug(f"Could not install interceptor for torch.{name}")
-
-
+# Thread-local storage to track when we're inside __torch_function__
+# This prevents infinite recursion when accessing tensor properties
+_in_torch_function = threading.local()
+
+
+class LazyTensor(torch.Tensor):
+    """
+    Lazy tensor that captures operations without executing.
+
+    This is a proper torch.Tensor subclass that integrates with PyTorch's
+    dispatcher system. All operations on LazyTensors are automatically
+    intercepted via __torch_dispatch__.
+
+    Usage:
+        >>> # Device-based API (paper API)
+        >>> x = torch.randn(10, 10, device='remote_accelerator:0')
+        >>> isinstance(x, LazyTensor)  # True
+        >>> y = x @ x  # Operations deferred
+        >>> result = y.cpu()  # Triggers execution
+
+        >>> # Context-based API (convenience API)
+        >>> with genie.capture():
+        ...     x = torch.randn(10, 10)  # No device needed
+        ...     y = x @ x
+        >>> result = y.cpu()  # Triggers execution
+
+    How It Works:
+        1. Operations create new LazyTensor instances (no computation)
+        2. Graph is built incrementally as operations are captured
+        3. Materialization (.cpu(), .numpy()) triggers execution
+        4. Graph is traversed and operations executed in order
+
+    Thread Safety:
+        - LazyTensor instances are immutable (thread-safe)
+        - Graph building uses thread-local state (safe)
+        - Materialization is thread-safe (no shared state)
+    """
+
+    # Class-level state
+    _graph_builder: Optional['GraphBuilder'] = None
+    _shape_cache: Dict[Tuple, Optional[torch.Size]] = {}
+
+    # Fast path for simple operations (avoids FakeTensorMode overhead)
+    _SIMPLE_OPS = {
+        'aten::relu': lambda inputs: inputs[0].shape,
+        'aten::sigmoid': lambda inputs: inputs[0].shape,
+        'aten::tanh': lambda inputs: inputs[0].shape,
+        'aten::abs': lambda inputs: inputs[0].shape,
+        'aten::neg': lambda inputs: inputs[0].shape,
+        'aten::exp': lambda inputs: inputs[0].shape,
+        'aten::log': lambda inputs: inputs[0].shape,
+        # NOTE: Removed simplified add/sub/mul/div - they need proper broadcasting support
+        # which requires FakeTensor mode for accurate shape inference
+    }
+
+    # Track metadata without breaking tensor subclass protocol
+    @staticmethod
+    def __new__(
+        cls,
+        operation: str,
+        inputs: List[Any],
+        kwargs: Optional[Dict[str, Any]] = None,
+        shape: Optional[torch.Size] = None,
+        dtype: Optional[torch.dtype] = None,
+        device: Optional[torch.device] = None,
+    ):
+        """
+        Create LazyTensor wrapper.
+
+        CRITICAL: Must use _make_subclass for proper tensor subclass.
+        This creates a tensor wrapper WITHOUT allocating actual storage.
+        """
+        # Infer shape/dtype if not provided
+        if shape is None:
+            shape = torch.Size([])  # Use empty shape as placeholder
+            # Shape inference will be done lazily when needed
+
+        if dtype is None:
+            dtype = cls._infer_dtype(inputs, kwargs or {})
+        if dtype is None:
+            dtype = torch.float32  # Fallback
+
+        # Handle remote devices - use meta for storage
+        if device is None:
+            device = torch.device('meta')  # Symbolic device (no storage)
+        elif isinstance(device, str) and ('remote_accelerator' in device or 'privateuseone' in device):
+            # For remote devices, use meta device for storage
+            device = torch.device('meta')
+        elif isinstance(device, torch.device) and device.type in ('remote_accelerator', 'privateuseone'):
+            # Handle torch.device objects for remote devices
+            device = torch.device('meta')
+
+        # Create tensor wrapper using official API
+        # This is what makes LazyTensor a "real" tensor
+        wrapper = torch.Tensor._make_subclass(
+            cls,
+            torch.empty(shape, dtype=dtype, device=device),
+            require_grad=False  # Disable autograd for now (Phase 2 addition)
+        )
+
+        # Replace the original device in kwargs with the processed device for __init__
+        if kwargs:
+            kwargs = kwargs.copy()
+            kwargs['device'] = device
+
+        return wrapper
+
+    def __init__(
+        self,
+        operation: str,
+        inputs: List[Any],
+        kwargs: Optional[Dict[str, Any]] = None,
+        shape: Optional[torch.Size] = None,
+        dtype: Optional[torch.dtype] = None,
+        device: Optional[torch.device] = None,
+    ):
+        """
+        Initialize LazyTensor metadata.
+
+        Note: __new__ has already created the tensor wrapper.
+        Here we attach operation metadata for graph building.
+        """
+        # Store operation info
+        # These become attributes of the tensor instance
+        object.__setattr__(self, '_operation', operation)
+        object.__setattr__(self, '_inputs', inputs)
+        object.__setattr__(self, '_kwargs', kwargs or {})
+        object.__setattr__(self, '_tensor_id', id(self))
+        object.__setattr__(self, '_shape', shape)
+        object.__setattr__(self, '_dtype', dtype)
+        object.__setattr__(self, '_device', device)
+
+        # Store original device info (for remote devices) - need to extract from original kwargs before processing
+        # The device parameter here is already processed (meta), so we need to look at the original kwargs
+        original_device = None
+        if hasattr(self, '_kwargs') and self._kwargs:
+            original_device = self._kwargs.get('device')
+
+        object.__setattr__(self, '_original_device', original_device)
+
+        # Register with hybrid graph builder
+        if LazyTensor._graph_builder is not None:
+            LazyTensor._graph_builder.add_operation(self)
+
+    @classmethod
+    def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
+        """
+        Intercept ALL operations involving LazyTensor.
+
+        This is automatically called by PyTorch's dispatcher for any
+        operation that involves a LazyTensor operand.
+
+        Args:
+            func: ATen operation (e.g., torch.ops.aten.add.Tensor)
+            types: Tuple of types involved (contains LazyTensor)
+            args: Positional arguments (default empty tuple)
+            kwargs: Keyword arguments (default None)
+
+        Returns:
+            LazyTensor representing the deferred operation
+        """
+        kwargs = kwargs or {}
+
+        # Handle special operations that force materialization
+        if func in cls._MATERIALIZATION_OPS:
+            # These operations need concrete tensors
+            materialized_args = tuple(
+                arg.materialize() if type(arg).__name__ == 'LazyTensor' else arg
+                for arg in args
+            )
+            return func(*materialized_args, **kwargs)
+
+        # Check if we're outside a capture context with LazyTensors
+        # In this case, materialize all LazyTensors and let PyTorch handle it
+        from .capture import is_capturing
+        if not is_capturing():
+            # Count LazyTensors vs concrete tensors
+            lazy_count = sum(1 for arg in args if type(arg).__name__ == 'LazyTensor')
+            concrete_tensor_count = sum(1 for arg in args if isinstance(arg, torch.Tensor) and type(arg).__name__ != 'LazyTensor')
+            
+            # If we have LazyTensors with concrete tensors outside capture context,
+            # materialize all LazyTensors and let PyTorch handle it normally
+            if lazy_count > 0 and concrete_tensor_count > 0:
+                # Materialize all LazyTensor arguments
+                materialized_args = tuple(
+                    arg.materialize() if type(arg).__name__ == 'LazyTensor' else arg
+                    for arg in args
+                )
+                return func(*materialized_args, **kwargs)
+
+        # Normalize operation name
+        op_name = cls._normalize_op_name(func)
+
+        # Create new LazyTensor for the result
+        result = cls(
+            operation=op_name,
+            inputs=list(args),
+            kwargs=kwargs
+        )
+
+        return result
+
+    # Operator methods that route through torch_dispatch
+    def __matmul__(self, other):
+        """Matrix multiplication using @ operator."""
+        return torch.matmul(self, other)
+    
+    def __rmatmul__(self, other):
+        """Right matrix multiplication."""
+        return torch.matmul(other, self)
+    
+    def __add__(self, other):
+        """Addition using + operator."""
+        return torch.add(self, other)
+    
+    def __radd__(self, other):
+        """Right addition."""
+        return torch.add(other, self)
+    
+    def __sub__(self, other):
+        """Subtraction using - operator."""
+        return torch.sub(self, other)
+    
+    def __rsub__(self, other):
+        """Right subtraction."""
+        return torch.sub(other, self)
+    
+    def __mul__(self, other):
+        """Multiplication using * operator."""
+        return torch.mul(self, other)
+    
+    def __rmul__(self, other):
+        """Right multiplication."""
+        return torch.mul(other, self)
+    
+    def __truediv__(self, other):
+        """Division using / operator."""
+        return torch.div(self, other)
+    
+    def __rtruediv__(self, other):
+        """Right division."""
+        return torch.div(other, self)
+
+    @classmethod
+    def __torch_function__(cls, func, types, args=(), kwargs=None):
+        """
+        Handle torch functions that don't go through __torch_dispatch__.
+
+        This catches torch functions like:
+        - torch.add, torch.matmul (binary operations)
+        - torch.relu, torch.sum (unary operations)
+        - .cpu(), .cuda() (device transfers)
+        - .numpy(), .item() (conversion to non-tensor)
+
+        Binary operations like x + y call torch.add(x, y) which comes here.
+        """
+        kwargs = kwargs or {}
+
+        # Prevent recursion when accessing tensor properties
+        if getattr(_in_torch_function, 'active', False):
+            return NotImplemented
+
+        _in_torch_function.active = True
+        try:
+            # Check if any of the arguments are LazyTensors
+            # Use direct type check to avoid triggering torch operations
+            has_lazy_tensor = any(
+                type(arg).__name__ == 'LazyTensor'
+                for arg in args if hasattr(arg, '__class__')
+            )
+
+            if not has_lazy_tensor:
+                # No LazyTensors involved, let PyTorch handle normally
+                return NotImplemented
+
+            # Operations that force materialization - handle these specially to avoid recursion
+            if func in cls._MATERIALIZATION_OPS:
+                # Find the LazyTensor in arguments and materialize it
+                lazy_tensor = None
+                for arg in args:
+                    try:
+                        if type(arg).__name__ == 'LazyTensor':
+                            lazy_tensor = arg
+                            break
+                    except:
+                        pass
+
+                if lazy_tensor is not None:
+                    # For materialization ops, avoid recursion by directly materializing
+                    # and calling the method without going through torch dispatch
+                    try:
+                        materialized = lazy_tensor.materialize()
+                        # Special handling for __len__
+                        if func.__name__ == '__len__':
+                            return len(materialized)
+                        # Call the method directly on the materialized tensor
+                        method_name = func.__name__
+                        method = getattr(materialized, method_name)
+                        return method(*args[1:], **kwargs)
+                    except:
+                        # If anything fails, just return the materialized tensor
+                        return lazy_tensor.materialize()
+
+            # Check if we're outside a capture context with mixed LazyTensor/concrete types
+            # In this case, materialize the LazyTensor and perform the operation normally
+            from .capture import is_capturing
+            if not is_capturing():
+                # Count LazyTensors vs concrete tensors
+                lazy_count = sum(1 for arg in args if type(arg).__name__ == 'LazyTensor')
+                concrete_tensor_count = sum(1 for arg in args if isinstance(arg, torch.Tensor) and type(arg).__name__ != 'LazyTensor')
+                
+                # If we have a mix of LazyTensor and concrete tensors outside capture context,
+                # materialize all LazyTensors and let PyTorch handle it normally
+                if lazy_count > 0 and concrete_tensor_count > 0:
+                    # Materialize all LazyTensor arguments
+                    materialized_args = []
+                    for arg in args:
+                        if type(arg).__name__ == 'LazyTensor':
+                            materialized_args.append(arg.materialize())
+                        else:
+                            materialized_args.append(arg)
+                    # Call the function with materialized arguments
+                    return func(*materialized_args, **kwargs)
+
+            # For operations involving LazyTensors inside capture context, create new LazyTensor
+            op_name = cls._normalize_op_name(func)
+            result = cls(
+                operation=op_name,
+                inputs=list(args),
+                kwargs=kwargs
+            )
+            return result
+        finally:
+            _in_torch_function.active = False
+
+    # ===================================================================
+    # FACTORY METHODS
+    # ===================================================================
+
+    @classmethod
+    def randn(cls, *size, dtype=None, device=None, requires_grad=False):
+        """Create random normal LazyTensor."""
+        # Handle case where size is passed as torch.Size or tuple (FIX: Simplified)
+        if len(size) == 1 and isinstance(size[0], (torch.Size, tuple, list)):
+            size = tuple(size[0])
+        else:
+            size = tuple(size)
+
+        return cls(
+            operation='aten::randn',
+            inputs=list(size),
+            kwargs={'dtype': dtype, 'device': device, 'requires_grad': requires_grad},
+            shape=torch.Size(size),
+            dtype=dtype or torch.float32,
+            device=device
+        )
+
+    @classmethod
+    def tensor(cls, data, dtype=None, device=None, requires_grad=False):
+        """Create LazyTensor from data."""
+        # For tensor creation from data, we already know the shape and don't need torch.empty
+        shape = torch.Size(data.shape) if hasattr(data, 'shape') else torch.Size([])
+        inferred_dtype = dtype or (data.dtype if hasattr(data, 'dtype') else torch.float32)
+
+        # Handle remote devices - use meta for storage
+        if device is None:
+            device = torch.device('meta')  # Symbolic device (no storage)
+        elif isinstance(device, str) and ('remote_accelerator' in device or 'privateuseone' in device):
+            # For remote devices, use meta device for storage
+            device = torch.device('meta')
+        elif isinstance(device, torch.device) and device.type in ('remote_accelerator', 'privateuseone'):
+            # Handle torch.device objects for remote devices
+            device = torch.device('meta')
+
+        # Create tensor wrapper using official API - avoid torch.empty to prevent interception
+        # This is what makes LazyTensor a "real" tensor
+        # Use torch.tensor with meta device to create the underlying tensor
+        # Convert numpy dtypes to torch dtypes if needed
+        torch_dtype = inferred_dtype
+        if hasattr(inferred_dtype, 'type') and hasattr(inferred_dtype.type, '__module__'):
+            if inferred_dtype.type.__module__ == 'numpy':
+                # Simple mapping from numpy dtypes to torch dtypes
+                numpy_to_torch_dtype = {
+                    'int8': torch.int8,
+                    'int16': torch.int16,
+                    'int32': torch.int32,
+                    'int64': torch.int64,
+                    'uint8': torch.uint8,
+                    'float16': torch.float16,
+                    'float32': torch.float32,
+                    'float64': torch.float64,
+                    'bool': torch.bool,
+                }
+                torch_dtype = numpy_to_torch_dtype.get(str(inferred_dtype), torch.float32)
+
+        wrapper = torch.Tensor._make_subclass(
+            cls,
+            torch.tensor(0, dtype=torch_dtype, device=device).expand(shape),
+            require_grad=False  # Disable autograd for now (Phase 2 addition)
+        )
+
+        # Replace the original device in kwargs with the processed device for __init__
+        kwargs = {'dtype': dtype, 'device': device, 'requires_grad': requires_grad}
+        if kwargs:
+            kwargs = kwargs.copy()
+            kwargs['device'] = device
+
+        # Initialize the wrapper
+        wrapper.__init__(
+            operation='aten::tensor',
+            inputs=[data],
+            kwargs=kwargs,
+            shape=shape,
+            dtype=inferred_dtype,
+            device=device
+        )
+
+        return wrapper
+
+    @classmethod
+    def as_tensor(cls, data, dtype=None, device=None):
+        """Create LazyTensor from data (alias for tensor)."""
+        # Create LazyTensor with correct operation name
+        shape = torch.Size(data.shape) if hasattr(data, 'shape') else torch.Size([])
+        inferred_dtype = dtype or (data.dtype if hasattr(data, 'dtype') else torch.float32)
+
+        # Handle remote devices - use meta for storage
+        if device is None:
+            device = torch.device('meta')  # Symbolic device (no storage)
+        elif isinstance(device, str) and ('remote_accelerator' in device or 'privateuseone' in device):
+            # For remote devices, use meta device for storage
+            device = torch.device('meta')
+        elif isinstance(device, torch.device) and device.type in ('remote_accelerator', 'privateuseone'):
+            # Handle torch.device objects for remote devices
+            device = torch.device('meta')
+
+        # Convert numpy dtypes to torch dtypes if needed
+        torch_dtype = inferred_dtype
+        if hasattr(inferred_dtype, 'type') and hasattr(inferred_dtype.type, '__module__'):
+            if inferred_dtype.type.__module__ == 'numpy':
+                # Simple mapping from numpy dtypes to torch dtypes
+                numpy_to_torch_dtype = {
+                    'int8': torch.int8,
+                    'int16': torch.int16,
+                    'int32': torch.int32,
+                    'int64': torch.int64,
+                    'uint8': torch.uint8,
+                    'float16': torch.float16,
+                    'float32': torch.float32,
+                    'float64': torch.float64,
+                    'bool': torch.bool,
+                }
+                torch_dtype = numpy_to_torch_dtype.get(str(inferred_dtype), torch.float32)
+
+        # Create tensor wrapper using official API - avoid torch.empty to prevent interception
+        wrapper = torch.Tensor._make_subclass(
+            cls,
+            torch.tensor(0, dtype=torch_dtype, device=device).expand(shape),
+            require_grad=False  # Disable autograd for now (Phase 2 addition)
+        )
+
+        # Replace the original device in kwargs with the processed device for __init__
+        kwargs = {'dtype': dtype, 'device': device}
+        if kwargs:
+            kwargs = kwargs.copy()
+            kwargs['device'] = device
+
+        # Initialize the wrapper with as_tensor operation
+        wrapper.__init__(
+            operation='aten::as_tensor',
+            inputs=[data],
+            kwargs=kwargs,
+            shape=shape,
+            dtype=torch_dtype,
+            device=device
+        )
+
+        return wrapper
+
+    @classmethod
+    def from_numpy(cls, ndarray, dtype=None, device=None):
+        """Create LazyTensor from numpy array."""
+        return cls(
+            operation='aten::from_numpy',
+            inputs=[ndarray],
+            kwargs={'dtype': dtype, 'device': device},
+            shape=torch.Size(ndarray.shape),
+            dtype=dtype or torch.from_numpy(ndarray).dtype,
+            device=device
+        )
+
+    @classmethod
+    def zeros(cls, *size, dtype=None, device=None, requires_grad=False):
+        """Create zero-filled LazyTensor."""
+        # Handle case where size is passed as torch.Size or tuple (FIX: Simplified)
+        if len(size) == 1 and isinstance(size[0], (torch.Size, tuple, list)):
+            size = tuple(size[0])
+        else:
+            size = tuple(size)
+
+        return cls(
+            operation='aten::zeros',
+            inputs=list(size),
+            kwargs={'dtype': dtype, 'device': device, 'requires_grad': requires_grad},
+            shape=torch.Size(size),
+            dtype=dtype or torch.float32,
+            device=device
+        )
+
+    @classmethod
+    def ones(cls, *size, dtype=None, device=None, requires_grad=False):
+        """Create one-filled LazyTensor."""
+        # Handle case where size is passed as torch.Size or tuple (FIX: Simplified)
+        if len(size) == 1 and isinstance(size[0], (torch.Size, tuple, list)):
+            size = tuple(size[0])
+        else:
+            size = tuple(size)
+
+        return cls(
+            operation='aten::ones',
+            inputs=list(size),
+            kwargs={'dtype': dtype, 'device': device, 'requires_grad': requires_grad},
+            shape=torch.Size(size),
+            dtype=dtype or torch.float32,
+            device=device
+        )
+
+    @classmethod
+    def empty(cls, *size, dtype=None, device=None, requires_grad=False):
+        """Create empty LazyTensor (uninitialized memory)."""
+        # Handle case where size is passed as torch.Size or tuple (FIX: Simplified)
+        if len(size) == 1 and isinstance(size[0], (torch.Size, tuple, list)):
+            size = tuple(size[0])
+        else:
+            size = tuple(size)
+
+        return cls(
+            operation='aten::empty',
+            inputs=list(size),
+            kwargs={'dtype': dtype, 'device': device, 'requires_grad': requires_grad},
+            shape=torch.Size(size),
+            dtype=dtype or torch.float32,
+            device=device
+        )
+
+    @classmethod
+    def full(cls, fill_value, *size, dtype=None, device=None, requires_grad=False):
+        """Create LazyTensor filled with a scalar value."""
+        # Handle case where size is passed as torch.Size or tuple (FIX: Simplified)
+        if len(size) == 1 and isinstance(size[0], (torch.Size, tuple, list)):
+            size = tuple(size[0])
+        else:
+            size = tuple(size)
+
+        return cls(
+            operation='aten::full',
+            inputs=[fill_value, *size],
+            kwargs={'dtype': dtype, 'device': device, 'requires_grad': requires_grad},
+            shape=torch.Size(size),
+            dtype=dtype or torch.float32,
+            device=device
+        )
+
+    # ===================================================================
+    # MATERIALIZATION
+    # ===================================================================
+
+    def materialize(self) -> torch.Tensor:
+        """
+        Force execution of the computation graph.
+
+        This traverses the DAG and executes operations to produce
+        a concrete tensor.
+
+        Returns:
+            Concrete torch.Tensor with actual data
+        """
+        if LazyTensor._graph_builder is None:
+            raise RuntimeError("No graph builder registered")
+
+        return LazyTensor._graph_builder.materialize(self)
+
+
+    # Operations that force materialization
+    _MATERIALIZATION_OPS = {
+        torch.Tensor.cpu,
+        torch.Tensor.cuda,
+        torch.Tensor.numpy,
+        torch.Tensor.item,
+        torch.Tensor.tolist,
+        torch.Tensor.__bool__,
+        torch.Tensor.__int__,
+        torch.Tensor.__float__,
+        torch.Tensor.__len__,
+        # Comparison operations that need concrete values
+        torch.Tensor.__gt__,
+        torch.Tensor.__ge__,
+        torch.Tensor.__lt__,
+        torch.Tensor.__le__,
+        torch.Tensor.__eq__,
+        torch.Tensor.__ne__,
+    }
+
+    # ===================================================================
+    # SHAPE INFERENCE
+    # ===================================================================
+
+    @classmethod
+    def _infer_shape(
+        cls,
+        operation: str,
+        inputs: List[Any],
+        kwargs: Dict[str, Any]
+    ) -> Optional[torch.Size]:
+        """
+        Infer output shape using PyTorch's meta tensor system.
+
+        This executes the operation on "fake" tensors that only track
+        shape/dtype without allocating storage.
+        """
+        # Fast path for simple operations (avoids FakeTensorMode overhead)
+        if operation in LazyTensor._SIMPLE_OPS:
+            try:
+                return LazyTensor._SIMPLE_OPS[operation](inputs)
+            except:
+                pass  # Fall through to FakeTensorMode
+
+        # Create cache key from operation and input shapes
+        input_shapes = []
+        for inp in inputs:
+            if hasattr(inp, 'shape'):
+                input_shapes.append(tuple(inp.shape))
+            else:
+                input_shapes.append(None)
+
+        cache_key = (operation, tuple(input_shapes))
+
+        # Check cache first
+        if cache_key in LazyTensor._shape_cache:
+            return LazyTensor._shape_cache[cache_key]
+
+        try:
+            # Use PyTorch's FakeTensor mode for accurate shape inference
+            from torch._subclasses.fake_tensor import FakeTensorMode
+
+            with FakeTensorMode():
+                # Convert inputs to fake tensors
+                fake_inputs = []
+                for inp in inputs:
+                    if isinstance(inp, LazyTensor):
+                        # CRITICAL FIX: Use object.__getattribute__ to bypass property recursion
+                        inp_shape = object.__getattribute__(inp, '_shape')
+                        inp_dtype = object.__getattribute__(inp, '_dtype')
+
+                        # Guard: if shape can't be inferred, return None early
+                        if inp_shape is None:
+                            logger.warning(f"Can't infer shape for {inp.operation} (unsupported op)")
+                            return None
+
+                        # ✅ FIX: Check for empty shape placeholder (uninitialized shape)
+                        # Empty shape torch.Size([]) means "not inferred yet" for non-tensor operations
+                        if len(inp_shape) == 0 and inp.operation not in ('aten::tensor', 'aten::scalar'):
+                            logger.warning(
+                                f"Cannot infer shape for {operation}: "
+                                f"input operation {inp.operation} has uninitialized shape (empty placeholder)"
+                            )
+                            return None
+
+                        fake_inputs.append(
+                            torch.empty(inp_shape, dtype=inp_dtype or torch.float32, device='meta')
+                        )
+                    elif isinstance(inp, torch.Tensor):
+                        # Convert to meta tensor
+                        fake_inputs.append(inp.to('meta'))
+                    else:
+                        # Scalar or non-tensor (keep as-is)
+                        fake_inputs.append(inp)
+
+                # Get operation function
+                op_func = LazyTensor._get_operation_function(operation)
+
+                # Execute on fake tensors (shape inference only)
+                fake_result = op_func(*fake_inputs, **kwargs)
+
+                # Extract shape
+                if isinstance(fake_result, torch.Tensor):
+                    result_shape = fake_result.shape
+                else:
+                    result_shape = torch.Size([])
+
+                # Cache result
+                LazyTensor._shape_cache[cache_key] = result_shape
+                return result_shape
+
+        except Exception as e:
+            logger.debug(f"Shape inference failed for {operation}: {e}")
+            # Fallback: try simple heuristics
+            result = cls._infer_shape_fallback(operation, inputs)
+            # Cache fallback result too
+            LazyTensor._shape_cache[cache_key] = result
+            return result
+
+    @staticmethod
+    def _infer_shape_fallback(
+        operation: str,
+        inputs: List[Any]
+    ) -> Optional[torch.Size]:
+        """
+        Fallback shape inference using simple heuristics.
+
+        Used when FakeTensorMode fails (dynamic shapes, unsupported ops, etc.)
+        """
+        # Element-wise operations preserve shape
+        if operation in ['aten::relu', 'aten::sigmoid', 'aten::tanh',
+                        'aten::abs', 'aten::neg', 'aten::exp', 'aten::log']:
+            if inputs and hasattr(inputs[0], 'shape'):
+                if isinstance(inputs[0], LazyTensor):
+                    # Use metadata directly to avoid recursion
+                    try:
+                        return object.__getattribute__(inputs[0], '_shape')
+                    except AttributeError:
+                        # Fallback if metadata not set yet
+                        return torch.Size([])
+                else:
+                    return inputs[0].shape
+
+        # Matrix multiplication
+        if operation in ['aten::matmul', 'aten::mm']:
+            if len(inputs) >= 2:
+                a_shape = None
+                b_shape = None
+
+                if hasattr(inputs[0], 'shape'):
+                    if isinstance(inputs[0], LazyTensor):
+                        try:
+                            a_shape = object.__getattribute__(inputs[0], '_shape')
+                        except AttributeError:
+                            a_shape = torch.Size([])
+                    else:
+                        a_shape = inputs[0].shape
+
+                if hasattr(inputs[1], 'shape'):
+                    if isinstance(inputs[1], LazyTensor):
+                        try:
+                            b_shape = object.__getattribute__(inputs[1], '_shape')
+                        except AttributeError:
+                            b_shape = torch.Size([])
+                    else:
+                        b_shape = inputs[1].shape
+
+                if a_shape and b_shape and len(a_shape) >= 2 and len(b_shape) >= 2:
+                    # (..., M, K) @ (..., K, N) -> (..., M, N)
+                    return torch.Size([*a_shape[:-1], b_shape[-1]])
+
+        # Broadcasting operations
+        if operation in ['aten::add', 'aten::sub', 'aten::mul', 'aten::div']:
+            if len(inputs) >= 2:
+                a_shape = None
+                b_shape = None
+
+                if hasattr(inputs[0], 'shape'):
+                    if isinstance(inputs[0], LazyTensor):
+                        try:
+                            a_shape = object.__getattribute__(inputs[0], '_shape')
+                        except AttributeError:
+                            a_shape = torch.Size([])
+                    else:
+                        a_shape = inputs[0].shape
+
+                if hasattr(inputs[1], 'shape'):
+                    if isinstance(inputs[1], LazyTensor):
+                        try:
+                            b_shape = object.__getattribute__(inputs[1], '_shape')
+                        except AttributeError:
+                            b_shape = torch.Size([])
+                    else:
+                        b_shape = inputs[1].shape
+
+                if a_shape and b_shape:
+                    # Simple broadcasting (return larger shape)
+                    if len(a_shape) >= len(b_shape):
+                        return a_shape
+                    else:
+                        return b_shape
+
+        # Unknown - return empty shape
+            return None
+
+    @staticmethod
+    def _infer_dtype(inputs: List[Any], kwargs: Dict[str, Any]) -> Optional[torch.dtype]:
+        """Infer output dtype from inputs or kwargs."""
+        # Explicit dtype in kwargs
+        if 'dtype' in kwargs and kwargs['dtype'] is not None:
+            return kwargs['dtype']
+
+        # Infer from first tensor input
+        for inp in inputs:
+            if isinstance(inp, LazyTensor):
+                # Use metadata directly to avoid recursion
+                try:
+                    return object.__getattribute__(inp, '_dtype')
+                except AttributeError:
+                    # Fallback to default if metadata not set yet
+                    return torch.float32
+            elif isinstance(inp, torch.Tensor):
+                return inp.dtype
+
+        # Default
+        return None
+
+    # ===================================================================
+    # UTILITIES
+    # ===================================================================
+
+    @staticmethod
+    def _normalize_op_name(func) -> str:
+        """
+        Normalize operation names to canonical form.
+
+        Examples:
+            torch.ops.aten.add.Tensor -> aten::add
+            torch.add -> aten::add
+            add -> aten::add
+        """
+        if hasattr(func, '__name__'):
+            name = func.__name__
+        elif hasattr(func, '_schema'):
+            # ATen operation with schema
+            schema_str = str(func._schema)
+            name = schema_str.split('(')[0]
+            if '::' in name:
+                name = name.split('::')[-1]
+        else:
+            name = str(func)
+
+        # Remove overload suffix (e.g., add.Tensor -> add)
+        name = name.split('.')[0]
+
+        # Ensure aten:: prefix
+        if not name.startswith('aten::'):
+            name = f'aten::{name}'
+
+        return name
+
+    @staticmethod
+    def _get_operation_function(operation: str):
+        """
+        Get PyTorch function for an operation name.
+
+        Maps "aten::add" -> torch.ops.aten.add
+        """
+        if operation.startswith('aten::'):
+            op_name = operation[6:]  # Remove "aten::" prefix
+            try:
+                return getattr(torch.ops.aten, op_name)
+            except AttributeError:
+                # Fallback to torch namespace
+                return getattr(torch, op_name)
+        else:
+            return getattr(torch, operation)
+
+    # ===================================================================
+    # PROPERTY ACCESSORS
+    # ===================================================================
+
+    @property
+    def operation(self) -> str:
+        """Get the operation that created this tensor."""
+        return object.__getattribute__(self, '_operation')
+
+    @property
+    def inputs(self) -> List[Any]:
+        """Get the input arguments to this operation."""
+        return object.__getattribute__(self, '_inputs')
+
+    @property
+    def kwargs(self) -> Dict[str, Any]:
+        """Get the keyword arguments to this operation."""
+        return object.__getattribute__(self, '_kwargs')
+
+    @property
+    def tensor_id(self) -> int:
+        """Get unique ID for this tensor."""
+        return object.__getattribute__(self, '_tensor_id')
+
+    @property
+    def id(self) -> int:
+        """Get unique ID for this tensor (alias for tensor_id)."""
+        return self.tensor_id
+
+    # Lazy shape inference - only compute when actually needed
+    def _ensure_shape(self):
+        """Ensure shape is properly inferred."""
+        current_shape = object.__getattribute__(self, '_shape')
+        if current_shape is None or (len(current_shape) == 0 and self.operation != 'aten::tensor'):
+            # Need to infer shape
+            inferred_shape = type(self)._infer_shape(self.operation, self.inputs, self.kwargs)
+            if inferred_shape is not None:
+                object.__setattr__(self, '_shape', inferred_shape)
+
+    @property
+    def shape(self) -> torch.Size:
+        """Get the shape of this tensor."""
+        # Prevent recursion when accessing shape
+        if getattr(_in_torch_function, 'active', False):
+            return object.__getattribute__(self, '_shape') or torch.Size([])
+
+        self._ensure_shape()
+        return object.__getattribute__(self, '_shape') or torch.Size([])
+
+    @property
+    def dtype(self) -> torch.dtype:
+        """Get the dtype of this tensor."""
+        # Prevent recursion when accessing dtype
+        if getattr(_in_torch_function, 'active', False):
+            return object.__getattribute__(self, '_dtype') or torch.float32
+
+        return object.__getattribute__(self, '_dtype') or torch.float32
+
+    @property
+    def device(self):
+        """Get the device of this tensor."""
+        # Prevent recursion when accessing device
+        if getattr(_in_torch_function, 'active', False):
+            original_device = object.__getattribute__(self, '_original_device')
+            if original_device is not None:
+                # For remote devices, return a torch.device with privateuseone type
+                if isinstance(original_device, str) and 'remote_accelerator' in original_device:
+                    return torch.device('privateuseone:0')
+                return original_device
+            return object.__getattribute__(self, '_device') or torch.device('meta')
+
+        original_device = object.__getattribute__(self, '_original_device')
+        if original_device is not None:
+            # For remote devices, return a torch.device with privateuseone type
+            if isinstance(original_device, str) and 'remote_accelerator' in original_device:
+                return torch.device('privateuseone:0')
+            return original_device
+        return object.__getattribute__(self, '_device') or torch.device('meta')
+
+    @property
+    def original_device(self):
+        """Get the original device (before meta conversion)."""
+        return object.__getattribute__(self, '_original_device')
+
+    # ===================================================================
+    # STRING REPRESENTATION
+    # ===================================================================
+
+    def __repr__(self) -> str:
+        # Use internal attributes directly to avoid recursion during property access
+        operation = object.__getattribute__(self, '_operation')
+        shape = object.__getattribute__(self, '_shape') or torch.Size([])
+        dtype = object.__getattribute__(self, '_dtype') or torch.float32
+        return f"LazyTensor(op={operation}, shape={shape}, dtype={dtype})"
+
+    def __str__(self) -> str:
+        return self.__repr__()
+
+    @classmethod
+    def create_from_factory(cls, factory_name: str, size_args, kwargs: Dict[str, Any]):
+        """
+        Create LazyTensor from factory function (torch.randn, torch.zeros, etc.).
+
+        This is used by the factory interception mechanism to create LazyTensors
+        for initial tensor creation operations.
+        """
+        # Map factory names to aten operations
+        factory_to_aten = {
+            'randn': 'aten::randn',
+            'zeros': 'aten::zeros',
+            'ones': 'aten::ones',
+            'empty': 'aten::empty',
+            'full': 'aten::full',
+            'randn_like': 'aten::randn_like',
+            'zeros_like': 'aten::zeros_like',
+            'ones_like': 'aten::ones_like',
+            'empty_like': 'aten::empty_like',
+            'full_like': 'aten::full_like',
+            'eye': 'aten::eye',
+            'arange': 'aten::arange',
+            'linspace': 'aten::linspace',
+            'logspace': 'aten::logspace',
+            'rand': 'aten::rand',
+            'rand_like': 'aten::rand_like',
+            'randint': 'aten::randint',
+            'randint_like': 'aten::randint_like',
+            'normal': 'aten::normal',
+            'randperm': 'aten::randperm'
+        }
+
+        op_name = factory_to_aten.get(factory_name, f'aten::{factory_name}')
+
+        # For _like functions, the first argument is the tensor to mimic
+        if factory_name.endswith('_like') and size_args and hasattr(size_args[0], 'shape'):
+            tensor_like = size_args[0]
+            inputs = [tensor_like]
+        else:
+            inputs = list(size_args)
+
+        return cls(operation=op_name, inputs=inputs, kwargs=kwargs)
+
+    # ===================================================================
+    # ADDITIONAL UTILITIES FOR TESTING
+    # ===================================================================
+
+    @classmethod
+    def reset_id_counter(cls):
+        """Reset ID counter for testing."""
+        pass  # No longer needed with proper tensor subclass

@@ -1,4587 +1,2709 @@
-# Genie Implementation Plan for Junior Developers
+# Genie Refactoring Plan: Production-Ready Open-Source Release
 
-**Total Timeline:** 4 weeks (realistic)  
-**Goal:** Working remote execution + ONE semantic optimization with measured improvement  
-**Audience:** Junior developer with basic Python knowledge
-
----
-
-## Overview
-
-### What We're Building
-
-```
-Week 1: HTTP Transport Layer
-┌─────────────┐         HTTP/REST          ┌─────────────┐
-│   Client    │ ─────────────────────────> │   Server    │
-│ (LazyTensor)│ <───────────────────────── │ (FastAPI)   │
-└─────────────┘      Tensor Transfer       └─────────────┘
-
-Week 2: Semantic Optimization
-┌─────────────┐                             ┌─────────────┐
-│  Baseline   │  Random placement           │  Optimized  │
-│  X ms       │                             │  X-30% ms   │
-└─────────────┘                             └─────────────┘
-```
-
-### Success Criteria
-
-**Week 1:** Can execute `x.relu()` on remote server  
-**Week 2:** Can show co-location improves latency by >10%  
-**Week 3:** Have second optimization OR refined measurements  
-**Week 4:** Have written evaluation section
+**Document Version:** 1.0  
+**Date:** 2024  
+**Author:** Senior Engineering Team  
+**Status:** Proposed Architecture
 
 ---
 
-## Prerequisites (Before You Start)
+## Executive Summary
 
-### 1. Development Environment
+This document outlines a comprehensive refactoring of Genie from research prototype to production-ready, open-source disaggregated execution framework. The refactoring addresses critical technical debt while preserving the core innovation: semantic-aware scheduling for GPU disaggregation.
 
-```bash
-# Create venv
-python -m venv .venv
+**Key Objectives:**
+1. **Clean Architecture:** Reduce from 3 interception mechanisms to 2 well-defined layers
+2. **Production Quality:** <1μs per-operation overhead, robust fault handling
+3. **Open-Source Ready:** Clean APIs, comprehensive docs, community-friendly design
+4. **Incremental Migration:** Support existing code during transition
 
-# Activate (Linux/Mac)
-source .venv/bin/activate
+**Timeline:** 24 weeks (6 months) to v1.0 production release
 
-# Check CUDA (optional for Phase 1)
-python -c "import torch; print(torch.cuda.is_available())"
-# Shows: True or False (False is OK for Phase 1)
-```
-
-### Step 0.2: Install Dependencies (30 min)
-
-```bash
-cd /path/to/genie/project
-
-# Verify you have these directories:
-ls -la
-# Should see:
-# genie/
-# tests/
-# docs/
-# src/
-```
-
-### 3. Create a Clean Branch
-
-```bash
-# Create new branch for this work
-git checkout -b http-transport-implementation
-
-# Verify you're on the right branch
-git branch
-# Should show: * http-transport-implementation
-```
-
-### 4. Install Dependencies
-
-```bash
-# Install only what we need (no DPDK, no CUDA required)
-pip install torch>=2.0.0
-pip install fastapi>=0.100.0
-pip install uvicorn[standard]>=0.23.0
-pip install requests>=2.31.0
-pip install pytest>=7.4.0
-
-# Verify installations
-python -c "import fastapi; import uvicorn; import requests; print('✅ All dependencies installed')"
-```
+**Risk Level:** Medium - Core architecture changes, but with clear fallback paths
 
 ---
 
-## Week 1: HTTP Transport Layer
+## Table of Contents
 
-**Goal:** Get remote execution working using HTTP/REST
-
-**Time:** 5 days (25-30 hours)
+1. [Current State Analysis](#1-current-state-analysis)
+2. [Target Architecture](#2-target-architecture)
+3. [Deployment Environment Strategy](#3-deployment-environment-strategy)
+4. [Detailed Refactoring Plan](#4-detailed-refactoring-plan)
+5. [API Design](#5-api-design)
+6. [Testing Strategy](#6-testing-strategy)
+7. [Performance Targets](#7-performance-targets)
+8. [Migration Guide](#8-migration-guide)
+9. [Open-Source Considerations](#9-open-source-considerations)
+10. [Risk Assessment](#10-risk-assessment)
+11. [Timeline & Milestones](#11-timeline--milestones)
 
 ---
 
-### Day 1: HTTP Server with Health Check
+## 1. Current State Analysis
 
-**Goal:** Start server and test health check with curl
+### 1.1 Critical Technical Debt
 
-**Time:** 3-4 hours
+#### Issue 1: Triple Interception System
 
-#### Step 1.1: Create Server File (30 min)
-
-```bash
-# Create the file
-touch genie/runtime/simple_server.py
-
-# Open in editor
-nano genie/runtime/simple_server.py
-# (or use your preferred editor)
-```
-
-**Copy this EXACT code:**
-
+**Current State:**
 ```python
-"""
-Simple HTTP server for remote tensor execution.
-File: genie/runtime/simple_server.py
-"""
-
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
-from fastapi.responses import Response
-import torch
-import io
-import logging
-from datetime import datetime
-import traceback
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-# Create FastAPI app
-app = FastAPI(
-    title="Genie Remote Execution Server",
-    description="Executes PyTorch operations on remote GPU",
-    version="0.1.0"
-)
-
-# Global device (will be set on startup)
-DEVICE = None
-
-# Statistics
-STATS = {
-    'requests_total': 0,
-    'requests_success': 0,
-    'requests_failed': 0,
-    'start_time': None
-}
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize server on startup."""
-    global DEVICE, STATS
-    
-    # Set device
-    if torch.cuda.is_available():
-        DEVICE = torch.device("cuda:0")
-        logger.info(f"🚀 Server starting with GPU: {torch.cuda.get_device_name(0)}")
-    else:
-        DEVICE = torch.device("cpu")
-        logger.warning("⚠️  No GPU available, using CPU")
-    
-    STATS['start_time'] = datetime.now()
-    logger.info(f"✅ Server ready on device: {DEVICE}")
-
-
-@app.get("/")
-async def root():
-    """Root endpoint - just returns info."""
-    return {
-        "service": "Genie Remote Execution Server",
-        "version": "0.1.0",
-        "status": "running",
-        "endpoints": {
-            "health": "/health",
-            "execute": "/execute (POST)"
-        }
-    }
-
-
-@app.get("/health")
-async def health_check():
-    """
-    Health check endpoint.
-    
-    Test with: curl http://localhost:8888/health
-    """
-    uptime = None
-    if STATS['start_time']:
-        uptime = str(datetime.now() - STATS['start_time'])
-    
-    return {
-        "status": "healthy",
-        "device": str(DEVICE),
-        "device_type": DEVICE.type if DEVICE else "unknown",
-        "cuda_available": torch.cuda.is_available(),
-        "uptime": uptime,
-        "stats": {
-            "total_requests": STATS['requests_total'],
-            "successful": STATS['requests_success'],
-            "failed": STATS['requests_failed']
-        }
-    }
-
-
-@app.post("/execute")
-async def execute_operation(
-    operation: str = Form(...),
-    tensor_file: UploadFile = File(...)
-):
-    """
-    Execute tensor operation on server GPU.
-    
-    Args:
-        operation: Operation name (e.g., "relu", "sigmoid")
-        tensor_file: Binary file containing torch tensor
-    
-    Returns:
-        Binary tensor result
-    
-    Test with:
-        curl -X POST http://localhost:8888/execute \
-             -F "operation=relu" \
-             -F "tensor_file=@test_tensor.pt" \
-             --output result.pt
-    """
-    global STATS
-    STATS['requests_total'] += 1
-    
-    start_time = datetime.now()
-    
-    try:
-        logger.info(f"📥 Received request: operation={operation}")
-        
-        # Read uploaded tensor
-        tensor_bytes = await tensor_file.read()
-        logger.debug(f"   Received {len(tensor_bytes)} bytes")
-        
-        # Deserialize tensor
-        tensor = torch.load(io.BytesIO(tensor_bytes))
-        logger.info(f"   Loaded tensor: shape={tensor.shape}, dtype={tensor.dtype}")
-        
-        # Move to GPU
-        tensor = tensor.to(DEVICE)
-        
-        # Execute operation
-        result = _execute_single_operation(operation, tensor)
-        
-        # Serialize result
-        result_bytes = io.BytesIO()
-        torch.save(result.cpu(), result_bytes)
-        result_bytes.seek(0)
-        
-        # Statistics
-        elapsed = (datetime.now() - start_time).total_seconds()
-        STATS['requests_success'] += 1
-        
-        logger.info(f"✅ Success: {operation} completed in {elapsed:.3f}s")
-        
-        return Response(
-            content=result_bytes.read(),
-            media_type="application/octet-stream"
-        )
-        
-    except Exception as e:
-        STATS['requests_failed'] += 1
-        logger.error(f"❌ Error executing {operation}: {e}")
-        logger.error(traceback.format_exc())
-        
-        raise HTTPException(
-            status_code=500,
-            detail=f"Execution failed: {str(e)}"
-        )
-
-
-def _execute_single_operation(operation: str, tensor: torch.Tensor) -> torch.Tensor:
-    """
-    Execute a single operation on a tensor.
-    
-    Supported operations (Phase 1):
-    - relu, sigmoid, tanh, abs
-    - neg, exp, log, sqrt
-    """
-    # Define supported operations
-    SUPPORTED = {
-        'relu': torch.relu,
-        'sigmoid': torch.sigmoid,
-        'tanh': torch.tanh,
-        'abs': torch.abs,
-        'neg': torch.neg,
-        'exp': torch.exp,
-        'log': torch.log,
-        'sqrt': torch.sqrt,
-    }
-    
-    if operation not in SUPPORTED:
-        raise ValueError(
-            f"Operation '{operation}' not supported. "
-            f"Supported: {list(SUPPORTED.keys())}"
-        )
-    
-    # Execute
-    func = SUPPORTED[operation]
-    result = func(tensor)
-    
-    return result
-
-
-def start_server(host: str = "0.0.0.0", port: int = 8888):
-    """Start the FastAPI server."""
-    import uvicorn
-    
-    logger.info("=" * 60)
-    logger.info("🚀 Starting Genie Remote Execution Server")
-    logger.info(f"   Host: {host}")
-    logger.info(f"   Port: {port}")
-    logger.info(f"   URL: http://{host}:{port}")
-    logger.info("=" * 60)
-    
-    uvicorn.run(
-        app,
-        host=host,
-        port=port,
-        log_level="info"
-    )
-
-
-if __name__ == "__main__":
-    import argparse
-    
-    parser = argparse.ArgumentParser(
-        description='Genie Remote Execution Server'
-    )
-    parser.add_argument(
-        '--host',
-        default='0.0.0.0',
-        help='Host to bind (default: 0.0.0.0)'
-    )
-    parser.add_argument(
-        '--port',
-        type=int,
-        default=8888,
-        help='Port to bind (default: 8888)'
-    )
-    
-    args = parser.parse_args()
-    start_server(host=args.host, port=args.port)
+# Three competing mechanisms:
+1. Factory wrapping (interception.py) - ~20 functions manually wrapped
+2. __torch_dispatch__ (lazy_tensor.py) - Monkey-patched onto class
+3. torch.library (library.py) - PrivateUse1 registrations (mostly disabled)
 ```
 
-**Save the file** (Ctrl+X, then Y, then Enter in nano)
+**Problems:**
+- Race conditions when multiple mechanisms trigger
+- Maintenance burden (changes need 3x updates)
+- Confusion about which mechanism handles what
+- library.py registrations are redundant
 
-#### Step 1.2: Start the Server (10 min)
+**Impact:** High - Core system complexity, hard to debug
 
-```bash
-# Start server
-python -m genie.runtime.simple_server
+#### Issue 2: Non-Standard LazyTensor
 
-# You should see output like:
-# ============================================================
-# 🚀 Starting Genie Remote Execution Server
-#    Host: 0.0.0.0
-#    Port: 8888
-#    URL: http://0.0.0.0:8888
-# ============================================================
-# INFO:     Started server process [12345]
-# INFO:     Waiting for application startup.
-# 🚀 Server starting with GPU: NVIDIA GeForce RTX 3090
-#   (or: ⚠️  No GPU available, using CPU)
-# ✅ Server ready on device: cuda:0
-# INFO:     Application startup complete.
-# INFO:     Uvicorn running on http://0.0.0.0:8888
+**Current State:**
+```python
+class LazyTensor:  # Does NOT inherit from torch.Tensor
+    def __torch_dispatch__(cls, ...):  # Monkey-patched later
 ```
 
-**SUCCESS CHECKPOINT 1:** Server starts without errors ✅
+**Problems:**
+- `isinstance(x, torch.Tensor)` returns False → breaks many libraries
+- Won't integrate with autograd, torch.compile, etc.
+- PyTorch dispatcher doesn't recognize LazyTensor as a tensor subclass
+- Manual property implementations (shape, dtype, device)
 
-**If you see errors:**
-```bash
-# Error: "No module named fastapi"
-pip install fastapi uvicorn
+**Note:** The existing `__torch_dispatch__` implementation is correct. The issue is that PyTorch's dispatcher won't call it until LazyTensor properly inherits from `torch.Tensor` using `_make_subclass`.
 
-# Error: "Address already in use"
-python -m genie.runtime.simple_server --port 8889
+**Impact:** High - Limits ecosystem compatibility
 
-# Error: "No module named genie"
-# Make sure you're in project root directory
-cd /path/to/genie/project
-python -m genie.runtime.simple_server
+#### Issue 3: Three Graph Representations
+
+**Current State:**
+```python
+1. LazyTensor.inputs chain (implicit DAG)
+2. FX Graph (optional, ~80% coverage)
+3. ComputationGraph (debugging/legacy)
 ```
 
-**Keep this terminal open** - don't close it, server needs to keep running
+**Problems:**
+- No single source of truth
+- Synchronization bugs when graphs diverge
+- 3x memory overhead
+- Scheduler doesn't know which to use
 
-#### Step 1.3: Test with curl (15 min)
+**Impact:** Medium - Adds complexity, memory overhead
 
-Open a **NEW TERMINAL** (keep server running in first terminal)
+#### Issue 4: Incomplete Scheduler
 
-```bash
-# Test health check
-curl http://localhost:8888/health
+**Current State:**
+- Semantic analysis exists but is basic
+- No real scheduling algorithm (just local execution)
+- No cost model implementation
+- No placement optimization
 
-# Expected output (something like):
-# {
-#   "status": "healthy",
-#   "device": "cuda:0",
-#   "device_type": "cuda",
-#   "cuda_available": true,
-#   "uptime": "0:00:15.123456",
-#   "stats": {
-#     "total_requests": 0,
-#     "successful": 0,
-#     "failed": 0
-#   }
-# }
+**Impact:** High - Core paper contribution not implemented
+
+### 1.2 What's Working Well
+
+✅ **Semantic enrichment concept** - Phase detection, modality tagging  
+✅ **Factory interception** - Captures creation ops correctly  
+✅ **Basic execution** - Local fallback works reliably  
+✅ **DPDK integration design** - Zero-copy architecture is sound  
+✅ **Paper validation** - Core ideas proven in HotNets
+
+---
+
+## 2. Target Architecture
+
+### 2.1 Architecture Principles
+
+1. **Simplicity Through Standards** - Use PyTorch's official extension APIs
+2. **Single Source of Truth** - One graph representation with fallback
+3. **Fail-Safe Design** - Graceful degradation at every level
+4. **Open-Source First** - API designed for community adoption
+
+### 2.2 System Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    User Application                          │
+│  model = MyLLM()                                            │
+│  with genie.capture():                                      │
+│      output = model(input)  # Transparent interception     │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│         Interception Layer (2 Mechanisms)                    │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │ 1. Factory Interceptor (torch.randn, etc.)            │ │
+│  │    - Wraps ~20 creation functions                     │ │
+│  │    - Returns LazyTensor for remote_accelerator device │ │
+│  └────────────────────────────────────────────────────────┘ │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │ 2. LazyTensor (torch.Tensor subclass)                 │ │
+│  │    - __torch_dispatch__ for operations                │ │
+│  │    - Automatic coverage of ALL PyTorch ops            │ │
+│  └────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│         Graph Builder (Hybrid Strategy)                      │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │ Primary: torch.fx.Graph                                │ │
+│  │  - Covers ~80% of models (static control flow)        │ │
+│  │  - Standard format, rich tooling ecosystem            │ │
+│  └────────────────────────────────────────────────────────┘ │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │ Fallback: LazyTensor DAG                              │ │
+│  │  - Covers remaining 20% (dynamic control flow)        │ │
+│  │  - Always available, no tracer errors                 │ │
+│  └────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│         Semantic Analysis (Core Innovation)                  │
+│  - Phase Detection: prefill/decode/forward/backward         │
+│  - Modality Tagging: vision/text/audio/fusion              │
+│  - Pattern Matching: attention, convolution, KV cache       │
+│  - Cost Estimation: FLOPs, memory, intensity                │
+│  - Dependency Analysis: co-location requirements            │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│         Scheduler (Multi-Objective Optimization)             │
+│  - Cost Model: compute + transfer + queueing                │
+│  - Placement: ILP solver / greedy with refinement           │
+│  - Co-location: KV cache + decoder on same device          │
+│  - Pipelining: overlap compute and communication           │
+│  - Dynamic Recomputation: recompute vs transfer under load  │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│         Execution Backends (Tiered Strategy)                 │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │ Tier 1: Local Fallback (CPU/GPU)                      │ │
+│  │  - Always available, zero setup                       │ │
+│  │  - Validates correctness                              │ │
+│  └────────────────────────────────────────────────────────┘ │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │ Tier 2: Simple Remote (HTTP/gRPC)                     │ │
+│  │  - Single-node disaggregation                         │ │
+│  │  - Easy deployment, good for testing                  │ │
+│  └────────────────────────────────────────────────────────┘ │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │ Tier 3: Production (RDMA/UCX + DPDK)                  │ │
+│  │  - Multi-node clusters                                │ │
+│  │  - Zero-copy datapath                                 │ │
+│  │  - Full disaggregation benefits                       │ │
+│  └────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-**SUCCESS CHECKPOINT 2:** curl returns JSON with "status": "healthy" ✅
+### 2.3 Why This Architecture?
 
-**If curl fails:**
-```bash
-# Error: "Connection refused"
-# Server not running - check first terminal
+**Comparison with Alternatives:**
 
-# Error: "Could not resolve host"
-# Try 127.0.0.1 instead:
-curl http://127.0.0.1:8888/health
+| Approach | Pros | Cons | Decision |
+|----------|------|------|----------|
+| Pure FX Graph | Standard format, tooling | Fails on dynamic control flow | Use as primary |
+| Pure LazyTensor DAG | Always works | Non-standard format | Use as fallback |
+| Both (Hybrid) | Best of both worlds | Slightly more complex | ✅ **CHOSEN** |
 
-# No output at all
-# Check if curl is installed:
-curl --version
-# If not: sudo apt-get install curl  (Ubuntu/Debian)
-#     or: brew install curl            (macOS)
+**Rationale:** 
+- 80% of models work with FX (standardization benefit)
+- 20% need dynamic support (can't abandon them)
+- Hybrid gives us both coverage and standards compliance
+
+---
+
+## 3. Deployment Environment Strategy
+
+### 3.1 Target Deployment Tiers
+
+For open-source adoption, support **three deployment tiers** with increasing complexity:
+
+#### Tier 1: Single-Machine Development (Priority: Essential)
+
+**Use Case:** Developers testing locally, CI/CD, small models
+
+**Infrastructure:**
+```yaml
+Hardware:
+  - Single machine with 1+ GPUs
+  - Standard Ethernet (1-10 Gbps)
+  - No special networking hardware
+
+Software:
+  - Python 3.9+
+  - PyTorch 2.0+
+  - Standard PyPI packages
 ```
 
-#### Step 1.4: Test Root Endpoint (5 min)
+**Execution Mode:**
+- Local GPU execution with simulated disaggregation
+- HTTP-based communication (fallback)
+- Focus: Correctness validation, API testing
 
-```bash
-# Test root endpoint
-curl http://localhost:8888/
+**Why This Matters:** Lowers barrier to entry, enables rapid iteration
 
-# Expected output:
-# {
-#   "service": "Genie Remote Execution Server",
-#   "version": "0.1.0",
-#   "status": "running",
-#   "endpoints": {
-#     "health": "/health",
-#     "execute": "/execute (POST)"
-#   }
-# }
+#### Tier 2: Small Cluster (Priority: High)
+
+**Use Case:** Research labs, small startups, paper reproduction
+
+**Infrastructure:**
+```yaml
+Hardware:
+  - 2-8 GPU nodes
+  - 10-40 Gbps Ethernet (standard datacenter)
+  - Optional: RDMA-capable NICs (RoCE)
+
+Software:
+  - Container orchestration (Docker/Kubernetes)
+  - gRPC for control plane
+  - Optional: UCX for RDMA
 ```
 
-**SUCCESS CHECKPOINT 3:** Root endpoint returns server info ✅
+**Execution Mode:**
+- Real disaggregation across nodes
+- gRPC for scheduling and control
+- TCP for data transfer (or RDMA if available)
+- Focus: Validate disaggregation benefits
 
-#### Step 1.5: Documentation (30 min)
+**Why This Matters:** Target environment for most academic users
 
-Create a quick start guide:
+#### Tier 3: Production Datacenter (Priority: Medium)
 
-```bash
-# Create file
-touch docs/QUICKSTART_SERVER.md
+**Use Case:** Cloud providers, large ML infrastructure teams
+
+**Infrastructure:**
+```yaml
+Hardware:
+  - 10+ GPU nodes
+  - 100+ Gbps InfiniBand/RoCE
+  - GPUDirect RDMA support
+  - Dedicated DPDK NICs
+
+Software:
+  - Kubernetes with GPU scheduling
+  - UCX for RDMA
+  - DPDK for zero-copy
+  - Prometheus for monitoring
 ```
 
-Write in it:
+**Execution Mode:**
+- Full disaggregation with zero-copy
+- Global scheduler for multi-tenant optimization
+- Fault tolerance with lineage-based recovery
+- Focus: Production performance and reliability
+
+**Why This Matters:** Demonstrates full paper vision
+
+### 3.2 Recommended Phased Approach
+
+```
+Phase 1 (Weeks 1-8):  Tier 1 - Single machine, local execution
+Phase 2 (Weeks 9-16): Tier 2 - Multi-node with gRPC+TCP
+Phase 3 (Weeks 17-24): Tier 3 - RDMA+DPDK optimization
+```
+
+**Justification:**
+1. Tier 1 enables immediate community testing (wide adoption)
+2. Tier 2 validates disaggregation benefits (research validation)
+3. Tier 3 demonstrates production viability (long-term vision)
+
+### 3.3 Deployment Strategy Document
+
+**File: `docs/deployment.md`**
+
 ```markdown
-# Genie Server Quick Start
+# Genie Deployment Guide
 
-## Starting the Server
-
-```bash
-python -m genie.runtime.simple_server
-```
-
-## Testing
+## Quick Start (Tier 1 - Local Development)
 
 ```bash
-# Health check
-curl http://localhost:8888/health
+pip install genie-pytorch
 
-# Should return:
-# {"status": "healthy", "device": "cuda:0", ...}
+# Run locally (no cluster needed)
+import genie
+with genie.capture():
+    output = model(input)
 ```
 
-## Troubleshooting
+## Small Cluster Setup (Tier 2)
 
-### Port in use
+### Prerequisites
+- 2+ machines with GPUs
+- Docker or Kubernetes
+- Network connectivity between nodes
+
+### Setup
 ```bash
-python -m genie.runtime.simple_server --port 8889
+# On server nodes
+docker run -d genie/server:latest --port 8888
+
+# In your code
+import genie
+genie.init(cluster_config='cluster.yaml')
 ```
 
-### No GPU
-Server will automatically use CPU if no GPU available.
-```
+## Production Deployment (Tier 3)
 
-#### Day 1 Checkpoint
+### Prerequisites
+- RDMA-capable network (InfiniBand or RoCE)
+- GPUDirect RDMA support
+- DPDK-compatible NICs
 
-**End of Day 1 - YOU MUST HAVE:**
-- ✅ Server file created (`genie/runtime/simple_server.py`)
-- ✅ Server starts without errors
-- ✅ Health check returns JSON
-- ✅ Documentation created
-
-**If you don't have all checkpoints, DEBUG BEFORE MOVING ON**
-
-**Git commit:**
-```bash
-git add genie/runtime/simple_server.py docs/QUICKSTART_SERVER.md
-git commit -m "Day 1: HTTP server with health check"
-git push origin http-transport-implementation
+### Setup
+See `docs/production-deployment.md` for detailed guide
 ```
 
 ---
 
-### Day 2: Manual Tensor Transfer with curl
+## 4. Detailed Refactoring Plan
 
-**Goal:** Send actual tensors via curl and verify execution
+### Phase 1: Core Architecture (Weeks 1-4)
 
-**Time:** 3-4 hours
+#### 1.1 Proper LazyTensor Subclass
 
-#### Step 2.1: Create Test Tensor (10 min)
-
-```bash
-# Create a directory for test files
-mkdir -p test_data
-
-# Create test tensor
-python << EOF
-import torch
-
-# Create simple test tensor
-tensor = torch.randn(10, 10)
-print(f"Created tensor: shape={tensor.shape}, dtype={tensor.dtype}")
-print(f"Sample values:\n{tensor[:3, :3]}")
-
-# Save it
-torch.save(tensor, 'test_data/test_tensor.pt')
-print("\n✅ Saved to test_data/test_tensor.pt")
-EOF
-```
-
-**Expected output:**
-```
-Created tensor: shape=torch.Size([10, 10]), dtype=torch.float32
-Sample values:
-tensor([[ 0.1234,  0.5678, -0.9012],
-        [ 1.2345, -0.4567,  0.7890],
-        [-0.3456,  0.8901,  0.2345]])
-
-✅ Saved to test_data/test_tensor.pt
-```
-
-**SUCCESS CHECKPOINT 4:** Test tensor created ✅
-
-#### Step 2.2: Test with curl (30 min)
-
-**Make sure server is still running in other terminal!**
-
-```bash
-# Send tensor to server for relu operation
-curl -X POST http://localhost:8888/execute \
-  -F "operation=relu" \
-  -F "tensor_file=@test_data/test_tensor.pt" \
-  --output test_data/result_relu.pt
-
-# Check if file was created
-ls -lh test_data/result_relu.pt
-# Should show: -rw-r--r-- ... result_relu.pt
-
-# Check file size (should be ~4KB for 10x10 float32 tensor)
-du -h test_data/result_relu.pt
-```
-
-**In server terminal, you should see:**
-```
-INFO: 📥 Received request: operation=relu
-INFO:    Loaded tensor: shape=torch.Size([10, 10]), dtype=torch.float32
-INFO: ✅ Success: relu completed in 0.012s
-```
-
-**SUCCESS CHECKPOINT 5:** Result file created ✅
-
-#### Step 2.3: Verify Result (20 min)
-
-```bash
-# Load result and verify
-python << EOF
-import torch
-
-# Load original and result
-original = torch.load('test_data/test_tensor.pt')
-result = torch.load('test_data/result_relu.pt')
-
-print("Original tensor (first 3x3):")
-print(original[:3, :3])
-
-print("\nResult tensor (first 3x3):")
-print(result[:3, :3])
-
-print("\nExpected (torch.relu applied):")
-expected = torch.relu(original)
-print(expected[:3, :3])
-
-# Verify correctness
-if torch.allclose(result, expected):
-    print("\n✅ CORRECT: Remote execution matches local execution!")
-else:
-    print("\n❌ ERROR: Results don't match!")
-    print(f"Max difference: {(result - expected).abs().max()}")
-EOF
-```
-
-**Expected output:**
-```
-Original tensor (first 3x3):
-tensor([[ 0.1234,  0.5678, -0.9012],
-        [ 1.2345, -0.4567,  0.7890],
-        [-0.3456,  0.8901,  0.2345]])
-
-Result tensor (first 3x3):
-tensor([[0.1234, 0.5678, 0.0000],
-        [1.2345, 0.0000, 0.7890],
-        [0.0000, 0.8901, 0.2345]])
-
-Expected (torch.relu applied):
-tensor([[0.1234, 0.5678, 0.0000],
-        [1.2345, 0.0000, 0.7890],
-        [0.0000, 0.8901, 0.2345]])
-
-✅ CORRECT: Remote execution matches local execution!
-```
-
-**SUCCESS CHECKPOINT 6:** Result matches expected ✅
-
-#### Step 2.4: Test Other Operations (30 min)
-
-```bash
-# Test sigmoid
-curl -X POST http://localhost:8888/execute \
-  -F "operation=sigmoid" \
-  -F "tensor_file=@test_data/test_tensor.pt" \
-  --output test_data/result_sigmoid.pt
-
-# Verify
-python << EOF
-import torch
-original = torch.load('test_data/test_tensor.pt')
-result = torch.load('test_data/result_sigmoid.pt')
-expected = torch.sigmoid(original)
-assert torch.allclose(result, expected), "Sigmoid failed!"
-print("✅ Sigmoid works!")
-EOF
-
-# Test tanh
-curl -X POST http://localhost:8888/execute \
-  -F "operation=tanh" \
-  -F "tensor_file=@test_data/test_tensor.pt" \
-  --output test_data/result_tanh.pt
-
-python << EOF
-import torch
-original = torch.load('test_data/test_tensor.pt')
-result = torch.load('test_data/result_tanh.pt')
-expected = torch.tanh(original)
-assert torch.allclose(result, expected), "Tanh failed!"
-print("✅ Tanh works!")
-EOF
-```
-
-**SUCCESS CHECKPOINT 7:** All operations work ✅
-
-#### Step 2.5: Test Error Handling (20 min)
-
-```bash
-# Test unsupported operation
-curl -X POST http://localhost:8888/execute \
-  -F "operation=unsupported_op" \
-  -F "tensor_file=@test_data/test_tensor.pt"
-
-# Expected output (HTTP 500 error):
-# {"detail":"Execution failed: Operation 'unsupported_op' not supported. Supported: ['relu', 'sigmoid', 'tanh', 'abs', 'neg', 'exp', 'log', 'sqrt']"}
-```
-
-**SUCCESS CHECKPOINT 8:** Server handles errors gracefully ✅
-
-#### Step 2.6: Create Test Script (30 min)
-
-Make testing easier with a script:
-
-```bash
-touch test_data/test_server.sh
-chmod +x test_data/test_server.sh
-```
-
-Content:
-```bash
-#!/bin/bash
-# File: test_data/test_server.sh
-# Quick test script for server
-
-set -e  # Exit on error
-
-echo "🧪 Testing Genie Server"
-echo "======================="
-
-# Colors
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-NC='\033[0m' # No Color
-
-# Test 1: Health check
-echo -n "Test 1: Health check... "
-if curl -s http://localhost:8888/health | grep -q '"status":"healthy"'; then
-    echo -e "${GREEN}✅ PASS${NC}"
-else
-    echo -e "${RED}❌ FAIL${NC}"
-    exit 1
-fi
-
-# Test 2: Create test tensor if doesn't exist
-if [ ! -f "test_data/test_tensor.pt" ]; then
-    echo "Creating test tensor..."
-    python -c "import torch; torch.save(torch.randn(10, 10), 'test_data/test_tensor.pt')"
-fi
-
-# Test 3: Execute relu
-echo -n "Test 2: Execute relu... "
-curl -s -X POST http://localhost:8888/execute \
-  -F "operation=relu" \
-  -F "tensor_file=@test_data/test_tensor.pt" \
-  --output test_data/result_test.pt
-
-if [ -f "test_data/result_test.pt" ]; then
-    echo -e "${GREEN}✅ PASS${NC}"
-else
-    echo -e "${RED}❌ FAIL${NC}"
-    exit 1
-fi
-
-# Test 4: Verify correctness
-echo -n "Test 3: Verify correctness... "
-python << EOF
-import torch
-import sys
-
-original = torch.load('test_data/test_tensor.pt')
-result = torch.load('test_data/result_test.pt')
-expected = torch.relu(original)
-
-if torch.allclose(result, expected):
-    sys.exit(0)
-else:
-    sys.exit(1)
-EOF
-
-if [ $? -eq 0 ]; then
-    echo -e "${GREEN}✅ PASS${NC}"
-else
-    echo -e "${RED}❌ FAIL${NC}"
-    exit 1
-fi
-
-echo ""
-echo -e "${GREEN}🎉 All tests passed!${NC}"
-```
-
-Run it:
-```bash
-./test_data/test_server.sh
-```
-
-**Expected output:**
-```
-🧪 Testing Genie Server
-=======================
-Test 1: Health check... ✅ PASS
-Test 2: Execute relu... ✅ PASS
-Test 3: Verify correctness... ✅ PASS
-
-🎉 All tests passed!
-```
-
-#### Day 2 Checkpoint
-
-**End of Day 2 - YOU MUST HAVE:**
-- ✅ Can send tensor via curl
-- ✅ Result file created
-- ✅ Results match expected values
-- ✅ Test script created and passing
-
-**Git commit:**
-```bash
-git add test_data/
-git commit -m "Day 2: Manual tensor transfer working"
-```
-
----
-
-### Day 3: Python Client
-
-**Goal:** Create Python client for programmatic access
-
-**Time:** 3-4 hours
-
-#### Step 3.1: Create Client File (45 min)
-
-```bash
-touch genie/runtime/simple_client.py
-```
-
-**Full client code:**
+**File: `genie/core/lazy_tensor.py` (NEW VERSION)**
 
 ```python
 """
-Simple HTTP client for remote execution.
-File: genie/runtime/simple_client.py
+LazyTensor: Proper torch.Tensor subclass for deferred execution.
+
+Key improvements:
+1. Inherits from torch.Tensor (official API)
+2. Uses _make_subclass for proper tensor semantics
+3. __torch_dispatch__ called automatically by PyTorch
+4. Compatible with all PyTorch APIs (autograd, compile, etc.)
 """
 
-import requests
 import torch
-import io
+from typing import Any, Dict, List, Optional, Tuple
 import logging
-from typing import Optional, Dict, Any
-import time
 
 logger = logging.getLogger(__name__)
 
 
-class RemoteExecutionClient:
+class LazyTensor(torch.Tensor):
     """
-    Client for executing tensors on remote server.
-    Uses standard HTTP/REST.
+    Lazy tensor that captures operations without executing.
+    
+    This is a proper torch.Tensor subclass that integrates with PyTorch's
+    dispatcher system. All operations on LazyTensors are automatically
+    intercepted via __torch_dispatch__.
+    
+    Example:
+        >>> x = LazyTensor.randn(10, 10)  # No computation yet
+        >>> y = x @ x                      # Still no computation
+        >>> z = y.cpu()                    # Triggers execution
     """
     
-    def __init__(self, server_url: str = "http://localhost:8888"):
-        """
-        Initialize client.
-        
-        Args:
-            server_url: Base URL of server (default: http://localhost:8888)
-        """
-        self.server_url = server_url.rstrip('/')
-        self.session = requests.Session()  # Reuse connections
-        
-        # Statistics
-        self.stats = {
-            'requests_total': 0,
-            'requests_success': 0,
-            'requests_failed': 0,
-            'total_bytes_sent': 0,
-            'total_bytes_received': 0,
-            'total_time_seconds': 0.0
-        }
-        
-        logger.info(f"Created RemoteExecutionClient: {self.server_url}")
+    # Class-level state
+    _graph_builder: Optional['GraphBuilder'] = None
+    _shape_cache: Dict[Tuple, Optional[torch.Size]] = {}
+
+    # Fast path for simple operations (avoids FakeTensorMode overhead)
+    _SIMPLE_OPS = {
+        'aten::relu': lambda inputs: inputs[0].shape,
+        'aten::sigmoid': lambda inputs: inputs[0].shape,
+        'aten::tanh': lambda inputs: inputs[0].shape,
+        'aten::abs': lambda inputs: inputs[0].shape,
+        'aten::neg': lambda inputs: inputs[0].shape,
+        'aten::exp': lambda inputs: inputs[0].shape,
+        'aten::log': lambda inputs: inputs[0].shape,
+        'aten::add': lambda inputs: inputs[0].shape,  # Simplified
+        'aten::sub': lambda inputs: inputs[0].shape,  # Simplified
+        'aten::mul': lambda inputs: inputs[0].shape,  # Simplified
+        'aten::div': lambda inputs: inputs[0].shape,  # Simplified
+    }
     
-    def health_check(self, timeout: float = 5.0) -> Dict[str, Any]:
+    # Track metadata without breaking tensor subclass protocol
+    @staticmethod
+    def __new__(
+        cls,
+        operation: str,
+        inputs: List[Any],
+        kwargs: Optional[Dict[str, Any]] = None,
+        shape: Optional[torch.Size] = None,
+        dtype: Optional[torch.dtype] = None,
+        device: Optional[torch.device] = None,
+    ):
         """
-        Check server health.
+        Create LazyTensor wrapper.
+        
+        CRITICAL: Must use _make_subclass for proper tensor subclass.
+        This creates a tensor wrapper WITHOUT allocating actual storage.
+        """
+        # Infer shape/dtype if not provided
+        if shape is None:
+            shape = cls._infer_shape(operation, inputs, kwargs or {})
+        if shape is None:
+            shape = torch.Size([])  # Fallback for unknown shapes
+        
+        if dtype is None:
+            dtype = cls._infer_dtype(inputs, kwargs or {})
+        if dtype is None:
+            dtype = torch.float32  # Fallback
+        
+        if device is None:
+            device = torch.device('meta')  # Symbolic device (no storage)
+        
+        # Create tensor wrapper using official API
+        # This is what makes LazyTensor a "real" tensor
+        wrapper = torch.Tensor._make_subclass(
+            cls,
+            torch.empty(shape, dtype=dtype, device=device),
+            require_grad=False  # Disable autograd for now (Phase 2 addition)
+        )
+        
+        return wrapper
+    
+    def __init__(
+        self,
+        operation: str,
+        inputs: List[Any],
+        kwargs: Optional[Dict[str, Any]] = None,
+        shape: Optional[torch.Size] = None,
+        dtype: Optional[torch.dtype] = None,
+        device: Optional[torch.device] = None,
+    ):
+        """
+        Initialize LazyTensor metadata.
+        
+        Note: __new__ has already created the tensor wrapper.
+        Here we attach operation metadata for graph building.
+        """
+        # Store operation info
+        # These become attributes of the tensor instance
+        object.__setattr__(self, '_operation', operation)
+        object.__setattr__(self, '_inputs', inputs)
+        object.__setattr__(self, '_kwargs', kwargs or {})
+        object.__setattr__(self, '_tensor_id', id(self))
+        
+        # Register with graph builder
+        if LazyTensor._graph_builder is not None:
+            LazyTensor._graph_builder.add_operation(self)
+    
+    @classmethod
+    def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
+        """
+        Intercept ALL operations involving LazyTensor.
+        
+        This is automatically called by PyTorch's dispatcher for any
+        operation that involves a LazyTensor operand.
         
         Args:
-            timeout: Request timeout in seconds
-            
+            func: ATen operation (e.g., torch.ops.aten.add.Tensor)
+            types: Tuple of types involved (contains LazyTensor)
+            args: Positional arguments
+            kwargs: Keyword arguments
+        
         Returns:
-            Health status dict
-            
-        Raises:
-            requests.RequestException: If health check fails
+            LazyTensor representing the deferred operation
         """
-        try:
-            response = self.session.get(
-                f"{self.server_url}/health",
-                timeout=timeout
+        kwargs = kwargs or {}
+        
+        # Handle special operations that force materialization
+        if func in cls._MATERIALIZATION_OPS:
+            # These operations need concrete tensors
+            materialized_args = tuple(
+                arg.materialize() if isinstance(arg, LazyTensor) else arg
+                for arg in args
             )
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException as e:
-            logger.error(f"Health check failed: {e}")
-            raise
-    
-    def execute(self, 
-                operation: str, 
-                tensor: torch.Tensor,
-                timeout: float = 30.0) -> torch.Tensor:
-        """
-        Execute operation on remote server.
+            return func(*materialized_args, **kwargs)
         
-        Args:
-            operation: Operation name (e.g., "relu")
-            tensor: Input tensor
-            timeout: Request timeout in seconds
-            
-        Returns:
-            Result tensor
-            
-        Raises:
-            requests.RequestException: If request fails
-            RuntimeError: If execution fails
-        """
-        start_time = time.time()
-        self.stats['requests_total'] += 1
+        # Normalize operation name
+        op_name = cls._normalize_op_name(func)
         
-        try:
-            # Log request
-            logger.debug(f"Executing {operation} on tensor {tensor.shape}")
-            
-            # Serialize tensor
-            tensor_bytes = io.BytesIO()
-            
-            # Move to CPU if on GPU (Phase 1 limitation)
-            if tensor.is_cuda:
-                logger.warning(
-                    "Moving GPU tensor to CPU for transfer "
-                    "(Phase 1 limitation)"
-                )
-                tensor_cpu = tensor.cpu()
-            else:
-                tensor_cpu = tensor
-            
-            torch.save(tensor_cpu, tensor_bytes)
-            tensor_bytes.seek(0)
-            
-            # Track size
-            tensor_size = len(tensor_bytes.getvalue())
-            self.stats['total_bytes_sent'] += tensor_size
-            
-            # Send HTTP POST
-            response = self.session.post(
-                f"{self.server_url}/execute",
-                files={
-                    'tensor_file': (
-                        'tensor.pt',
-                        tensor_bytes,
-                        'application/octet-stream'
-                    )
-                },
-                data={'operation': operation},
-                timeout=timeout
-            )
-            
-            # Check for errors
-            response.raise_for_status()
-            
-            # Track received size
-            self.stats['total_bytes_received'] += len(response.content)
-            
-            # Deserialize result
-            result = torch.load(io.BytesIO(response.content))
-            
-            # Track statistics
-            elapsed = time.time() - start_time
-            self.stats['requests_success'] += 1
-            self.stats['total_time_seconds'] += elapsed
-            
-            logger.debug(
-                f"Executed {operation}: "
-                f"{tensor.shape} -> {result.shape} "
-                f"in {elapsed:.3f}s"
-            )
-            
-            return result
-            
-        except requests.RequestException as e:
-            self.stats['requests_failed'] += 1
-            logger.error(f"HTTP error during remote execution: {e}")
-            raise
-        except Exception as e:
-            self.stats['requests_failed'] += 1
-            logger.error(f"Error during remote execution: {e}", exc_info=True)
-            raise RuntimeError(f"Remote execution failed: {e}")
-    
-    def get_stats(self) -> Dict[str, Any]:
-        """Get client statistics."""
-        stats = self.stats.copy()
-        
-        # Calculate derived stats
-        if stats['requests_total'] > 0:
-            stats['success_rate'] = (
-                stats['requests_success'] / stats['requests_total']
-            )
-            stats['avg_time_seconds'] = (
-                stats['total_time_seconds'] / stats['requests_success']
-                if stats['requests_success'] > 0 else 0.0
-            )
-        else:
-            stats['success_rate'] = 0.0
-            stats['avg_time_seconds'] = 0.0
-        
-        return stats
-    
-    def close(self):
-        """Close the session."""
-        self.session.close()
-        logger.info("Closed RemoteExecutionClient")
-
-
-# Global client instance (singleton)
-_global_client: Optional[RemoteExecutionClient] = None
-
-
-def get_client(server_url: str = "http://localhost:8888") -> RemoteExecutionClient:
-    """
-    Get global client instance.
-    
-    Args:
-        server_url: Server URL (default: http://localhost:8888)
-        
-    Returns:
-        RemoteExecutionClient instance
-    """
-    global _global_client
-    
-    if _global_client is None:
-        _global_client = RemoteExecutionClient(server_url)
-    
-    return _global_client
-
-
-def set_server_url(server_url: str):
-    """
-    Set server URL for global client.
-    
-    Args:
-        server_url: New server URL
-    """
-    global _global_client
-    _global_client = RemoteExecutionClient(server_url)
-```
-
-#### Step 3.2: Test Client (30 min)
-
-Create test file:
-
-```bash
-touch tests/test_simple_client.py
-```
-
-Content:
-```python
-"""
-Test simple client.
-File: tests/test_simple_client.py
-"""
-
-import pytest
-import torch
-from genie.runtime.simple_client import RemoteExecutionClient, get_client
-import subprocess
-import time
-import logging
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-
-def test_health_check():
-    """Test health check."""
-    client = RemoteExecutionClient(server_url="http://localhost:8888")
-    
-    try:
-        health = client.health_check()
-        
-        assert health['status'] == 'healthy'
-        assert 'device' in health
-        
-        logger.info(f"✅ Health check passed: {health}")
-        
-    except Exception as e:
-        pytest.fail(f"Health check failed: {e}")
-
-
-def test_execute_relu():
-    """Test executing relu."""
-    client = RemoteExecutionClient(server_url="http://localhost:8888")
-    
-    # Create test tensor
-    x = torch.randn(10, 10)
-    
-    # Execute remotely
-    result = client.execute("relu", x)
-    
-    # Verify
-    expected = torch.relu(x)
-    assert result.shape == expected.shape
-    assert torch.allclose(result, expected, atol=1e-5)
-    
-    logger.info(f"✅ ReLU execution passed")
-
-
-def test_execute_multiple_operations():
-    """Test multiple operations."""
-    client = RemoteExecutionClient(server_url="http://localhost:8888")
-    
-    x = torch.randn(5, 5)
-    
-    operations = ['relu', 'sigmoid', 'tanh', 'abs']
-    
-    for op in operations:
-        result = client.execute(op, x)
-        
-        # Verify shape
-        assert result.shape == x.shape
-        
-        # Verify against local execution
-        expected = getattr(torch, op)(x)
-        assert torch.allclose(result, expected, atol=1e-5)
-        
-        logger.info(f"✅ {op} passed")
-
-
-def test_client_statistics():
-    """Test client statistics."""
-    client = RemoteExecutionClient(server_url="http://localhost:8888")
-    
-    # Execute some operations
-    x = torch.randn(10, 10)
-    client.execute("relu", x)
-    client.execute("sigmoid", x)
-    
-    # Get stats
-    stats = client.get_stats()
-    
-    assert stats['requests_total'] == 2
-    assert stats['requests_success'] == 2
-    assert stats['requests_failed'] == 0
-    assert stats['success_rate'] == 1.0
-    assert stats['avg_time_seconds'] > 0
-    
-    logger.info(f"✅ Statistics: {stats}")
-
-
-if __name__ == "__main__":
-    # Run tests
-    logger.info("=" * 60)
-    logger.info("Testing Simple Client")
-    logger.info("=" * 60)
-    logger.info("")
-    logger.info("Make sure server is running:")
-    logger.info("  python -m genie.runtime.simple_server")
-    logger.info("")
-    
-    test_health_check()
-    test_execute_relu()
-    test_execute_multiple_operations()
-    test_client_statistics()
-    
-    logger.info("")
-    logger.info("=" * 60)
-    logger.info("✅ All client tests passed!")
-    logger.info("=" * 60)
-```
-
-**Run tests:**
-```bash
-# Make sure server is running in other terminal!
-
-# Run with pytest
-pytest tests/test_simple_client.py -v
-
-# Or run directly
-python tests/test_simple_client.py
-```
-
-**Expected output:**
-```
-============================================================
-Testing Simple Client
-============================================================
-
-Make sure server is running:
-  python -m genie.runtime.simple_server
-
-INFO: ✅ Health check passed: {'status': 'healthy', 'device': 'cuda:0', ...}
-INFO: ✅ ReLU execution passed
-INFO: ✅ relu passed
-INFO: ✅ sigmoid passed
-INFO: ✅ tanh passed
-INFO: ✅ abs passed
-INFO: ✅ Statistics: {'requests_total': 6, 'requests_success': 6, ...}
-
-============================================================
-✅ All client tests passed!
-============================================================
-```
-
-**SUCCESS CHECKPOINT 9:** Client tests pass ✅
-
-#### Day 3 Checkpoint
-
-**End of Day 3 - YOU MUST HAVE:**
-- ✅ Client file created
-- ✅ All client tests passing
-- ✅ Can execute operations programmatically
-
-**Git commit:**
-```bash
-git add genie/runtime/simple_client.py tests/test_simple_client.py
-git commit -m "Day 3: Python client working"
-```
-
----
-
-### Day 4A: LazyTensor Device Fix (3 hours)
-
-**Goal:** Fix device inference only
-
-#### Step 4.1: Fix LazyTensor Device Inference (1 hour)
-
-**File to modify:** `genie/core/lazy_tensor.py`
-
-Find the `__init__` method (around line 50-100) and modify:
-
-```python
-def __init__(self, operation: str, inputs: List[Any], 
-             kwargs: Optional[Dict[str, Any]] = None):
-    """Create LazyTensor for a deferred operation."""
-    
-    self.id = f"lt_{next(self._id_counter)}"
-    self.operation = self._normalize_aten_name(operation)
-    self.inputs = inputs
-    self.kwargs = kwargs or {}
-    
-    # FIX: Device inference - check kwargs FIRST
-    self.device = self._infer_device_from_kwargs() or self._infer_device_from_inputs()
-    
-    # Rest of initialization...
-    shape_result = self._infer_shape()
-    if shape_result.is_ok:
-        self.shape = shape_result.unwrap()
-    else:
-        logger.debug(f"Shape inference failed: {shape_result.error}")
-        self.shape = None
-    
-    self.dtype = self._infer_dtype()
-    
-    self._metadata = None
-    self.materialized = False
-    self.concrete_value = None
-    
-    self._register_with_builders()
-```
-
-**Add NEW method** (around line 200, after other helper methods):
-
-```python
-def _infer_device_from_kwargs(self) -> Optional[torch.device]:
-    """
-    Infer device from kwargs.
-    
-    This is called FIRST, before checking inputs.
-    Fixes the device inference for factory functions like torch.randn.
-    """
-    if 'device' not in self.kwargs:
-        return None
-    
-    device_arg = self.kwargs['device']
-    
-    # Handle different device argument types
-    if isinstance(device_arg, torch.device):
-        return device_arg
-    elif isinstance(device_arg, str):
-        try:
-            return torch.device(device_arg)
-        except Exception as e:
-            logger.warning(f"Invalid device string '{device_arg}': {e}")
-            return None
-    elif isinstance(device_arg, int):
-        # e.g., device=0 means cuda:0
-        return torch.device(f"cuda:{device_arg}")
-    else:
-        logger.warning(f"Unknown device type: {type(device_arg)}")
-        return None
-```
-
-**Test the fix:**
-```bash
-python << EOF
-import torch
-from genie.core.lazy_tensor import LazyTensor
-
-# Test device inference
-x = torch.randn(10, 10, device="remote_accelerator:0")
-
-print(f"Type: {type(x)}")
-print(f"Device: {x.device}")
-print(f"Device type: {x.device.type if isinstance(x.device, torch.device) else 'unknown'}")
-
-# Check it's correct
-assert isinstance(x.device, torch.device), f"Device is {type(x.device)}, expected torch.device"
-assert x.device.type == "remote_accelerator", f"Device type is {x.device.type}, expected remote_accelerator"
-
-print("✅ Device inference fix works!")
-EOF
-```
-
-**SUCCESS CHECKPOINT 10:** Device inference works ✅
-
-#### Step 4.2: Modify Executor (1.5 hours)
-
-**File to modify:** `genie/core/executor.py`
-
-Find the `execute_subgraph` function and replace it:
-
-```python
-def execute_subgraph(lazy_tensor: 'LazyTensor') -> torch.Tensor:
-    """
-    Execute computation graph to materialize a LazyTensor.
-    
-    Routes to remote execution if device is remote_accelerator.
-    """
-    from genie.core.lazy_tensor import LazyTensor
-    
-    # CRITICAL: Check if already materialized (for correctness)
-    if lazy_tensor.materialized:
-        logger.debug(f"Tensor {lazy_tensor.id} already materialized, returning cached value")
-        return lazy_tensor.concrete_value
-    
-    # Check device type
-    if isinstance(lazy_tensor.device, torch.device):
-        is_remote = lazy_tensor.device.type == "remote_accelerator"
-    elif isinstance(lazy_tensor.device, str):
-        is_remote = "remote_accelerator" in lazy_tensor.device
-    else:
-        is_remote = False
-    
-    # Route to appropriate executor
-    if is_remote:
-        logger.info(f"Routing {lazy_tensor.id} to remote execution")
-        result = _execute_remote(lazy_tensor)
-    else:
-        logger.debug(f"Executing {lazy_tensor.id} locally")
-        result = _execute_local(lazy_tensor)
-    
-    # Cache result (CRITICAL for correctness)
-    lazy_tensor.concrete_value = result
-    lazy_tensor.materialized = True
-    
-    return result
-```
-
-**Add NEW function** (at end of file, before any existing _execute_local):
-
-```python
-def _execute_remote(lazy_tensor: 'LazyTensor') -> torch.Tensor:
-    """
-    Execute LazyTensor on remote server via HTTP.
-    
-    Phase 1 limitations:
-    - Only single-input operations
-    - Only supported operations (relu, sigmoid, tanh, abs)
-    """
-    from genie.runtime.simple_client import get_client
-    from genie.core.lazy_tensor import LazyTensor
-    import os
-    
-    # Get server URL from environment or use default
-    server_url = os.getenv('GENIE_SERVER_URL', 'http://localhost:8888')
-    
-    logger.info(f"🌐 Remote execution: {lazy_tensor.operation}")
-    logger.debug(f"   Tensor ID: {lazy_tensor.id}")
-    logger.debug(f"   Server: {server_url}")
-    
-    # Materialize inputs first (recursive)
-    materialized_inputs = []
-    for inp in lazy_tensor.inputs:
-        if isinstance(inp, LazyTensor):
-            logger.debug(f"   Materializing input: {inp.id}")
-            materialized_inputs.append(inp.materialize())
-        elif isinstance(inp, torch.Tensor):
-            materialized_inputs.append(inp)
-        else:
-            # Convert scalars to tensors
-            materialized_inputs.append(torch.tensor(inp))
-    
-    # Phase 1: Only support single-input operations
-    if len(materialized_inputs) != 1:
-        raise NotImplementedError(
-            f"Remote execution currently supports single-input operations only. "
-            f"Got {len(materialized_inputs)} inputs for {lazy_tensor.operation}. "
-            f"\n"
-            f"This will be fixed in Phase 2 (multi-input support)."
-        )
-    
-    input_tensor = materialized_inputs[0]
-    
-    # Get operation name (remove aten:: prefix)
-    operation = lazy_tensor.operation.replace("aten::", "")
-    
-    # Define supported operations
-    SUPPORTED_OPS = {'relu', 'sigmoid', 'tanh', 'abs', 'neg', 'exp', 'log', 'sqrt'}
-    
-    if operation not in SUPPORTED_OPS:
-        raise NotImplementedError(
-            f"Operation '{operation}' not supported for remote execution. "
-            f"Supported: {SUPPORTED_OPS}. "
-            f"\n"
-            f"This will be expanded in Phase 2."
-        )
-    
-    # Execute via HTTP
-    client = get_client(server_url=server_url)
-    
-    try:
-        result = client.execute(
-            operation=operation,
-            tensor=input_tensor,
-            timeout=30.0
+        # Create new LazyTensor for the result
+        result = cls(
+            operation=op_name,
+            inputs=list(args),
+            kwargs=kwargs
         )
         
-        logger.info(f"✅ Remote execution successful: {input_tensor.shape} -> {result.shape}")
         return result
+    
+    @classmethod
+    def __torch_function__(cls, func, types, args=(), kwargs=None):
+        """
+        Fallback for operations not going through __torch_dispatch__.
         
-    except Exception as e:
-        logger.error(f"❌ Remote execution failed: {e}")
-        raise RuntimeError(
-            f"Remote execution of {operation} failed: {e}\n"
-            f"Make sure server is running: python -m genie.runtime.simple_server"
+        This catches operations like:
+        - .cpu(), .cuda() (device transfers)
+        - .numpy(), .item() (conversion to non-tensor)
+        - .tolist() (conversion to Python types)
+        
+        All of these trigger materialization.
+        """
+        # Operations that force execution
+        if func in cls._MATERIALIZATION_OPS:
+            lazy_tensor = args[0]
+            materialized = lazy_tensor.materialize()
+            return func(materialized, *args[1:], **(kwargs or {}))
+        
+        # Try dispatching
+        return cls.__torch_dispatch__(func, types, args, kwargs)
+    
+    # ===================================================================
+    # FACTORY METHODS
+    # ===================================================================
+    
+    @classmethod
+    def randn(cls, *size, dtype=None, device=None, requires_grad=False):
+        """Create random normal LazyTensor."""
+        return cls(
+            operation='aten::randn',
+            inputs=list(size),
+            kwargs={'dtype': dtype, 'device': device, 'requires_grad': requires_grad},
+            shape=torch.Size(size),
+            dtype=dtype or torch.float32,
+            device=device
         )
-```
 
-**If `_execute_local` doesn't exist,** add this fallback:
+    @classmethod
+    def tensor(cls, data, dtype=None, device=None, requires_grad=False):
+        """Create LazyTensor from data."""
+        return cls(
+            operation='aten::tensor',
+            inputs=[data],
+            kwargs={'dtype': dtype, 'device': device, 'requires_grad': requires_grad},
+            shape=torch.Size(data.shape) if hasattr(data, 'shape') else torch.Size([]),
+            dtype=dtype or (data.dtype if hasattr(data, 'dtype') else torch.float32),
+            device=device
+        )
 
-```python
-def _execute_local(lazy_tensor: 'LazyTensor') -> torch.Tensor:
-    """
-    Execute LazyTensor locally (fallback).
+    @classmethod
+    def as_tensor(cls, data, dtype=None, device=None):
+        """Create LazyTensor from data (alias for tensor)."""
+        return cls.tensor(data, dtype=dtype, device=device)
+
+    @classmethod
+    def from_numpy(cls, ndarray, dtype=None, device=None):
+        """Create LazyTensor from numpy array."""
+        return cls(
+            operation='aten::from_numpy',
+            inputs=[ndarray],
+            kwargs={'dtype': dtype, 'device': device},
+            shape=torch.Size(ndarray.shape),
+            dtype=dtype or torch.from_numpy(ndarray).dtype,
+            device=device
+        )
     
-    This is a simple fallback that executes operations using torch.ops.aten.
-    """
-    from genie.core.lazy_tensor import LazyTensor
+    @classmethod
+    def zeros(cls, *size, dtype=None, device=None, requires_grad=False):
+        """Create zero-filled LazyTensor."""
+        return cls(
+            operation='aten::zeros',
+            inputs=list(size),
+            kwargs={'dtype': dtype, 'device': device, 'requires_grad': requires_grad},
+            shape=torch.Size(size),
+            dtype=dtype or torch.float32,
+            device=device
+        )
     
-    logger.debug(f"Local execution: {lazy_tensor.operation}")
+    @classmethod
+    def ones(cls, *size, dtype=None, device=None, requires_grad=False):
+        """Create one-filled LazyTensor."""
+        return cls(
+            operation='aten::ones',
+            inputs=list(size),
+            kwargs={'dtype': dtype, 'device': device, 'requires_grad': requires_grad},
+            shape=torch.Size(size),
+            dtype=dtype or torch.float32,
+            device=device
+        )
     
-    # Materialize inputs
-    materialized_inputs = []
-    for inp in lazy_tensor.inputs:
-        if isinstance(inp, LazyTensor):
-            materialized_inputs.append(inp.materialize())
-        elif isinstance(inp, torch.Tensor):
-            materialized_inputs.append(inp)
-        else:
-            materialized_inputs.append(torch.tensor(inp))
+    # ===================================================================
+    # MATERIALIZATION
+    # ===================================================================
     
-    # Get operation
-    operation = lazy_tensor.operation
-    
-    # Try to execute using torch.ops.aten
-    try:
-        # Get function from torch.ops.aten
-        parts = operation.split("::")
-        if len(parts) == 2 and parts[0] == "aten":
-            op_name = parts[1]
-            if hasattr(torch.ops.aten, op_name):
-                func = getattr(torch.ops.aten, op_name)
-                result = func(*materialized_inputs, **lazy_tensor.kwargs)
-                return result
+    def materialize(self) -> torch.Tensor:
+        """
+        Force execution of the computation graph.
         
-        # Fallback: try standard torch functions
-        op_name = operation.replace("aten::", "")
-        if hasattr(torch, op_name):
-            func = getattr(torch, op_name)
-            result = func(*materialized_inputs, **lazy_tensor.kwargs)
+        This traverses the DAG and executes operations to produce
+        a concrete tensor.
+        
+        Returns:
+            Concrete torch.Tensor with actual data
+        """
+        if LazyTensor._graph_builder is None:
+            raise RuntimeError("No graph builder registered")
+        
+        return LazyTensor._graph_builder.materialize(self)
+    
+    # Operations that force materialization
+    _MATERIALIZATION_OPS = {
+        torch.Tensor.cpu,
+        torch.Tensor.cuda,
+        torch.Tensor.numpy,
+        torch.Tensor.item,
+        torch.Tensor.tolist,
+        torch.Tensor.__bool__,
+        torch.Tensor.__int__,
+        torch.Tensor.__float__,
+    }
+    
+    # ===================================================================
+    # SHAPE INFERENCE
+    # ===================================================================
+    
+    @staticmethod
+    def _infer_shape(
+        operation: str,
+        inputs: List[Any],
+        kwargs: Dict[str, Any]
+    ) -> Optional[torch.Size]:
+        """
+        Infer output shape using PyTorch's meta tensor system.
+
+        This executes the operation on "fake" tensors that only track
+        shape/dtype without allocating storage.
+        """
+        # Fast path for simple operations (no FakeTensorMode overhead)
+        if operation in cls._SIMPLE_OPS:
+            try:
+                return cls._SIMPLE_OPS[operation](inputs)
+            except:
+                pass  # Fall through to FakeTensorMode
+
+        # Create cache key from operation and input shapes
+        input_shapes = []
+        for inp in inputs:
+            if hasattr(inp, 'shape'):
+                input_shapes.append(tuple(inp.shape))
+            else:
+                input_shapes.append(None)
+
+        cache_key = (operation, tuple(input_shapes))
+
+        # Check cache first
+        if cache_key in LazyTensor._shape_cache:
+            return LazyTensor._shape_cache[cache_key]
+
+        try:
+            # Use PyTorch's FakeTensor mode for accurate shape inference
+            from torch._subclasses.fake_tensor import FakeTensorMode
+
+            with FakeTensorMode():
+                # Convert inputs to fake tensors
+                fake_inputs = []
+                for inp in inputs:
+                    if isinstance(inp, LazyTensor):
+                        # Use the LazyTensor's shape
+                        fake_inputs.append(
+                            torch.empty(inp.shape, dtype=inp.dtype, device='meta')
+                        )
+                    elif isinstance(inp, torch.Tensor):
+                        # Convert to meta tensor
+                        fake_inputs.append(inp.to('meta'))
+                    else:
+                        # Scalar or non-tensor (keep as-is)
+                        fake_inputs.append(inp)
+
+                # Get operation function
+                op_func = LazyTensor._get_operation_function(operation)
+
+                # Execute on fake tensors (shape inference only)
+                fake_result = op_func(*fake_inputs, **kwargs)
+
+                # Extract shape
+                if isinstance(fake_result, torch.Tensor):
+                    result_shape = fake_result.shape
+                else:
+                    result_shape = torch.Size([])
+
+                # Cache result
+                LazyTensor._shape_cache[cache_key] = result_shape
+                return result_shape
+
+        except Exception as e:
+            logger.debug(f"Shape inference failed for {operation}: {e}")
+            # Fallback: try simple heuristics
+            result = LazyTensor._infer_shape_fallback(operation, inputs)
+            # Cache fallback result too
+            LazyTensor._shape_cache[cache_key] = result
             return result
+    
+    @staticmethod
+    def _infer_shape_fallback(
+        operation: str,
+        inputs: List[Any]
+    ) -> Optional[torch.Size]:
+        """
+        Fallback shape inference using simple heuristics.
         
-        raise NotImplementedError(f"Operation {operation} not implemented for local execution")
+        Used when FakeTensorMode fails (dynamic shapes, unsupported ops, etc.)
+        """
+        # Element-wise operations preserve shape
+        if operation in ['aten::relu', 'aten::sigmoid', 'aten::tanh', 
+                        'aten::abs', 'aten::neg', 'aten::exp', 'aten::log']:
+            if inputs and hasattr(inputs[0], 'shape'):
+                return inputs[0].shape
         
-    except Exception as e:
-        logger.error(f"Local execution failed: {e}")
-        raise
+        # Matrix multiplication
+        if operation in ['aten::matmul', 'aten::mm']:
+            if len(inputs) >= 2:
+                a_shape = getattr(inputs[0], 'shape', None)
+                b_shape = getattr(inputs[1], 'shape', None)
+                if a_shape and b_shape and len(a_shape) >= 2 and len(b_shape) >= 2:
+                    # (..., M, K) @ (..., K, N) -> (..., M, N)
+                    return torch.Size([*a_shape[:-1], b_shape[-1]])
+        
+        # Broadcasting operations
+        if operation in ['aten::add', 'aten::sub', 'aten::mul', 'aten::div']:
+            if len(inputs) >= 2:
+                a_shape = getattr(inputs[0], 'shape', None)
+                b_shape = getattr(inputs[1], 'shape', None)
+                if a_shape and b_shape:
+                    # Simple broadcasting (return larger shape)
+                    if len(a_shape) >= len(b_shape):
+                        return a_shape
+                    else:
+                        return b_shape
+        
+        # Unknown - return empty shape
+        return None
+    
+    @staticmethod
+    def _infer_dtype(inputs: List[Any], kwargs: Dict[str, Any]) -> Optional[torch.dtype]:
+        """Infer output dtype from inputs or kwargs."""
+        # Explicit dtype in kwargs
+        if 'dtype' in kwargs and kwargs['dtype'] is not None:
+            return kwargs['dtype']
+        
+        # Infer from first tensor input
+        for inp in inputs:
+            if isinstance(inp, (LazyTensor, torch.Tensor)):
+                return inp.dtype
+        
+        # Default
+        return None
+    
+    # ===================================================================
+    # UTILITIES
+    # ===================================================================
+    
+    @staticmethod
+    def _normalize_op_name(func) -> str:
+        """
+        Normalize operation names to canonical form.
+        
+        Examples:
+            torch.ops.aten.add.Tensor -> aten::add
+            torch.add -> aten::add
+            add -> aten::add
+        """
+        if hasattr(func, '__name__'):
+            name = func.__name__
+        elif hasattr(func, '_schema'):
+            # ATen operation with schema
+            schema_str = str(func._schema)
+            name = schema_str.split('(')[0]
+            if '::' in name:
+                name = name.split('::')[-1]
+        else:
+            name = str(func)
+        
+        # Remove overload suffix (e.g., add.Tensor -> add)
+        name = name.split('.')[0]
+        
+        # Ensure aten:: prefix
+        if not name.startswith('aten::'):
+            name = f'aten::{name}'
+        
+        return name
+    
+    @staticmethod
+    def _get_operation_function(operation: str):
+        """
+        Get PyTorch function for an operation name.
+        
+        Maps "aten::add" -> torch.ops.aten.add
+        """
+        if operation.startswith('aten::'):
+            op_name = operation[6:]  # Remove "aten::" prefix
+            try:
+                return getattr(torch.ops.aten, op_name)
+            except AttributeError:
+                # Fallback to torch namespace
+                return getattr(torch, op_name)
+        else:
+            return getattr(torch, operation)
+    
+    # ===================================================================
+    # PROPERTY ACCESSORS
+    # ===================================================================
+    
+    @property
+    def operation(self) -> str:
+        """Get the operation that created this tensor."""
+        return object.__getattribute__(self, '_operation')
+    
+    @property
+    def inputs(self) -> List[Any]:
+        """Get the input arguments to this operation."""
+        return object.__getattribute__(self, '_inputs')
+    
+    @property
+    def kwargs(self) -> Dict[str, Any]:
+        """Get the keyword arguments to this operation."""
+        return object.__getattribute__(self, '_kwargs')
+    
+    @property
+    def tensor_id(self) -> int:
+        """Get unique ID for this tensor."""
+        return object.__getattribute__(self, '_tensor_id')
+    
+    # ===================================================================
+    # STRING REPRESENTATION
+    # ===================================================================
+    
+    def __repr__(self) -> str:
+        return (f"LazyTensor(op={self.operation}, "
+                f"shape={self.shape}, dtype={self.dtype})")
+    
+    def __str__(self) -> str:
+        return self.__repr__()
 ```
 
-#### Step 4.3: Test LazyTensor Integration (1 hour)
+**Key Improvements:**
+1. ✅ Proper `torch.Tensor` subclass (uses `_make_subclass`)
+2. ✅ `__torch_dispatch__` automatically called by PyTorch
+3. ✅ FakeTensor for accurate shape inference
+4. ✅ Materialization only when needed
+5. ✅ Compatible with all PyTorch operations
 
-Create integration test:
+#### 1.2 Clean Factory Interception
 
-```bash
-touch tests/test_lazy_tensor_remote.py
-```
+**File: `genie/core/factory_interceptor.py` (NEW)**
 
-Content:
 ```python
 """
-Test LazyTensor with remote execution.
-File: tests/test_lazy_tensor_remote.py
+Factory function interceptor for tensor creation operations.
+
+This module wraps torch.randn, torch.zeros, etc. to return LazyTensors
+when device='remote_accelerator' is specified.
+
+Why necessary: Factory functions don't have LazyTensor arguments, so
+__torch_dispatch__ won't be called. We need explicit namespace wrapping.
 """
 
-import pytest
 import torch
-import subprocess
-import time
+import functools
 import logging
-import os
+from typing import Any, Callable, Dict, Optional
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def test_lazy_tensor_device():
-    """Test LazyTensor device is set correctly."""
-    x = torch.randn(10, 10, device="remote_accelerator:0")
+class FactoryInterceptor:
+    """
+    Intercepts PyTorch tensor creation functions.
     
-    # Check type
-    from genie.core.lazy_tensor import LazyTensor
-    assert isinstance(x, LazyTensor), f"Expected LazyTensor, got {type(x)}"
+    Wraps functions in the torch namespace to return LazyTensors when
+    the device argument specifies 'remote_accelerator'.
+    """
     
-    # Check device
-    assert isinstance(x.device, torch.device), f"Device is {type(x.device)}"
-    assert x.device.type == "remote_accelerator", f"Device type is {x.device.type}"
+    # Functions to intercept (complete list)
+    FACTORY_FUNCTIONS = [
+        # Basic creation
+        'randn', 'rand', 'randint', 'randn_like', 'rand_like', 'randint_like',
+        'zeros', 'ones', 'empty', 'full',
+        'zeros_like', 'ones_like', 'empty_like', 'full_like',
+
+        # Data conversion
+        'tensor', 'as_tensor', 'from_numpy',
+
+        # Special constructors
+        'eye', 'arange', 'linspace', 'logspace',
+
+        # Random distributions
+        'normal', 'randperm',
+    ]
     
-    logger.info(f"✅ LazyTensor device set correctly: {x.device}")
+    def __init__(self):
+        self._wrapped = False
+        self._original_functions: Dict[str, Callable] = {}
+    
+    def wrap(self):
+        """Wrap all factory functions in torch namespace."""
+        if self._wrapped:
+            logger.warning("Factory functions already wrapped")
+            return
+        
+        for func_name in self.FACTORY_FUNCTIONS:
+            if not hasattr(torch, func_name):
+                logger.debug(f"torch.{func_name} not found, skipping")
+                continue
+            
+            # Store original
+            self._original_functions[func_name] = getattr(torch, func_name)
+            
+            # Create wrapper
+            wrapper = self._create_wrapper(func_name)
+            
+            # Replace in torch namespace
+            setattr(torch, func_name, wrapper)
+        
+        self._wrapped = True
+        logger.info(f"Wrapped {len(self._original_functions)} factory functions")
+    
+    def unwrap(self):
+        """Restore original factory functions (for testing)."""
+        if not self._wrapped:
+            return
+        
+        for func_name, original_func in self._original_functions.items():
+            setattr(torch, func_name, original_func)
+        
+        self._wrapped = False
+        self._original_functions.clear()
+    
+    def _create_wrapper(self, func_name: str) -> Callable:
+        """Create wrapper function for a factory function."""
+        original_func = self._original_functions[func_name]
+
+        @functools.wraps(original_func)
+        def wrapper(*args, **kwargs):
+            # Check BOTH device argument AND capture context
+            device = kwargs.get('device')
+
+            # Import here to avoid circular dependency
+            from .capture import is_capturing
+
+            # Return LazyTensor if EITHER condition is true:
+            # 1. Device explicitly set to remote_accelerator (paper API)
+            # 2. Inside genie.capture() context (convenience API)
+            if self._is_remote_device(device) or is_capturing():
+                from .lazy_tensor import LazyTensor
+
+                # Call LazyTensor factory method
+                lazy_factory = getattr(LazyTensor, func_name, None)
+                if lazy_factory is not None:
+                    return lazy_factory(*args, **kwargs)
+                else:
+                    # Fallback: generic LazyTensor creation
+                    return LazyTensor(
+                        operation=f'aten::{func_name}',
+                        inputs=list(args),
+                        kwargs=kwargs
+                    )
+
+            # Only execute normally if BOTH are false:
+            # - Device is NOT remote_accelerator
+            # - NOT inside capture context
+            return original_func(*args, **kwargs)
+
+        return wrapper
+    
+    @staticmethod
+    def _is_remote_device(device: Any) -> bool:
+        """Check if device is remote_accelerator."""
+        if device is None:
+            return False
+        
+        device_str = str(device)
+        return ('remote_accelerator' in device_str or 
+                'privateuseone' in device_str)
 
 
-def test_lazy_tensor_stays_lazy():
-    """Test operations stay lazy."""
-    from genie.core.lazy_tensor import LazyTensor
+# Global interceptor instance
+_factory_interceptor = FactoryInterceptor()
+
+
+def wrap_factories():
+    """Wrap factory functions (call once at initialization)."""
+    _factory_interceptor.wrap()
+
+
+def unwrap_factories():
+    """Unwrap factory functions (for testing)."""
+    _factory_interceptor.unwrap()
+```
+
+**Key Points:**
+- ✅ Explicit about why this is needed (factory functions)
+- ✅ Complete list of ~20 functions
+- ✅ Unwrap support for testing
+- ✅ Clean separation from LazyTensor
+
+#### 1.3 Remove library.py
+
+**Action: Delete `genie/core/library.py`**
+
+**Rationale:**
+- `torch.library.impl` registrations are redundant
+- Factory interceptor + `__torch_dispatch__` provide complete coverage
+- Reduces complexity from 3 mechanisms to 2
+
+**Migration:**
+```python
+# Old: library.py registrations (DELETE)
+@register_operation_impl("add.Tensor")
+def add_impl(...):
+    ...
+
+# New: Automatic via __torch_dispatch__ (NO CODE NEEDED)
+# LazyTensor.__torch_dispatch__ handles add automatically
+```
+
+#### 1.4 Initialization Cleanup
+
+**File: `genie/__init__.py`**
+
+```python
+"""
+Genie: Semantic Disaggregated Execution Framework
+
+Clean initialization:
+1. Register device backend (optional, non-blocking)
+2. Wrap factory functions
+3. Set up LazyTensor graph builder
+"""
+
+import logging
+logger = logging.getLogger(__name__)
+
+# Version
+__version__ = "0.2.0"
+
+# Core interception setup
+def _initialize():
+    """Initialize Genie interception layer."""
+    try:
+        # Step 1: Try to register C++ backend (optional)
+        try:
+            from . import _C
+            _C.register_remote_accelerator_device()
+            logger.info("C++ backend registered")
+        except ImportError:
+            logger.info("C++ backend not available (Python-only mode)")
+        
+        # Step 2: Wrap factory functions (REQUIRED)
+        from .core.factory_interceptor import wrap_factories
+        wrap_factories()
+        
+        # Step 3: Initialize graph builder
+        from .core.graph_builder import initialize_global_builder
+        initialize_global_builder()
+        
+        logger.info("Genie initialized successfully")
+        
+    except Exception as e:
+        logger.error(f"Genie initialization failed: {e}")
+        raise
+
+# Initialize on import
+_initialize()
+
+# Public API
+from .core.lazy_tensor import LazyTensor
+from .core.capture import capture, get_graph
+from .semantic import annotate_graph
+
+__all__ = [
+    'LazyTensor',
+    'capture',
+    'get_graph',
+    'annotate_graph',
+]
+```
+
+---
+
+### Phase 2: Hybrid Graph Builder (Weeks 5-8)
+
+#### 2.1 Unified Graph Interface
+
+**File: `genie/core/graph_interface.py` (NEW)**
+
+```python
+"""
+Unified graph interface supporting both FX and LazyTensor DAG.
+
+Provides a common API that abstracts over the underlying representation.
+"""
+
+from abc import ABC, abstractmethod
+from typing import List, Dict, Any, Optional
+import torch.fx as fx
+
+
+class GraphNode(ABC):
+    """Abstract node in computation graph."""
     
-    x = torch.randn(10, 10, device="remote_accelerator:0")
-    y = x.relu()
+    @property
+    @abstractmethod
+    def id(self) -> str:
+        """Unique node identifier."""
+        pass
     
-    # Check both are LazyTensors
+    @property
+    @abstractmethod
+    def operation(self) -> str:
+        """Operation name (e.g., 'aten::add')."""
+        pass
+    
+    @property
+    @abstractmethod
+    def inputs(self) -> List['GraphNode']:
+        """Input nodes."""
+        pass
+    
+    @property
+    @abstractmethod
+    def metadata(self) -> Dict[str, Any]:
+        """Semantic metadata."""
+        pass
+
+
+class Graph(ABC):
+    """Abstract computation graph."""
+    
+    @abstractmethod
+    def nodes(self) -> List[GraphNode]:
+        """Get all nodes in topological order."""
+        pass
+    
+    @abstractmethod
+    def get_node(self, node_id: str) -> Optional[GraphNode]:
+        """Get node by ID."""
+        pass
+    
+    @abstractmethod
+    def topological_sort(self) -> List[GraphNode]:
+        """Get nodes in execution order."""
+        pass
+    
+    @property
+    @abstractmethod
+    def backend_type(self) -> str:
+        """Backend type: 'fx' or 'lazy_dag'."""
+        pass
+
+
+class FXGraphAdapter(Graph):
+    """Adapter for torch.fx.Graph."""
+    
+    def __init__(self, fx_graph: fx.Graph):
+        self.fx_graph = fx_graph
+        self._nodes_cache = None
+    
+    def nodes(self) -> List[GraphNode]:
+        if self._nodes_cache is None:
+            self._nodes_cache = [
+                FXNodeAdapter(node) 
+                for node in self.fx_graph.nodes
+                if node.op == 'call_function'
+            ]
+        return self._nodes_cache
+    
+    def get_node(self, node_id: str) -> Optional[GraphNode]:
+        for node in self.nodes():
+            if node.id == node_id:
+                return node
+        return None
+    
+    def topological_sort(self) -> List[GraphNode]:
+        # FX graph is already in topological order
+        return self.nodes()
+    
+    @property
+    def backend_type(self) -> str:
+        return 'fx'
+
+
+class FXNodeAdapter(GraphNode):
+    """Adapter for torch.fx.Node."""
+    
+    def __init__(self, fx_node: fx.Node):
+        self.fx_node = fx_node
+    
+    @property
+    def id(self) -> str:
+        return self.fx_node.name
+    
+    @property
+    def operation(self) -> str:
+        return str(self.fx_node.target)
+    
+    @property
+    def inputs(self) -> List[GraphNode]:
+        return [
+            FXNodeAdapter(arg)
+            for arg in self.fx_node.args
+            if isinstance(arg, fx.Node)
+        ]
+    
+    @property
+    def metadata(self) -> Dict[str, Any]:
+        return self.fx_node.meta.get('semantic', {})
+
+
+class LazyDAGAdapter(Graph):
+    """Adapter for LazyTensor DAG."""
+    
+    def __init__(self, root_tensor):
+        from .lazy_tensor import LazyTensor
+        self.root = root_tensor
+        self._nodes_cache = None
+    
+    def nodes(self) -> List[GraphNode]:
+        if self._nodes_cache is None:
+            self._nodes_cache = self._collect_nodes()
+        return self._nodes_cache
+    
+    def _collect_nodes(self) -> List[GraphNode]:
+        """Collect all nodes reachable from root."""
+        from .lazy_tensor import LazyTensor
+        
+        visited = set()
+        result = []
+        
+        def visit(tensor):
+            if not isinstance(tensor, LazyTensor):
+                return
+            if id(tensor) in visited:
+                return
+            visited.add(id(tensor))
+            
+            # Visit inputs first (post-order)
+            for inp in tensor.inputs:
+                visit(inp)
+            
+            result.append(LazyDAGNodeAdapter(tensor))
+        
+        visit(self.root)
+        return result
+    
+    def get_node(self, node_id: str) -> Optional[GraphNode]:
+        for node in self.nodes():
+            if node.id == node_id:
+                return node
+        return None
+    
+    def topological_sort(self) -> List[GraphNode]:
+        # Already collected in topological order
+        return self.nodes()
+    
+    @property
+    def backend_type(self) -> str:
+        return 'lazy_dag'
+
+
+class LazyDAGNodeAdapter(GraphNode):
+    """Adapter for LazyTensor node."""
+    
+    def __init__(self, lazy_tensor):
+        self.tensor = lazy_tensor
+    
+    @property
+    def id(self) -> str:
+        return str(self.tensor.tensor_id)
+    
+    @property
+    def operation(self) -> str:
+        return self.tensor.operation
+    
+    @property
+    def inputs(self) -> List[GraphNode]:
+        from .lazy_tensor import LazyTensor
+        return [
+            LazyDAGNodeAdapter(inp)
+            for inp in self.tensor.inputs
+            if isinstance(inp, LazyTensor)
+        ]
+    
+    @property
+    def metadata(self) -> Dict[str, Any]:
+        # Metadata stored separately in registry
+        try:
+            from genie.semantic.metadata_registry import get_metadata_registry
+            registry = get_metadata_registry()
+            meta = registry.get_metadata(self.id)
+            return meta.to_dict() if meta else {}
+        except Exception:
+            return {}
+```
+
+#### 2.2 Hybrid Graph Builder
+
+**File: `genie/core/graph_builder.py` (NEW)**
+
+```python
+"""
+Hybrid graph builder: Tries FX first, falls back to LazyTensor DAG.
+
+This provides the "single source of truth" while maintaining compatibility
+with models that have dynamic control flow.
+"""
+
+import torch
+import torch.fx as fx
+from typing import Optional, Any
+import logging
+
+from .graph_interface import Graph, FXGraphAdapter, LazyDAGAdapter
+from .lazy_tensor import LazyTensor
+
+logger = logging.getLogger(__name__)
+
+
+class HybridGraphBuilder:
+    """
+    Builds computation graph using hybrid strategy.
+    
+    Strategy:
+    1. Try torch.fx.symbolic_trace (covers ~80% of models)
+    2. If that fails, use LazyTensor DAG (always works)
+    
+    Both representations are exposed through unified Graph interface.
+    """
+    
+    def __init__(self):
+        self.fx_graph: Optional[fx.Graph] = None
+        self.fx_module: Optional[fx.GraphModule] = None
+        self.use_fx = True
+        
+        # LazyTensor tracking
+        self.root_tensor: Optional[LazyTensor] = None
+        self.all_tensors = {}  # tensor_id -> LazyTensor
+    
+    def build_from_model(self, model: torch.nn.Module, *args) -> Graph:
+        """
+        Build graph from model using hybrid strategy.
+        
+        Args:
+            model: PyTorch model to trace
+            *args: Example inputs
+        
+        Returns:
+            Unified Graph interface
+        """
+        # Try FX first
+        try:
+            logger.info("Attempting FX symbolic trace...")
+            self.fx_module = fx.symbolic_trace(model)
+            self.fx_graph = self.fx_module.graph
+            self.use_fx = True
+            logger.info(f"✓ FX trace successful ({len(list(self.fx_graph.nodes))} nodes)")
+            return FXGraphAdapter(self.fx_graph)
+        
+        except Exception as e:
+            # FX failed - fall back to LazyTensor DAG
+            logger.info(f"FX trace failed: {e}")
+            logger.info("Falling back to LazyTensor DAG capture...")
+            
+            self.use_fx = False
+            
+            # Capture using LazyTensor
+            output = model(*args)
+            
+            if not isinstance(output, LazyTensor):
+                raise RuntimeError(
+                    "Model output is not a LazyTensor. "
+                    "Make sure tensors are on remote_accelerator device."
+                )
+            
+            self.root_tensor = output
+            logger.info(f"✓ LazyTensor DAG built successfully")
+            return LazyDAGAdapter(self.root_tensor)
+    
+    def build_from_capture(self) -> Graph:
+        """
+        Build graph from captured LazyTensors.
+        
+        Used with context manager:
+            with genie.capture():
+                output = model(input)
+            graph = builder.build_from_capture()
+        """
+        if self.root_tensor is None:
+            raise RuntimeError("No LazyTensor captured")
+        
+        return LazyDAGAdapter(self.root_tensor)
+    
+    def add_operation(self, tensor: LazyTensor):
+        """
+        Register LazyTensor operation (called from LazyTensor.__init__).
+        
+        This tracks all tensors as they're created, enabling DAG construction.
+        """
+        self.all_tensors[tensor.tensor_id] = tensor
+        self.root_tensor = tensor  # Track most recent (used as output)
+    
+    def get_graph(self) -> Optional[Graph]:
+        """Get the current graph (FX or LazyDAG)."""
+        if self.use_fx and self.fx_graph is not None:
+            return FXGraphAdapter(self.fx_graph)
+        elif self.root_tensor is not None:
+            return LazyDAGAdapter(self.root_tensor)
+        else:
+            return None
+
+
+# Global graph builder
+_global_builder: Optional[HybridGraphBuilder] = None
+
+
+def initialize_global_builder():
+    """Initialize global graph builder (called on import)."""
+    global _global_builder
+    _global_builder = HybridGraphBuilder()
+    
+    # Set as LazyTensor's graph builder
+    LazyTensor._graph_builder = _global_builder
+
+
+def get_global_builder() -> HybridGraphBuilder:
+    """Get the global graph builder."""
+    if _global_builder is None:
+        raise RuntimeError("Graph builder not initialized")
+    return _global_builder
+```
+
+#### 2.3 Capture Context Manager
+
+**File: `genie/core/capture.py` (NEW)**
+
+```python
+"""
+Capture context manager with thread-local state signaling.
+
+This module provides the capture context manager that signals to the factory
+interceptor when operations should return LazyTensors instead of concrete tensors.
+Uses thread-local storage for thread safety.
+
+Threading Behavior:
+- Each thread has its own capture state
+- Capture contexts don't interfere across threads
+- Nested contexts work correctly within each thread
+- State is properly isolated and restored
+"""
+
+import threading
+from contextlib import contextmanager
+from typing import Optional
+
+from .graph_interface import Graph
+from .graph_builder import get_global_builder
+
+# Thread-local state for capture context
+# This signals to factory interceptor that we're in capture mode
+_capture_context = threading.local()
+
+
+class CaptureContext:
+    """Context for capturing operations into a graph."""
+
+    def __init__(self):
+        self.builder = get_global_builder()
+        self.prev_root = None
+        self.prev_active = False
+
+    def __enter__(self):
+        # Signal to factory interceptor that we're in capture mode
+        self.prev_active = getattr(_capture_context, 'active', False)
+        _capture_context.active = True
+
+        # Save previous state
+        self.prev_root = self.builder.root_tensor
+        # Start fresh capture
+        self.builder.root_tensor = None
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        # Restore previous state
+        _capture_context.active = self.prev_active
+
+
+@contextmanager
+def capture():
+    """
+    Capture operations into a computation graph.
+
+    Usage:
+        with genie.capture():
+            y = model(x)
+
+        graph = genie.get_graph()
+
+    Inside the capture context, factory functions like torch.randn() will
+    return LazyTensors instead of concrete tensors, enabling graph capture.
+    """
+    ctx = CaptureContext()
+    with ctx:
+        yield ctx
+
+
+def get_graph() -> Optional[Graph]:
+    """Get the most recently captured graph."""
+    builder = get_global_builder()
+    return builder.get_graph()
+
+
+def is_capturing() -> bool:
+    """Check if currently inside a capture context."""
+    return getattr(_capture_context, 'active', False)
+```
+
+**Deliverables (Phase 2):**
+- ✅ Unified graph interface (FX + LazyDAG)
+- ✅ Automatic fallback when FX fails
+- ✅ Clean capture API (`with genie.capture()`)
+
+---
+
+### Phase 3: Semantic Analysis (Weeks 9-12)
+
+*[Continue with detailed implementation of semantic analysis, scheduler, etc.]*
+
+---
+
+## 5. API Design
+
+### 5.1 Public API (v1.0)
+
+```python
+# ===================================================================
+# CORE API
+# ===================================================================
+
+import genie
+
+# Initialize Genie (optional - auto-initialized on import)
+genie.init()
+
+# Option 1: Context-based API (recommended for new code)
+with genie.capture():
+    output = model(input)
+
+# Option 2: Device-based API (legacy compatibility)
+x = torch.randn(10, device='remote_accelerator:0')
+output = model(x)
+
+# Option 3: Hybrid API (flexible)
+with genie.capture():
+    x = torch.randn(10, device='remote_accelerator:0')  # Explicit device
+    output = model(x)
+
+# Get captured graph (works with all API styles)
+graph = genie.get_graph()
+
+# ===================================================================
+# SEMANTIC ANALYSIS
+# ===================================================================
+
+# Annotate graph with semantic information
+annotated_graph = genie.annotate(graph)
+
+# Access semantic metadata
+for node in annotated_graph.nodes():
+    phase = node.metadata.get('phase')  # ExecutionPhase
+    modality = node.metadata.get('modality')  # Modality
+    compute = node.metadata.get('compute_flops')  # float
+
+# ===================================================================
+# SCHEDULING
+# ===================================================================
+
+# Define cluster
+devices = [
+    genie.Device(id='gpu0', type='GPU', memory_gb=16, compute_tflops=10, network_gbps=100),
+    genie.Device(id='gpu1', type='GPU', memory_gb=16, compute_tflops=10, network_gbps=100),
+]
+
+# Create scheduler
+scheduler = genie.Scheduler(
+    devices=devices,
+    policy='min_latency'  # or 'min_cost', 'max_throughput'
+)
+
+# Generate execution plan
+plan = scheduler.schedule(annotated_graph)
+
+# Inspect plan
+print(f"Estimated latency: {plan.latency_ms:.2f}ms")
+print(f"Device placement:")
+for node, device in plan.placement.items():
+    print(f"  {node.id} -> {device.id}")
+
+# ===================================================================
+# EXECUTION
+# ===================================================================
+
+# Execute locally (Tier 1)
+result = genie.execute_local(plan, inputs)
+
+# Execute on cluster (Tier 2)
+genie.init_cluster(config='cluster.yaml')
+result = genie.execute(plan, inputs)
+
+# Execute with RDMA (Tier 3)
+genie.init_cluster(config='production.yaml', rdma=True)
+result = genie.execute(plan, inputs)
+
+# ===================================================================
+# HIGH-LEVEL API
+# ===================================================================
+
+# One-shot execution (capture + analyze + schedule + execute)
+result = genie.run(
+    model,
+    input,
+    devices=devices,
+    policy='min_latency'
+)
+
+# ===================================================================
+# CONFIGURATION
+# ===================================================================
+
+# Set backend preferences
+genie.set_backend('rdma')  # 'local', 'grpc', 'rdma'
+
+# Enable debug logging
+genie.set_log_level('DEBUG')
+
+# Get statistics
+stats = genie.get_stats()
+print(f"Operations captured: {stats['total_ops']}")
+print(f"Graph size: {stats['graph_nodes']}")
+print(f"Overhead: {stats['overhead_ns']}ns/op")
+```
+
+### 5.2 Configuration API
+
+```python
+# cluster.yaml (Tier 2)
+cluster:
+  devices:
+    - id: gpu0
+      address: 192.168.1.10:8888
+      type: GPU
+      memory_gb: 16
+      compute_tflops: 10
+      network_gbps: 100
+    
+    - id: gpu1
+      address: 192.168.1.11:8888
+      type: GPU
+      memory_gb: 16
+      compute_tflops: 10
+      network_gbps: 100
+  
+  backend: grpc
+  
+  scheduling:
+    policy: min_latency
+    recomputation_threshold_ms: 5.0
+    
+  fault_tolerance:
+    enabled: true
+    checkpoint_interval: 100  # operations
+```
+
+### 5.3 Extension Points
+
+```python
+# Custom semantic patterns
+class MyCustomPattern(genie.PatternMatcher):
+    def match(self, graph):
+        # Identify custom pattern
+        pass
+    
+    def annotate(self, nodes):
+        # Add semantic metadata
+        pass
+
+genie.register_pattern(MyCustomPattern())
+
+# Custom cost model
+class MyCustomCostModel(genie.CostModel):
+    def estimate_compute(self, node):
+        # Custom compute cost estimation
+        pass
+    
+    def estimate_transfer(self, src, dst, bytes):
+        # Custom transfer cost estimation
+        pass
+
+scheduler.set_cost_model(MyCustomCostModel())
+
+# Custom placement strategy
+class MyCustomPlacer(genie.PlacementStrategy):
+    def place(self, graph, devices):
+        # Custom placement algorithm
+        pass
+
+scheduler.set_placement_strategy(MyCustomPlacer())
+```
+
+### 5.4 Choosing Your API Style
+
+#### When to Use Device-Based API
+
+**Use when:**
+- Reproducing paper results
+- Porting existing disaggregation code
+- Want explicit device placement
+- Single forward pass
+
+```python
+# Paper's original API - no changes needed
+model = MyLLM()
+x = torch.randn(batch_size, seq_len, device="remote_accelerator:0")
+output = model(x)  # All operations intercepted automatically
+```
+
+**Advantages:**
+- ✅ Matches HotNets paper exactly
+- ✅ Explicit device specification
+- ✅ Simple for single-pass scenarios
+
+**Disadvantages:**
+- ❌ Less convenient for complex workflows
+- ❌ Must remember device string
+
+#### When to Use Context-Based API
+
+**Use when:**
+- Writing new code
+- Want cleaner syntax
+- Building complex graphs
+- Multiple forward passes
+
+```python
+# New convenience API
+with genie.capture():
+    x = torch.randn(batch_size, seq_len)  # No device needed
+    output = model(x)  # All operations intercepted
+
+# Graph available for analysis/scheduling
+graph = genie.get_graph()
+```
+
+**Advantages:**
+- ✅ Cleaner, more readable code
+- ✅ Explicit control over capture scope
+- ✅ No hardcoded device strings
+
+**Disadvantages:**
+- ❌ Different from paper (but more convenient)
+- ❌ Requires context manager
+
+#### When to Use Hybrid API
+
+**Use when:**
+- Need fine-grained control
+- Mixing captured and native code
+- Debugging
+
+```python
+# Flexible hybrid approach
+with genie.capture():
+    # Some tensors captured
+    x = torch.randn(10)
+
+    # Some on specific devices
+    y = torch.randn(10, device="remote_accelerator:1")
+
+    # Some native (not captured)
+    z = torch.randn(10)  # Normal if outside capture
+
+    output = model(x, y, z)
+```
+
+**Advantages:**
+- ✅ Maximum flexibility
+- ✅ Fine-grained control
+- ✅ Can mix different execution modes
+
+**Disadvantages:**
+- ❌ More complex to understand
+- ❌ Requires careful scoping
+
+#### API Compatibility Matrix
+
+| Feature | Device-Based | Context-Based | Hybrid |
+|---------|-------------|---------------|---------|
+| Paper compatibility | ✅ Full | ❌ None | ✅ Full |
+| New code convenience | ❌ Poor | ✅ Excellent | ✅ Good |
+| Complex workflows | ❌ Limited | ✅ Good | ✅ Excellent |
+| Debugging | ✅ Explicit | ✅ Clear | ⚠️ Complex |
+| Multi-pass scenarios | ❌ Manual | ✅ Easy | ✅ Flexible |
+
+---
+
+## 6. Testing Strategy
+
+### 6.1 Test Coverage Goals
+
+- **Unit tests:** >90% code coverage
+- **Integration tests:** All major workflows
+- **Performance tests:** Validate overhead targets
+- **Correctness tests:** Compare against native PyTorch
+
+### 6.2 Test Structure
+
+```
+tests/
+├── unit/
+│   ├── test_lazy_tensor.py          # LazyTensor subclass
+│   ├── test_factory_interceptor.py  # Factory wrapping
+│   ├── test_graph_builder.py        # Graph construction
+│   ├── test_semantic_analyzer.py    # Pattern matching
+│   └── test_scheduler.py            # Placement optimization
+│
+├── integration/
+│   ├── test_simple_models.py        # Linear, MLP, CNN
+│   ├── test_transformers.py         # BERT, GPT, ViT
+│   ├── test_multimodal.py           # CLIP, Flamingo
+│   └── test_dynamic_control.py      # Models with if/loops
+│
+├── performance/
+│   ├── benchmark_interception.py    # Overhead measurement
+│   ├── benchmark_scheduling.py      # Scheduler performance
+│   └── benchmark_e2e.py             # End-to-end latency
+│
+├── correctness/
+│   ├── test_numerical.py            # Compare with native PyTorch
+│   ├── test_gradient.py             # Autograd correctness
+│   └── test_determinism.py          # Reproducibility
+│
+└── deployment/
+    ├── test_tier1_local.py          # Single machine
+    ├── test_tier2_cluster.py        # Multi-node gRPC
+    └── test_tier3_rdma.py           # RDMA datapath
+```
+
+### 6.3 Key Test Cases
+
+**Test: `test_lazy_tensor.py`**
+
+```python
+def test_lazy_tensor_is_proper_subclass():
+    """Verify LazyTensor is recognized as torch.Tensor."""
+    x = LazyTensor.randn(10, 10)
+
+    assert isinstance(x, torch.Tensor)
+    assert isinstance(x, LazyTensor)
+
+
+def test_operations_intercepted():
+    """Verify operations create new LazyTensors."""
+    x = LazyTensor.randn(10, 10)
+    y = LazyTensor.randn(10, 10)
+
+    z = x + y  # Should return LazyTensor
+    assert isinstance(z, LazyTensor)
+    assert z.operation == 'aten::add'
+
+
+def test_no_execution_until_materialization():
+    """Verify operations are deferred."""
+    x = LazyTensor.randn(10, 10)
+    y = x @ x
+
+    # No computation yet
+    assert not hasattr(y, '_concrete_value')
+
+    # Trigger materialization
+    result = y.cpu()
+
+    # Now we have concrete tensor
+    assert isinstance(result, torch.Tensor)
+    assert result.shape == (10, 10)
+
+
+def test_correctness_vs_native():
+    """Verify numerical correctness."""
+    # Native PyTorch
+    torch.manual_seed(42)
+    x_native = torch.randn(32, 64)
+    y_native = torch.randn(64, 128)
+    z_native = (x_native @ y_native).relu()
+
+    # Genie LazyTensor
+    torch.manual_seed(42)
+    x_lazy = LazyTensor.randn(32, 64)
+    y_lazy = LazyTensor.randn(64, 128)
+    z_lazy = (x_lazy @ y_lazy).relu()
+    z_concrete = z_lazy.cpu()
+
+    # Should be identical
+    torch.testing.assert_close(z_concrete, z_native)
+
+
+def test_dynamic_control_flow():
+    """Verify fallback to LazyDAG for dynamic models."""
+    class DynamicModel(torch.nn.Module):
+        def forward(self, x):
+            if x.sum() > 0:  # Data-dependent branch
+                return x.relu()
+            else:
+                return x.tanh()
+
+    model = DynamicModel()
+
+    with genie.capture():
+        x = torch.randn(10, 10)
+        y = model(x)
+
+    graph = genie.get_graph()
+    assert graph.backend_type == 'lazy_dag'  # Should fall back from FX
+
+
+def test_nested_capture():
+    """Verify thread-local state works correctly."""
+    with genie.capture():
+        x = torch.randn(10)  # Should be LazyTensor
+
+        # Nested context (should maintain state)
+        with genie.capture():
+            y = torch.randn(10)  # Also LazyTensor
+
+        z = torch.randn(10)  # Still LazyTensor (outer context active)
+
     assert isinstance(x, LazyTensor)
     assert isinstance(y, LazyTensor)
-    
-    # Check neither is materialized
-    assert not x.materialized, "Input should not be materialized"
-    assert not y.materialized, "Output should not be materialized"
-    
-    logger.info("✅ Operations stay lazy")
+    assert isinstance(z, LazyTensor)
 
 
-def test_remote_execution():
-    """Test actual remote execution."""
-    logger.info("")
-    logger.info("=" * 60)
-    logger.info("🧪 Testing Remote Execution")
-    logger.info("=" * 60)
-    logger.info("")
-    logger.info("IMPORTANT: Make sure server is running!")
-    logger.info("  python -m genie.runtime.simple_server")
-    logger.info("")
-    
-    # Create LazyTensor on remote device
+def test_mixed_device_operations():
+    """Verify behavior when mixing captured and native tensors."""
+    with genie.capture():
+        x_lazy = torch.randn(10, 10)
+
+    x_cpu = torch.randn(10, 10)  # Native CPU tensor
+
+    # What happens here?
+    y = x_lazy + x_cpu  # Should materialize x_lazy and compute on CPU
+    assert isinstance(y, torch.Tensor)
+    assert not isinstance(y, LazyTensor)  # Should be materialized
+
+
+def test_both_api_styles():
+    """Verify both device-based and context-based APIs work."""
+    # Device-based API (legacy)
+    x_device = torch.randn(10, 10, device='remote_accelerator:0')
+    assert isinstance(x_device, LazyTensor)
+
+    # Context-based API (new)
+    with genie.capture():
+        x_context = torch.randn(10, 10)
+        assert isinstance(x_context, LazyTensor)
+
+    # Hybrid API
+    with genie.capture():
+        x_hybrid = torch.randn(10, 10, device='remote_accelerator:0')
+        assert isinstance(x_hybrid, LazyTensor)
+
+
+def test_device_api_works_without_capture():
+    """Verify device-based API works outside capture context."""
+    # This is the paper's API - must work!
     x = torch.randn(10, 10, device="remote_accelerator:0")
-    logger.info(f"1. Created LazyTensor: {x.device}")
-    
-    # Apply operation (stays lazy)
-    y = x.relu()
-    logger.info(f"2. Applied relu (still lazy): materialized={y.materialized}")
-    
-    # Materialize (triggers remote execution)
-    logger.info("3. Materializing (will execute remotely)...")
-    result = y.materialize()
-    
-    # Verify result
-    assert isinstance(result, torch.Tensor), "Result should be torch.Tensor"
-    assert result.shape == (10, 10), f"Shape mismatch: {result.shape}"
-    assert (result >= 0).all(), "ReLU should produce non-negative values"
-    
-    logger.info(f"4. ✅ Remote execution successful!")
-    logger.info(f"   Result shape: {result.shape}")
-    logger.info(f"   Result device: {result.device}")
-    logger.info(f"   Result dtype: {result.dtype}")
-    logger.info("")
+    assert isinstance(x, LazyTensor), "Device API broken!"
+
+    y = x @ x
+    assert isinstance(y, LazyTensor)
+
+    # Materialize
+    result = y.cpu()
+    assert isinstance(result, torch.Tensor)
+    assert result.shape == (10, 10)
 
 
-def test_remote_execution_correctness():
-    """Test remote execution matches local execution."""
-    # Create identical tensors
-    x_cpu = torch.randn(10, 10)
-    x_remote = x_cpu.clone()
-    
-    # Local execution
-    y_local = torch.relu(x_cpu)
-    
-    # Remote execution
-    # Move to remote device
-    from genie.core.lazy_tensor import LazyTensor
-    x_lazy = LazyTensor.lift(x_remote)
-    x_lazy.device = torch.device("remote_accelerator:0")
-    y_lazy = x_lazy.relu()
-    y_remote = y_lazy.materialize()
-    
-    # Compare
-    assert torch.allclose(y_local, y_remote, atol=1e-5), "Results don't match!"
-    
-    logger.info("✅ Remote execution matches local execution")
+def test_capture_api_works_without_device():
+    """Verify context-based API works without device argument."""
+    # This is the new convenience API
+    with genie.capture():
+        x = torch.randn(10, 10)  # No device argument
+        assert isinstance(x, LazyTensor), "Capture API broken!"
+
+        y = x @ x
+        assert isinstance(y, LazyTensor)
+
+    # Materialize outside context
+    result = y.cpu()
+    assert isinstance(result, torch.Tensor)
+    assert result.shape == (10, 10)
 
 
-if __name__ == "__main__":
-    logger.info("=" * 60)
-    logger.info("LazyTensor Remote Execution Tests")
-    logger.info("=" * 60)
-    logger.info("")
-    
-    # Run tests
-    test_lazy_tensor_device()
-    test_lazy_tensor_stays_lazy()
-    test_remote_execution()
-    test_remote_execution_correctness()
-    
-    logger.info("")
-    logger.info("=" * 60)
-    logger.info("✅ All tests passed!")
-    logger.info("=" * 60)
+def test_capture_context_is_thread_safe():
+    """Verify capture contexts don't interfere across threads."""
+    import threading
+
+    results = {}
+
+    def thread1_work():
+        with genie.capture():
+            x = torch.randn(10)
+            results['thread1'] = isinstance(x, LazyTensor)
+
+    def thread2_work():
+        # NOT in capture context
+        x = torch.randn(10)
+        results['thread2'] = not isinstance(x, LazyTensor)
+
+    t1 = threading.Thread(target=thread1_work)
+    t2 = threading.Thread(target=thread2_work)
+
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    assert results['thread1'], "Thread 1 should have LazyTensor"
+    assert results['thread2'], "Thread 2 should have normal tensor"
+
+
+def test_nested_capture_contexts():
+    """Verify nested capture contexts maintain correct state."""
+    with genie.capture():
+        x1 = torch.randn(10)
+        assert isinstance(x1, LazyTensor)
+
+        with genie.capture():
+            x2 = torch.randn(10)
+            assert isinstance(x2, LazyTensor)
+
+        x3 = torch.randn(10)
+        assert isinstance(x3, LazyTensor)  # Still in outer context
+
+    x4 = torch.randn(10)
+    assert not isinstance(x4, LazyTensor)  # Outside all contexts
 ```
 
-**Run test:**
-```bash
-# Make sure server is running!
+**Test: `benchmark_interception.py`**
 
-# Run test
-python tests/test_lazy_tensor_remote.py
-```
+```python
+def benchmark_interception_overhead():
+    """Measure per-operation overhead."""
+    import time
 
-**Expected output:**
-```
-============================================================
-LazyTensor Remote Execution Tests
-============================================================
+    # Warmup
+    for _ in range(100):
+        x = torch.randn(100, 100)
+        y = x + 1
 
-INFO: ✅ LazyTensor device set correctly: remote_accelerator:0
-INFO: ✅ Operations stay lazy
+    # Benchmark native
+    start = time.perf_counter()
+    for _ in range(10000):
+        x = torch.randn(100, 100)
+        y = x + 1
+    native_time = time.perf_counter() - start
 
-============================================================
-🧪 Testing Remote Execution
-============================================================
+    # Benchmark Genie with context-based API
+    with genie.capture():
+        start = time.perf_counter()
+        for _ in range(10000):
+            x = torch.randn(100, 100)  # Uses capture context
+            y = x + 1
+        genie_time = time.perf_counter() - start
 
-IMPORTANT: Make sure server is running!
-  python -m genie.runtime.simple_server
+    overhead_per_op = (genie_time - native_time) / 10000
+    overhead_ns = overhead_per_op * 1e9
 
-INFO: 1. Created LazyTensor: remote_accelerator:0
-INFO: 2. Applied relu (still lazy): materialized=False
-INFO: 3. Materializing (will execute remotely)...
-INFO: 🌐 Remote execution: aten::relu
-INFO: ✅ Remote execution successful: torch.Size([10, 10]) -> torch.Size([10, 10])
-INFO: 4. ✅ Remote execution successful!
-   Result shape: torch.Size([10, 10])
-   Result device: cpu
-   Result dtype: torch.float32
+    print(f"Native: {native_time:.4f}s")
+    print(f"Genie: {genie_time:.4f}s")
+    print(f"Overhead: {overhead_ns:.1f}ns/op")
 
-INFO: ✅ Remote execution matches local execution
+    # Target: <1000ns
+    assert overhead_ns < 1000, f"Overhead too high: {overhead_ns}ns"
 
-============================================================
-✅ All tests passed!
-============================================================
-```
 
-**SUCCESS CHECKPOINT 11:** LazyTensor remote execution works ✅
+def benchmark_capture_context_overhead():
+    """Measure overhead of capture context signaling."""
+    import time
 
-#### Day 4 Checkpoint
+    n_ops = 10000
 
-**End of Day 4 - YOU MUST HAVE:**
-- ✅ LazyTensor device inference fixed
-- ✅ Executor routes to remote
-- ✅ Remote execution test passing
-- ✅ Results match local execution
+    # Without capture context
+    start = time.perf_counter()
+    for _ in range(n_ops):
+        x = torch.randn(100, 100)
+    no_capture_time = time.perf_counter() - start
 
-**This is the BIG milestone!** You now have end-to-end remote execution.
+    # With capture context (but no LazyTensor creation)
+    start = time.perf_counter()
+    with genie.capture():
+        for _ in range(n_ops):
+            x = torch.randn(100, 100)  # Creates LazyTensor
+    capture_time = time.perf_counter() - start
 
-**Git commit:**
-```bash
-git add genie/core/lazy_tensor.py genie/core/executor.py tests/test_lazy_tensor_remote.py
-git commit -m "Day 4: LazyTensor remote execution working"
+    overhead_per_op = (capture_time - no_capture_time) / n_ops
+    overhead_ns = overhead_per_op * 1e9
+
+    print(f"No capture: {no_capture_time:.4f}s")
+    print(f"With capture: {capture_time:.4f}s")
+    print(f"Overhead: {overhead_ns:.1f}ns/op")
+
+    # Should be minimal overhead
+    assert overhead_ns < 100, f"Capture overhead too high: {overhead_ns}ns"
 ```
 
 ---
 
-### Day 5: Documentation and Measurement
+## 7. Performance Targets
 
-**Goal:** Document system and measure baseline performance
+### 7.1 Interception Overhead
 
-**Time:** 3 hours
+| Metric | Target | Rationale |
+|--------|--------|-----------|
+| Per-operation overhead | <1μs | Negligible for model inference |
+| Graph construction | <100ms for 1000 ops | One-time cost |
+| Memory overhead | <5% of model size | Acceptable for graph metadata |
 
-#### Step 5.1: Create End-to-End Demo (1 hour)
+### 7.2 Scheduling Performance
 
-```bash
-touch examples/simple_remote_demo.py
+| Metric | Target | Rationale |
+|--------|--------|-----------|
+| Placement optimization | <100ms for 1000 nodes | Acceptable for interactive |
+| Schedule generation | <50ms | Needs to be fast |
+| Cost model evaluation | <1ms per node | Called frequently |
+
+### 7.3 End-to-End Performance
+
+| Metric | Target | Measurement |
+|--------|--------|-------------|
+| Disaggregation overhead | <10% vs native | Latency increase |
+| Network efficiency | >80% peak bandwidth | Transfer throughput |
+| Memory efficiency | <2x native | Peak memory usage |
+
+### 7.4 Performance Measurement
+
+```python
+# File: benchmarks/e2e_benchmark.py
+
+def benchmark_e2e_disaggregation():
+    """Measure end-to-end disaggregation overhead."""
+    
+    model = create_bert_base()
+    input = torch.randn(32, 512)  # Batch=32, seq_len=512
+    
+    # Native PyTorch baseline
+    native_time = benchmark_native(model, input, iterations=100)
+    
+    # Genie with local execution (overhead measurement)
+    local_time = benchmark_genie_local(model, input, iterations=100)
+    
+    # Genie with remote execution (full system)
+    remote_time = benchmark_genie_remote(model, input, iterations=100)
+    
+    overhead_local = (local_time - native_time) / native_time * 100
+    overhead_remote = (remote_time - native_time) / native_time * 100
+    
+    print(f"Native: {native_time:.2f}ms")
+    print(f"Genie (local): {local_time:.2f}ms ({overhead_local:.1f}% overhead)")
+    print(f"Genie (remote): {remote_time:.2f}ms ({overhead_remote:.1f}% overhead)")
+    
+    # Targets
+    assert overhead_local < 5, "Local overhead too high"
+    assert overhead_remote < 15, "Remote overhead too high"
 ```
 
-Content:
+---
+
+## 8. Migration Guide
+
+### 8.1 Breaking Changes
+
+**v0.1.x → v0.2.0:**
+
+| Change | Old Code | New Code |
+|--------|----------|----------|
+| Graph access | `GraphBuilder.current().get_graph()` | `genie.get_graph()` |
+| Metadata access | `tensor.metadata['phase']` | `node.metadata.get('phase')` |
+
+**Note:** The device-based API (`device='remote_accelerator:0'`) continues to work unchanged, providing backward compatibility.
+
+### 8.2 Migration Timeline
+
+**Phase 1 (v0.2.0 - v0.3.0): Both APIs Supported**
+
+Both APIs work without warnings (full backward compatibility):
+
 ```python
-"""
-Simple demo of remote execution with Genie.
-File: examples/simple_remote_demo.py
+# Device-based API (legacy, continues to work)
+x = torch.randn(10, device='remote_accelerator:0')
 
-Prerequisites:
-1. Start server: python -m genie.runtime.simple_server
-2. Run this demo: python examples/simple_remote_demo.py
+# Context-based API (recommended for new code)
+with genie.capture():
+    x = torch.randn(10)
+
+# Hybrid API (flexible)
+with genie.capture():
+    x = torch.randn(10, device='remote_accelerator:0')
+```
+
+**Future versions:** Both APIs will continue to be supported for maximum compatibility.
+
+### 8.3 Migration Script
+
+```python
+# File: scripts/migrate_to_v2.py
+
+"""
+Automated migration script for v0.1.x → v0.2.0
 """
 
+import re
+import sys
+
+def migrate_code(source_code: str) -> str:
+    """Migrate code from v0.1.x to v0.2.0."""
+
+    # Pattern 1: GraphBuilder.current()
+    source_code = re.sub(
+        r"GraphBuilder\.current\(\)\.get_graph\(\)",
+        "genie.get_graph()",
+        source_code
+    )
+
+    # Pattern 2: tensor.metadata[...]
+    source_code = re.sub(
+        r"\.metadata\[(['\"])(\w+)\1\]",
+        r".metadata.get('\2')",
+        source_code
+    )
+
+    # Pattern 3: device='remote_accelerator:N' (no change needed)
+    # This API continues to work unchanged for backward compatibility
+
+    return source_code
+
+
+if __name__ == '__main__':
+    file_path = sys.argv[1]
+
+    with open(file_path, 'r') as f:
+        old_code = f.read()
+
+    new_code = migrate_code(old_code)
+
+    with open(file_path + '.migrated', 'w') as f:
+        f.write(new_code)
+
+    print(f"Migrated code written to {file_path}.migrated")
+    print("Note: device='remote_accelerator:N' API continues to work unchanged")
+```
+
+---
+
+## 9. Open-Source Considerations
+
+### 9.1 Repository Structure
+
+```
+genie/
+├── README.md                    # Quick start, badges, examples
+├── CONTRIBUTING.md              # Contribution guidelines
+├── LICENSE                      # Apache 2.0 (recommended)
+├── CODE_OF_CONDUCT.md          # Community guidelines
+├── .github/
+│   ├── workflows/
+│   │   ├── ci.yml              # CI/CD pipeline
+│   │   ├── benchmarks.yml      # Performance regression tests
+│   │   └── docs.yml            # Documentation build
+│   ├── ISSUE_TEMPLATE/
+│   │   ├── bug_report.md
+│   │   ├── feature_request.md
+│   │   └── performance_issue.md
+│   └── PULL_REQUEST_TEMPLATE.md
+├── docs/
+│   ├── getting-started.md
+│   ├── api-reference.md
+│   ├── architecture.md
+│   ├── deployment.md
+│   ├── performance.md
+│   └── paper/                   # HotNets paper reproduction
+│       ├── reproduction.md
+│       └── benchmarks/
+├── genie/
+│   ├── __init__.py
+│   ├── core/                    # Core interception & graph
+│   ├── semantic/                # Semantic analysis
+│   ├── scheduler/               # Scheduling algorithms
+│   ├── runtime/                 # Execution backends
+│   └── utils/
+├── tests/
+├── benchmarks/
+├── examples/
+│   ├── 01_simple_model.py
+│   ├── 02_transformer.py
+│   ├── 03_multimodal.py
+│   ├── 04_custom_scheduler.py
+│   └── 05_production_deployment.py
+├── setup.py
+├── pyproject.toml
+└── requirements.txt
+```
+
+### 9.2 Documentation Strategy
+
+**Target Audiences:**
+
+1. **End Users** (ML engineers deploying models)
+   - Quick start guide
+   - API reference
+   - Deployment tutorials
+
+2. **Contributors** (developers improving Genie)
+   - Architecture documentation
+   - Development guide
+   - Code review standards
+
+3. **Researchers** (reproducing paper results)
+   - Paper reproduction guide
+   - Benchmark scripts
+   - Performance analysis
+
+**Documentation Structure:**
+
+```markdown
+# docs/getting-started.md
+
+# Getting Started with Genie
+
+## Installation
+
+```bash
+pip install genie-pytorch
+```
+
+## Your First Disaggregated Model
+
+```python
 import torch
-import logging
-import time
+import genie
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+# Define model
+model = torch.nn.Sequential(
+    torch.nn.Linear(100, 100),
+    torch.nn.ReLU(),
+    torch.nn.Linear(100, 10)
 )
-logger = logging.getLogger(__name__)
 
+# Capture operations
+with genie.capture():
+    x = torch.randn(32, 100)
+    output = model(x)
 
-def main():
-    logger.info("=" * 70)
-    logger.info("🎯 Genie Remote Execution Demo")
-    logger.info("=" * 70)
-    logger.info("")
-    
-    # Step 1: Create tensor on remote device
-    logger.info("Step 1: Creating tensor on remote_accelerator...")
-    x = torch.randn(100, 100, device="remote_accelerator:0")
-    logger.info(f"  ✅ Created tensor: shape={x.shape}, device={x.device}")
-    logger.info("")
-    
-    # Step 2: Chain operations (all stay lazy)
-    logger.info("Step 2: Chaining operations...")
-    y = x.relu()
-    logger.info(f"  ✅ Applied relu (lazy)")
-    
-    z = y.sigmoid()
-    logger.info(f"  ✅ Applied sigmoid (lazy)")
-    logger.info("")
-    
-    # Step 3: Materialize (triggers remote execution)
-    logger.info("Step 3: Materializing (executing remotely)...")
-    start_time = time.time()
-    result = z.cpu()
-    elapsed = time.time() - start_time
-    logger.info(f"  ✅ Execution completed in {elapsed:.3f}s")
-    logger.info("")
-    
-    # Step 4: Verify result
-    logger.info("Step 4: Verifying result...")
-    logger.info(f"  Result shape: {result.shape}")
-    logger.info(f"  Result device: {result.device}")
-    logger.info(f"  Result dtype: {result.dtype}")
-    logger.info(f"  Value range: [{result.min():.4f}, {result.max():.4f}]")
-    logger.info("")
-    
-    # Step 5: Compare with local execution
-    logger.info("Step 5: Comparing with local execution...")
-    x_local = torch.randn(100, 100)
-    
-    start_local = time.time()
-    result_local = torch.sigmoid(torch.relu(x_local))
-    elapsed_local = time.time() - start_local
-    
-    logger.info(f"  Local execution: {elapsed_local:.3f}s")
-    logger.info(f"  Remote execution: {elapsed:.3f}s")
-    logger.info(f"  Overhead: {(elapsed - elapsed_local) * 1000:.1f}ms")
-    logger.info("")
-    
-    logger.info("=" * 70)
-    logger.info("✅ Demo completed successfully!")
-    logger.info("=" * 70)
+# Analyze
+graph = genie.get_graph()
+annotated = genie.annotate(graph)
 
+# Schedule
+devices = [genie.Device('gpu0', 'GPU', 16, 10, 100)]
+scheduler = genie.Scheduler(devices, policy='min_latency')
+plan = scheduler.schedule(annotated)
 
-if __name__ == "__main__":
-    main()
+# Execute
+result = genie.execute_local(plan, [x])
 ```
-
-**Run demo:**
-```bash
-# Server running in other terminal
-
-python examples/simple_remote_demo.py
-```
-
-#### Step 5.2: Measure Baseline Performance (1 hour)
-
-Create benchmark script:
-
-```bash
-touch benchmarks/baseline_measurement.py
-```
-
-Content:
-```python
-"""
-Baseline performance measurement.
-File: benchmarks/baseline_measurement.py
-
-Measures:
-1. Local execution (CPU/GPU)
-2. Remote execution (via HTTP)
-3. Overhead breakdown
-"""
-
-import torch
-import time
-import logging
-from typing import Dict, List
-import statistics
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-
-def measure_operation(
-    operation: str,
-    tensor_size: tuple,
-    num_iterations: int = 10,
-    device: str = "cpu"
-) -> Dict:
-    """
-    Measure operation performance.
-    
-    Returns dict with min, max, mean, median latency in ms.
-    """
-    latencies = []
-    
-    for i in range(num_iterations):
-        # Create tensor
-        if device == "remote_accelerator:0":
-            x = torch.randn(*tensor_size, device=device)
-        else:
-            x = torch.randn(*tensor_size)
-            if device.startswith("cuda"):
-                x = x.cuda()
-        
-        # Execute operation
-        start = time.time()
-        
-        if operation == "relu":
-            if device == "remote_accelerator:0":
-                result = x.relu().cpu()
-            else:
-                result = torch.relu(x)
-        elif operation == "sigmoid":
-            if device == "remote_accelerator:0":
-                result = x.sigmoid().cpu()
-            else:
-                result = torch.sigmoid(x)
-        
-        elapsed = (time.time() - start) * 1000  # Convert to ms
-        latencies.append(elapsed)
-    
-    return {
-        'operation': operation,
-        'size': tensor_size,
-        'device': device,
-        'num_iterations': num_iterations,
-        'latencies_ms': latencies,
-        'min_ms': min(latencies),
-        'max_ms': max(latencies),
-        'mean_ms': statistics.mean(latencies),
-        'median_ms': statistics.median(latencies),
-        'std_ms': statistics.stdev(latencies) if len(latencies) > 1 else 0
-    }
-
-
-def main():
-    logger.info("=" * 70)
-    logger.info("📊 Baseline Performance Measurement")
-    logger.info("=" * 70)
-    logger.info("")
-    
-    # Test configurations
-    operations = ['relu', 'sigmoid']
-    sizes = [(10, 10), (100, 100), (1000, 1000)]
-    devices = ['cpu', 'remote_accelerator:0']
-    
-    results = []
-    
-    for operation in operations:
-        for size in sizes:
-            for device in devices:
-                logger.info(f"Measuring {operation} on {size} tensor, device={device}")
-                
-                try:
-                    result = measure_operation(operation, size, num_iterations=10, device=device)
-                    results.append(result)
-                    
-                    logger.info(f"  Mean: {result['mean_ms']:.2f}ms (±{result['std_ms']:.2f}ms)")
-                    
-                except Exception as e:
-                    logger.error(f"  ❌ Failed: {e}")
-                
-                logger.info("")
-    
-    # Summary table
-    logger.info("=" * 70)
-    logger.info("📋 Summary")
-    logger.info("=" * 70)
-    logger.info("")
-    logger.info(f"{'Operation':<12} {'Size':<15} {'Device':<20} {'Latency (ms)':<15}")
-    logger.info("-" * 70)
-    
-    for r in results:
-        size_str = f"{r['size'][0]}x{r['size'][1]}"
-        logger.info(
-            f"{r['operation']:<12} {size_str:<15} {r['device']:<20} "
-            f"{r['mean_ms']:>6.2f} ± {r['std_ms']:>5.2f}"
-        )
-    
-    logger.info("")
-    logger.info("=" * 70)
-    
-    # Calculate overhead
-    logger.info("🔍 Overhead Analysis")
-    logger.info("=" * 70)
-    logger.info("")
-    
-    for operation in operations:
-        for size in sizes:
-            cpu_result = next((r for r in results 
-                             if r['operation'] == operation 
-                             and r['size'] == size 
-                             and r['device'] == 'cpu'), None)
-            
-            remote_result = next((r for r in results 
-                                if r['operation'] == operation 
-                                and r['size'] == size 
-                                and r['device'] == 'remote_accelerator:0'), None)
-            
-            if cpu_result and remote_result:
-                overhead = remote_result['mean_ms'] - cpu_result['mean_ms']
-                overhead_pct = (overhead / cpu_result['mean_ms']) * 100
-                
-                size_str = f"{size[0]}x{size[1]}"
-                logger.info(f"{operation} {size_str}:")
-                logger.info(f"  CPU:    {cpu_result['mean_ms']:.2f}ms")
-                logger.info(f"  Remote: {remote_result['mean_ms']:.2f}ms")
-                logger.info(f"  Overhead: {overhead:.2f}ms ({overhead_pct:.1f}%)")
-                logger.info("")
-    
-    logger.info("=" * 70)
-    logger.info("✅ Measurement complete")
-    logger.info("=" * 70)
-
-
-if __name__ == "__main__":
-    main()
-```
-
-**Run benchmark:**
-```bash
-python benchmarks/baseline_measurement.py
-```
-
-**Expected output (approximate):**
-```
-============================================================
-📊 Baseline Performance Measurement
-============================================================
-
-Measuring relu on (10, 10) tensor, device=cpu
-  Mean: 0.12ms (±0.02ms)
-
-Measuring relu on (10, 10) tensor, device=remote_accelerator:0
-  Mean: 15.34ms (±2.11ms)
-
-... (more measurements) ...
-
-============================================================
-📋 Summary
-============================================================
-
-Operation    Size            Device               Latency (ms)   
-----------------------------------------------------------------------
-relu         10x10           cpu                    0.12 ±  0.02
-relu         10x10           remote_accelerator:0  15.34 ±  2.11
-...
-
-============================================================
-🔍 Overhead Analysis
-============================================================
-
-relu 10x10:
-  CPU:    0.12ms
-  Remote: 15.34ms
-  Overhead: 15.22ms (12683.3%)
-
-... (This is expected - HTTP overhead is high for tiny tensors) ...
-```
-
-**IMPORTANT:** Save these baseline numbers! You'll compare against them in Week 2.
-
-#### Step 5.3: Document Week 1 (1 hour)
-
-Create summary document:
-
-```bash
-touch docs/WEEK1_SUMMARY.md
-```
-
-Content:
-```markdown
-# Week 1 Summary: HTTP Transport Layer
-
-## Achievements
-
-### ✅ Completed
-1. HTTP server with FastAPI
-2. Client with requests library
-3. LazyTensor integration
-4. End-to-end remote execution
-5. Baseline measurements
-
-### 📊 Performance (Baseline)
-
-**Environment:**
-- Server: localhost
-- Network: Loopback
-- Device: CPU (no GPU required for Phase 1)
-
-**Measurements:**
-
-| Operation | Tensor Size | Local (CPU) | Remote (HTTP) | Overhead |
-|-----------|-------------|-------------|---------------|----------|
-| relu      | 10x10       | 0.12ms      | 15.34ms       | 15.22ms  |
-| relu      | 100x100     | 0.45ms      | 17.89ms       | 17.44ms  |
-| relu      | 1000x1000   | 12.34ms     | 28.67ms       | 16.33ms  |
-
-**Analysis:**
-- HTTP overhead: ~15-17ms (constant, independent of tensor size)
-- For large tensors (>1MB), overhead is <10%
-- For small tensors (<10KB), overhead dominates
-
-### 🎯 Key Learnings
-
-1. **HTTP is Good Enough:** For research prototype, HTTP overhead is acceptable
-2. **Overhead is Constant:** ~15ms regardless of tensor size (TCP handshake + JSON headers)
-3. **Scales Well:** For 1000x1000 tensors, only 16ms overhead
-
-### 📝 Notes for Week 2
-
-**Next Steps:**
-1. Implement semantic optimization (LLM decode co-location)
-2. Measure optimization benefit
-3. Compare optimized vs baseline
-
-**Limitations to Address:**
-- Only single-input operations (add multi-input in Week 2)
-- Only 8 operations supported (add more as needed)
-- HTTP overhead high for small tensors (OK for Phase 1)
-
-## File Changes
-
-**New files:**
-- `genie/runtime/simple_server.py` (Server implementation)
-- `genie/runtime/simple_client.py` (Client implementation)
-- `tests/test_simple_client.py` (Client tests)
-- `tests/test_lazy_tensor_remote.py` (Integration tests)
-- `examples/simple_remote_demo.py` (Demo)
-- `benchmarks/baseline_measurement.py` (Baseline measurements)
-
-**Modified files:**
-- `genie/core/lazy_tensor.py` (Device inference fix)
-- `genie/core/executor.py` (Remote execution routing)
-
-## Testing
-
-All tests passing:
-```bash
-pytest tests/test_simple_client.py -v        # ✅ 4/4 passed
-python tests/test_lazy_tensor_remote.py      # ✅ 4/4 passed
-python examples/simple_remote_demo.py        # ✅ Working
-python benchmarks/baseline_measurement.py    # ✅ Data collected
-```
-
-## Next Week Goals
-
-1. Implement ONE semantic optimization
-2. Measure improvement vs baseline
-3. Show >10% performance gain
-```
-
-#### Day 5 Checkpoint
-
-**End of Day 5 - Week 1 COMPLETE! 🎉**
-
-**YOU MUST HAVE:**
-- ✅ Demo script working
-- ✅ Baseline measurements collected
-- ✅ Documentation written
-- ✅ All tests passing
-
-**Git commit:**
-```bash
-git add examples/ benchmarks/ docs/WEEK1_SUMMARY.md
-git commit -m "Day 5: Week 1 complete - baseline documented"
-git push origin http-transport-implementation
-```
-
----
-
-## Week 1 Final Checklist
-
-Before moving to Week 2, verify:
-
-- [ ] Server starts: `python -m genie.runtime.simple_server`
-- [ ] Health check works: `curl http://localhost:8888/health`
-- [ ] Manual transfer works: `curl -X POST ... -F tensor_file=@test.pt`
-- [ ] Client tests pass: `pytest tests/test_simple_client.py`
-- [ ] LazyTensor tests pass: `python tests/test_lazy_tensor_remote.py`
-- [ ] Demo works: `python examples/simple_remote_demo.py`
-- [ ] Baseline measured: `python benchmarks/baseline_measurement.py`
-- [ ] Have baseline numbers saved
-
-**If ANY checkbox is unchecked, DEBUG IT NOW before Week 2!**
-
----
-
-## Week 2: Semantic Optimization
-
-**Goal:** Prove that semantic information enables performance improvement
-
-**Time:** 5 days (25-30 hours)
-
-**Focus:** LLM decode co-location (simplest optimization to demonstrate)
-
----
-
-### Day 6: Baseline LLM Workload
-
-**Goal:** Create LLM-like workload and measure baseline (NO optimization)
-
-**Time:** 4 hours
-
-#### Step 6.1: Understand the Problem (30 min - READ THIS CAREFULLY)
-
-**The Research Question:**
-> Does semantic information (knowing it's an LLM decode phase) enable better performance than semantic-blind placement?
-
-**LLM Decode Phase Characteristics:**
-- Generates tokens one at a time (sequential)
-- Each step needs the KV cache (large: ~5GB for GPT-3)
-- Decoder network is small (~100MB)
-
-**Two Placement Strategies:**
-
-**Baseline (Semantic-Blind):**
-```
-Request 1: Decode → Random GPU (say GPU 0)
-           Need KV cache → Transfer from GPU 1 (5GB transfer!)
-
-Request 2: Decode → Random GPU (say GPU 1)  
-           Need KV cache → Transfer from GPU 0 (5GB transfer!)
-
-Every request: Transfer huge KV cache
-```
-
-**Optimized (Semantic-Aware):**
-```
-All decode requests → Same GPU (GPU 0)
-KV cache → Also on GPU 0
-
-Every request: NO transfer (cache already there)
-```
-
-**Expected Improvement:** ~30-50% latency reduction
-
-#### Step 6.2: Create SimpleLLM Workload (1 hour)
-
-```bash
-touch examples/simple_llm.py
-```
-
-Content:
-```python
-"""
-Simple LLM-like workload for testing co-location.
-File: examples/simple_llm.py
-
-Simulates:
-- Large KV cache (persistent)
-- Small decoder (per-token)
-- Sequential decode steps
-"""
-
-import torch
-import torch.nn as nn
-import logging
-
-logger = logging.getLogger(__name__)
-
-
-class SimpleLLM(nn.Module):
-    """
-    Simplified LLM for testing co-location optimization.
-    
-    Components:
-    - KV cache: Large, persistent tensor (simulates attention cache)
-    - Decoder: Small network (simulates token generation)
-    """
-    
-    def __init__(self, 
-                 hidden_size: int = 768,
-                 cache_seq_len: int = 128,
-                 batch_size: int = 1):
-        """
-        Initialize SimpleLLM.
-        
-        Args:
-            hidden_size: Hidden dimension size
-            cache_seq_len: Sequence length for KV cache
-            batch_size: Batch size
-        """
-        super().__init__()
-        
-        self.hidden_size = hidden_size
-        self.cache_seq_len = cache_seq_len
-        self.batch_size = batch_size
-        
-        # KV cache (large, persistent)
-        # Shape: (batch, seq_len, hidden_size)
-        self.kv_cache = torch.randn(batch_size, cache_seq_len, hidden_size)
-        logger.info(f"KV cache size: {self.kv_cache.numel() * 4 / 1024 / 1024:.2f} MB")
-        
-        # Decoder (small network)
-        self.decoder = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
-            nn.ReLU(),
-            nn.Linear(hidden_size, hidden_size)
-        )
-        
-        decoder_params = sum(p.numel() for p in self.decoder.parameters())
-        logger.info(f"Decoder size: {decoder_params * 4 / 1024 / 1024:.2f} MB")
-    
-    def decode_step(self, token_embedding: torch.Tensor, device: str = "cpu") -> torch.Tensor:
-        """
-        Perform one decode step.
-        
-        This simulates:
-        1. Accessing KV cache (large)
-        2. Running decoder (small)
-        
-        Args:
-            token_embedding: Current token embedding (batch, hidden_size)
-            device: Where to execute ("cpu" or "remote_accelerator:0")
-            
-        Returns:
-            Next token prediction (batch, hidden_size)
-        """
-        # Move token to device
-        if device != "cpu":
-            token_embedding = token_embedding.to(device)
-        
-        # Access KV cache (simulates attention)
-        # In real LLM: Q @ K.T → softmax → @ V
-        # Here: Simple matmul for demonstration
-        kv_on_device = self.kv_cache.to(device)
-        attention = torch.matmul(
-            token_embedding.unsqueeze(1),  # (batch, 1, hidden)
-            kv_on_device.transpose(-1, -2)  # (batch, hidden, seq_len)
-        )  # Result: (batch, 1, seq_len)
-        
-        # Apply softmax (simulates attention weights)
-        attention_weights = torch.softmax(attention, dim=-1)
-        
-        # Weighted sum (simulates attention output)
-        context = torch.matmul(
-            attention_weights,  # (batch, 1, seq_len)
-            kv_on_device  # (batch, seq_len, hidden)
-        )  # Result: (batch, 1, hidden)
-        
-        context = context.squeeze(1)  # (batch, hidden)
-        
-        # Run decoder
-        decoder_on_device = self.decoder.to(device)
-        output = decoder_on_device(context)
-        
-        return output
-    
-    def generate(self, 
-                 num_steps: int = 10,
-                 device: str = "cpu",
-                 initial_token: torch.Tensor = None) -> list:
-        """
-        Generate multiple tokens.
-        
-        Args:
-            num_steps: Number of decode steps
-            device: Where to execute
-            initial_token: Initial token embedding
-            
-        Returns:
-            List of generated token embeddings
-        """
-        if initial_token is None:
-            initial_token = torch.randn(self.batch_size, self.hidden_size)
-        
-        generated = []
-        current_token = initial_token
-        
-        for step in range(num_steps):
-            logger.debug(f"Decode step {step + 1}/{num_steps}")
-            
-            # Decode one step
-            next_token = self.decode_step(current_token, device=device)
-            generated.append(next_token)
-            
-            # Use output as next input
-            current_token = next_token
-        
-        return generated
-
-
-def estimate_transfer_size(model: SimpleLLM) -> dict:
-    """Estimate transfer sizes for co-location analysis."""
-    kv_size_mb = model.kv_cache.numel() * 4 / 1024 / 1024
-    decoder_size_mb = sum(p.numel() for p in model.decoder.parameters()) * 4 / 1024 / 1024
-    token_size_mb = model.hidden_size * 4 / 1024 / 1024
-    
-    return {
-        'kv_cache_mb': kv_size_mb,
-        'decoder_mb': decoder_size_mb,
-        'token_mb': token_size_mb,
-        'total_per_step_without_colocation': kv_size_mb + token_size_mb,
-        'total_per_step_with_colocation': token_size_mb
-    }
-```
-
-#### Step 6.3: Test SimpleLLM Locally (30 min)
-
-```bash
-touch examples/test_simple_llm.py
-```
-
-Content:
-```python
-"""
-Test SimpleLLM locally.
-File: examples/test_simple_llm.py
-"""
-
-import torch
-import logging
-from simple_llm import SimpleLLM, estimate_transfer_size
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-
-def main():
-    logger.info("=" * 70)
-    logger.info("🧪 Testing SimpleLLM")
-    logger.info("=" * 70)
-    logger.info("")
-    
-    # Create model
-    logger.info("Creating SimpleLLM...")
-    model = SimpleLLM(hidden_size=768, cache_seq_len=128, batch_size=1)
-    logger.info("")
-    
-    # Show sizes
-    logger.info("Component sizes:")
-    sizes = estimate_transfer_size(model)
-    logger.info(f"  KV cache: {sizes['kv_cache_mb']:.2f} MB")
-    logger.info(f"  Decoder: {sizes['decoder_mb']:.2f} MB")
-    logger.info(f"  Token: {sizes['token_mb']:.2f} MB")
-    logger.info("")
-    logger.info("Transfer per decode step:")
-    logger.info(f"  Without co-location: {sizes['total_per_step_without_colocation']:.2f} MB")
-    logger.info(f"  With co-location: {sizes['total_per_step_with_colocation']:.2f} MB")
-    logger.info(f"  Savings: {sizes['total_per_step_without_colocation'] - sizes['total_per_step_with_colocation']:.2f} MB")
-    logger.info("")
-    
-    # Test one decode step
-    logger.info("Testing one decode step...")
-    initial_token = torch.randn(1, 768)
-    output = model.decode_step(initial_token, device="cpu")
-    logger.info(f"  ✅ Output shape: {output.shape}")
-    logger.info("")
-    
-    # Test generation
-    logger.info("Testing generation (5 steps)...")
-    generated = model.generate(num_steps=5, device="cpu")
-    logger.info(f"  ✅ Generated {len(generated)} tokens")
-    logger.info("")
-    
-    logger.info("=" * 70)
-    logger.info("✅ SimpleLLM works correctly!")
-    logger.info("=" * 70)
-
-
-if __name__ == "__main__":
-    main()
-```
-
-**Run test:**
-```bash
-cd examples
-python test_simple_llm.py
-```
-
-**Expected output:**
-```
-============================================================
-🧪 Testing SimpleLLM
-============================================================
-
-Creating SimpleLLM...
-KV cache size: 0.38 MB
-Decoder size: 4.72 MB
-
-Component sizes:
-  KV cache: 0.38 MB
-  Decoder: 4.72 MB
-  Token: 0.00 MB
-
-Transfer per decode step:
-  Without co-location: 0.38 MB
-  With co-location: 0.00 MB
-  Savings: 0.38 MB
-
-Testing one decode step...
-  ✅ Output shape: torch.Size([1, 768])
-
-Testing generation (5 steps)...
-  ✅ Generated 5 tokens
-
-============================================================
-✅ SimpleLLM works correctly!
-============================================================
-```
-
-**SUCCESS CHECKPOINT 12:** SimpleLLM works locally ✅
-
-#### Step 6.4: Measure Baseline (NO Colocation) (1.5 hours)
-
-```bash
-touch benchmarks/measure_baseline_llm.py
-```
-
-Content:
-```python
-"""
-Measure baseline LLM performance WITHOUT co-location.
-File: benchmarks/measure_baseline_llm.py
-
-This simulates semantic-blind placement:
-- KV cache on one device
-- Decoder on another device
-- Must transfer cache every step
-"""
-
-import sys
-sys.path.append('../examples')
-
-import torch
-import time
-import logging
-from simple_llm import SimpleLLM, estimate_transfer_size
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-
-def measure_baseline_no_colocation(model: SimpleLLM, num_steps: int = 10) -> dict:
-    """
-    Measure baseline WITHOUT co-location.
-    
-    Simulates:
-    - KV cache on server A
-    - Decoder on server B
-    - Transfer cache every step
-    """
-    logger.info("🔍 Measuring BASELINE (no co-location)...")
-    logger.info("   Simulating: KV cache and decoder on DIFFERENT servers")
-    logger.info("")
-    
-    latencies = []
-    
-    initial_token = torch.randn(1, model.hidden_size)
-    current_token = initial_token
-    
-    for step in range(num_steps):
-        logger.info(f"  Step {step + 1}/{num_steps}")
-        
-        start = time.time()
-        
-        # Simulate transfer overhead
-        # In reality: would transfer KV cache over network
-        # Here: add artificial delay (15ms per MB transferred)
-        sizes = estimate_transfer_size(model)
-        transfer_mb = sizes['total_per_step_without_colocation']
-        transfer_time = transfer_mb * 0.015  # 15ms per MB (typical for 100G network)
-        
-        logger.debug(f"    Simulated transfer: {transfer_mb:.2f} MB → {transfer_time*1000:.2f}ms")
-        time.sleep(transfer_time)
-        
-        # Execute decode step (CPU)
-        output = model.decode_step(current_token, device="cpu")
-        
-        elapsed = (time.time() - start) * 1000  # ms
-        latencies.append(elapsed)
-        
-        logger.debug(f"    Total latency: {elapsed:.2f}ms")
-        
-        current_token = output
-    
-    avg_latency = sum(latencies) / len(latencies)
-    
-    logger.info("")
-    logger.info(f"✅ Baseline measurement complete:")
-    logger.info(f"   Steps: {num_steps}")
-    logger.info(f"   Average latency: {avg_latency:.2f}ms per step")
-    logger.info(f"   Total time: {sum(latencies):.2f}ms")
-    logger.info("")
-    
-    return {
-        'num_steps': num_steps,
-        'latencies_ms': latencies,
-        'avg_latency_ms': avg_latency,
-        'total_ms': sum(latencies),
-        'strategy': 'no_colocation'
-    }
-
-
-def main():
-    logger.info("=" * 70)
-    logger.info("📊 Baseline LLM Measurement (NO Co-location)")
-    logger.info("=" * 70)
-    logger.info("")
-    
-    # Create model
-    model = SimpleLLM(hidden_size=768, cache_seq_len=128, batch_size=1)
-    logger.info("")
-    
-    # Measure baseline
-    result = measure_baseline_no_colocation(model, num_steps=10)
-    
-    # Save result
-    import json
-    with open('baseline_no_colocation.json', 'w') as f:
-        json.dump(result, f, indent=2)
-    
-    logger.info("💾 Results saved to: baseline_no_colocation.json")
-    logger.info("")
-    
-    logger.info("=" * 70)
-    logger.info("✅ Baseline measurement complete!")
-    logger.info("=" * 70)
-    logger.info("")
-    logger.info("Next step: Implement co-location and measure improvement")
-
-
-if __name__ == "__main__":
-    main()
-```
-
-**Run measurement:**
-```bash
-cd benchmarks
-python measure_baseline_llm.py
-```
-
-**Expected output:**
-```
-============================================================
-📊 Baseline LLM Measurement (NO Co-location)
-============================================================
-
-Creating SimpleLLM...
-KV cache size: 0.38 MB
-Decoder size: 4.72 MB
-
-🔍 Measuring BASELINE (no co-location)...
-   Simulating: KV cache and decoder on DIFFERENT servers
-
-  Step 1/10
-  Step 2/10
-  ...
-  Step 10/10
-
-✅ Baseline measurement complete:
-   Steps: 10
-   Average latency: 12.45ms per step
-   Total time: 124.50ms
-
-💾 Results saved to: baseline_no_colocation.json
-
-============================================================
-✅ Baseline measurement complete!
-============================================================
-
-Next step: Implement co-location and measure improvement
-```
-
-**SUCCESS CHECKPOINT 13:** Baseline measured and saved ✅
-
-#### Day 6 Checkpoint
-
-**End of Day 6 - YOU MUST HAVE:**
-- ✅ SimpleLLM workload created
-- ✅ Works locally
-- ✅ Baseline measured (no co-location)
-- ✅ Results saved to JSON
-
-**Git commit:**
-```bash
-git add examples/simple_llm.py examples/test_simple_llm.py benchmarks/measure_baseline_llm.py
-git commit -m "Day 6: LLM baseline measurement"
-```
-
----
-
-### Day 7: Implement Co-Location Optimization
-
-**Goal:** Make optimizer ACTUALLY implement co-location
-
-**Time:** 4-5 hours
-
-This is the critical day where we make semantic optimization actually work!
-
-#### Step 7.1: Understand Current Optimizer (30 min - READ CAREFULLY)
-
-The code review showed that current optimizer **only adds metadata**:
-
-```python
-# Current (BROKEN):
-node.meta['placement_hint'] = 'kv_cache_device'  # Just metadata!
-node.meta['colocation_group'] = 'kv_cache'       # Not used!
-```
-
-**We need to make executor RESPECT these hints!**
-
-#### Step 7.2: Modify Optimizer to Mark Nodes (1 hour)
-
-**File to modify:** `genie/semantic/optimizer.py`
-
-Find `_apply_llm_optimizations` method (or create it if doesn't exist):
-
-```python
-def _apply_llm_optimizations(self, graph: fx.GraphModule, plan: OptimizationPlan):
-    """
-    Apply LLM-specific optimizations.
-    
-    Key optimization: KV cache co-location.
-    """
-    logger.info("Applying LLM optimizations...")
-    
-    # Find KV cache operations
-    kv_cache_nodes = self._find_kv_cache_nodes(graph)
-    
-    if not kv_cache_nodes:
-        logger.warning("No KV cache nodes found")
-        return
-    
-    logger.info(f"Found {len(kv_cache_nodes)} KV cache operations")
-    
-    # Find decoder operations
-    decoder_nodes = self._find_decoder_nodes(graph)
-    logger.info(f"Found {len(decoder_nodes)} decoder operations")
-    
-    # Co-location: Mark all for same device
-    colocation_device = "device_0"  # Pick one device
-    
-    for node in kv_cache_nodes:
-        # Mark node for co-location
-        node.meta['colocation_enabled'] = True
-        node.meta['colocation_group'] = 'kv_cache'
-        node.meta['force_device'] = colocation_device
-        node.meta['priority'] = 10  # High priority
-        
-        logger.debug(f"  Marked {node.name} for co-location on {colocation_device}")
-    
-    for node in decoder_nodes:
-        node.meta['colocation_enabled'] = True
-        node.meta['colocation_group'] = 'kv_cache'
-        node.meta['force_device'] = colocation_device
-        node.meta['priority'] = 9
-        
-        logger.debug(f"  Marked {node.name} for co-location on {colocation_device}")
-    
-    # Add to plan
-    plan.colocation_groups['kv_cache'] = [n.name for n in kv_cache_nodes + decoder_nodes]
-    plan.optimizations.append(OptimizationType.KV_CACHE_COLOCATION)
-    
-    logger.info(f"✅ KV cache co-location optimization applied")
-```
-
-**Add helper methods:**
-
-```python
-def _find_kv_cache_nodes(self, graph: fx.GraphModule) -> list:
-    """Find nodes that access KV cache."""
-    kv_nodes = []
-    
-    for node in graph.graph.nodes:
-        if node.op not in ['call_function', 'call_method', 'call_module']:
-            continue
-        
-        # Check if node name or operation suggests KV cache
-        node_str = str(node).lower()
-        target_str = str(node.target).lower()
-        
-        if any(kw in node_str or kw in target_str 
-               for kw in ['cache', 'kv', 'key', 'value', 'attention']):
-            kv_nodes.append(node)
-    
-    return kv_nodes
-
-
-def _find_decoder_nodes(self, graph: fx.GraphModule) -> list:
-    """Find decoder network nodes."""
-    decoder_nodes = []
-    
-    for node in graph.graph.nodes:
-        if node.op not in ['call_function', 'call_method', 'call_module']:
-            continue
-        
-        # Check if node is part of decoder
-        node_str = str(node).lower()
-        target_str = str(node.target).lower()
-        
-        if any(kw in node_str or kw in target_str 
-               for kw in ['decoder', 'linear', 'mlp', 'ffn']):
-            decoder_nodes.append(node)
-    
-    return decoder_nodes
-```
-
-#### Step 7.3: Make Executor Respect Co-Location (1.5 hours)
-
-**File to modify:** `genie/core/executor.py`
-
-Add BEFORE the `_execute_remote` function:
-
-```python
-# Global device assignment (for co-location)
-_device_assignments = {}  # colocation_group -> device
-
-
-def _get_device_for_node(lazy_tensor: 'LazyTensor') -> str:
-    """
-    Get device assignment for a node.
-    
-    Respects co-location hints from optimizer.
-    """
-    # Check if node has co-location metadata
-    if hasattr(lazy_tensor, 'metadata') and lazy_tensor.metadata:
-        metadata = lazy_tensor.metadata
-        
-        # Check for force_device
-        if hasattr(metadata, 'force_device'):
-            logger.debug(f"Using forced device: {metadata.force_device}")
-            return metadata.force_device
-        
-        # Check for colocation_group
-        if hasattr(metadata, 'colocation_group') and metadata.colocation_enabled:
-            group = metadata.colocation_group
-            
-            # Get or assign device for this group
-            if group not in _device_assignments:
-                _device_assignments[group] = os.getenv('GENIE_SERVER_URL', 'http://localhost:8888')
-                logger.info(f"Assigned colocation group '{group}' to {_device_assignments[group]}")
-            
-            return _device_assignments[group]
-    
-    # Default: use env variable or default
-    return os.getenv('GENIE_SERVER_URL', 'http://localhost:8888')
-```
-
-**Modify `_execute_remote` to use device assignment:**
-
-```python
-def _execute_remote(lazy_tensor: 'LazyTensor') -> torch.Tensor:
-    """
-    Execute LazyTensor on remote server via HTTP.
-    
-    NOW RESPECTS CO-LOCATION HINTS!
-    """
-    from genie.runtime.simple_client import RemoteExecutionClient
-    from genie.core.lazy_tensor import LazyTensor
-    
-    # Get device for this node (respects co-location)
-    server_url = _get_device_for_node(lazy_tensor)
-    
-    logger.info(f"🌐 Remote execution: {lazy_tensor.operation}")
-    logger.debug(f"   Tensor ID: {lazy_tensor.id}")
-    logger.debug(f"   Server: {server_url}")
-    
-    # Check for co-location metadata
-    if hasattr(lazy_tensor, 'metadata') and lazy_tensor.metadata:
-        if hasattr(lazy_tensor.metadata, 'colocation_enabled') and lazy_tensor.metadata.colocation_enabled:
-            logger.info(f"   🔗 Co-location enabled: group={lazy_tensor.metadata.colocation_group}")
-    
-    # ... rest of function stays the same ...
-```
-
-#### Step 7.4: Test Co-Location (1 hour)
-
-Create test to verify co-location works:
-
-```bash
-touch tests/test_colocation.py
-```
-
-Content:
-```python
-"""
-Test that co-location optimization works.
-File: tests/test_colocation.py
-"""
-
-import torch
-import logging
-from genie.core.lazy_tensor import LazyTensor
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-
-def test_colocation_metadata():
-    """Test that we can set co-location metadata."""
-    from genie.semantic.workload import SemanticMetadata, ExecutionPhase
-    
-    # Create LazyTensor
-    x = torch.randn(10, 10, device="remote_accelerator:0")
-    
-    # Set co-location metadata (simulating what optimizer does)
-    x.metadata.colocation_enabled = True
-    x.metadata.colocation_group = 'kv_cache'
-    x.metadata.force_device = 'http://localhost:8888'
-    x.metadata.execution_phase = ExecutionPhase.DECODE
-    
-    # Verify
-    assert x.metadata.colocation_enabled == True
-    assert x.metadata.colocation_group == 'kv_cache'
-    assert x.metadata.force_device == 'http://localhost:8888'
-    
-    logger.info("✅ Co-location metadata can be set")
-
-
-def test_colocation_device_assignment():
-    """Test that co-located operations use same device."""
-    from genie.core.executor import _get_device_for_node
-    from genie.semantic.workload import SemanticMetadata
-    
-    # Create two tensors with same colocation group
-    x = torch.randn(10, 10, device="remote_accelerator:0")
-    x.metadata.colocation_enabled = True
-    x.metadata.colocation_group = 'test_group'
-    
-    y = torch.randn(10, 10, device="remote_accelerator:0")
-    y.metadata.colocation_enabled = True
-    y.metadata.colocation_group = 'test_group'
-    
-    # Get device assignments
-    device_x = _get_device_for_node(x)
-    device_y = _get_device_for_node(y)
-    
-    # Should be same device!
-    assert device_x == device_y, f"Devices don't match: {device_x} vs {device_y}"
-    
-    logger.info(f"✅ Co-located operations assigned to same device: {device_x}")
-
-
-if __name__ == "__main__":
-    logger.info("=" * 70)
-    logger.info("Testing Co-Location Implementation")
-    logger.info("=" * 70)
-    logger.info("")
-    
-    test_colocation_metadata()
-    test_colocation_device_assignment()
-    
-    logger.info("")
-    logger.info("=" * 70)
-    logger.info("✅ All co-location tests passed!")
-    logger.info("=" * 70)
-```
-
-**Run test:**
-```bash
-python tests/test_colocation.py
-```
-
-**SUCCESS CHECKPOINT 14:** Co-location implementation works ✅
-
-#### Day 7 Checkpoint
-
-**End of Day 7 - YOU MUST HAVE:**
-- ✅ Optimizer marks nodes for co-location
-- ✅ Executor respects co-location hints
-- ✅ Co-location tests passing
-
-**Git commit:**
-```bash
-git add genie/semantic/optimizer.py genie/core/executor.py tests/test_colocation.py
-git commit -m "Day 7: Co-location optimization implemented"
-```
-
----
-
-### Day 8: Measure Optimized Performance
-
-**Goal:** Measure performance WITH co-location and compare to baseline
-
-**Time:** 3-4 hours
-
-#### Step 8.1: Create Optimized Measurement (1.5 hours)
-
-```bash
-touch benchmarks/measure_optimized_llm.py
-```
-
-Content:
-```python
-"""
-Measure LLM performance WITH co-location.
-File: benchmarks/measure_optimized_llm.py
-
-This simulates semantic-aware placement:
-- KV cache and decoder on SAME device
-- No transfer needed
-"""
-
-import sys
-sys.path.append('../examples')
-
-import torch
-import time
-import logging
-from simple_llm import SimpleLLM, estimate_transfer_size
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-
-def measure_optimized_with_colocation(model: SimpleLLM, num_steps: int = 10) -> dict:
-    """
-    Measure performance WITH co-location.
-    
-    Simulates:
-    - KV cache on server A
-    - Decoder on server A (SAME!)
-    - No cache transfer needed
-    """
-    logger.info("🔍 Measuring OPTIMIZED (with co-location)...")
-    logger.info("   Simulating: KV cache and decoder on SAME server")
-    logger.info("")
-    
-    latencies = []
-    
-    initial_token = torch.randn(1, model.hidden_size)
-    current_token = initial_token
-    
-    for step in range(num_steps):
-        logger.info(f"  Step {step + 1}/{num_steps}")
-        
-        start = time.time()
-        
-        # Simulate transfer overhead
-        # With co-location: only transfer token (tiny)
-        sizes = estimate_transfer_size(model)
-        transfer_mb = sizes['total_per_step_with_colocation']  # Just token!
-        transfer_time = transfer_mb * 0.015  # 15ms per MB
-        
-        logger.debug(f"    Simulated transfer: {transfer_mb:.2f} MB → {transfer_time*1000:.2f}ms")
-        time.sleep(transfer_time)
-        
-        # Execute decode step (CPU)
-        output = model.decode_step(current_token, device="cpu")
-        
-        elapsed = (time.time() - start) * 1000  # ms
-        latencies.append(elapsed)
-        
-        logger.debug(f"    Total latency: {elapsed:.2f}ms")
-        
-        current_token = output
-    
-    avg_latency = sum(latencies) / len(latencies)
-    
-    logger.info("")
-    logger.info(f"✅ Optimized measurement complete:")
-    logger.info(f"   Steps: {num_steps}")
-    logger.info(f"   Average latency: {avg_latency:.2f}ms per step")
-    logger.info(f"   Total time: {sum(latencies):.2f}ms")
-    logger.info("")
-    
-    return {
-        'num_steps': num_steps,
-        'latencies_ms': latencies,
-        'avg_latency_ms': avg_latency,
-        'total_ms': sum(latencies),
-        'strategy': 'with_colocation'
-    }
-
-
-def main():
-    logger.info("=" * 70)
-    logger.info("📊 Optimized LLM Measurement (WITH Co-location)")
-    logger.info("=" * 70)
-    logger.info("")
-    
-    # Create model
-    model = SimpleLLM(hidden_size=768, cache_seq_len=128, batch_size=1)
-    logger.info("")
-    
-    # Measure optimized
-    result = measure_optimized_with_colocation(model, num_steps=10)
-    
-    # Save result
-    import json
-    with open('optimized_with_colocation.json', 'w') as f:
-        json.dump(result, f, indent=2)
-    
-    logger.info("💾 Results saved to: optimized_with_colocation.json")
-    logger.info("")
-    
-    logger.info("=" * 70)
-    logger.info("✅ Optimized measurement complete!")
-    logger.info("=" * 70)
-    logger.info("")
-    logger.info("Next step: Compare baseline vs optimized")
-
-
-if __name__ == "__main__":
-    main()
-```
-
-**Run measurement:**
-```bash
-cd benchmarks
-python measure_optimized_llm.py
-```
-
-**Expected output:**
-```
-============================================================
-📊 Optimized LLM Measurement (WITH Co-location)
-============================================================
-
-Creating SimpleLLM...
-KV cache size: 0.38 MB
-Decoder size: 4.72 MB
-
-🔍 Measuring OPTIMIZED (with co-location)...
-   Simulating: KV cache and decoder on SAME server
-
-  Step 1/10
-  Step 2/10
-  ...
-  Step 10/10
-
-✅ Optimized measurement complete:
-   Steps: 10
-   Average latency: 6.23ms per step
-   Total time: 62.30ms
-
-💾 Results saved to: optimized_with_colocation.json
-
-============================================================
-✅ Optimized measurement complete!
-============================================================
-
-Next step: Compare baseline vs optimized
-```
-
-**SUCCESS CHECKPOINT 15:** Optimized performance measured ✅
-
-#### Step 8.2: Compare Results (1 hour)
-
-```bash
-touch benchmarks/compare_results.py
-```
-
-Content:
-```python
-"""
-Compare baseline vs optimized results.
-File: benchmarks/compare_results.py
-"""
-
-import json
-import logging
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-
-def main():
-    logger.info("=" * 70)
-    logger.info("📊 Performance Comparison: Baseline vs Optimized")
-    logger.info("=" * 70)
-    logger.info("")
-    
-    # Load results
-    with open('baseline_no_colocation.json', 'r') as f:
-        baseline = json.load(f)
-    
-    with open('optimized_with_colocation.json', 'r') as f:
-        optimized = json.load(f)
-    
-    # Extract metrics
-    baseline_avg = baseline['avg_latency_ms']
-    optimized_avg = optimized['avg_latency_ms']
-    
-    baseline_total = baseline['total_ms']
-    optimized_total = optimized['total_ms']
-    
-    # Calculate improvement
-    latency_reduction = baseline_avg - optimized_avg
-    latency_reduction_pct = (latency_reduction / baseline_avg) * 100
-    
-    total_reduction = baseline_total - optimized_total
-    total_reduction_pct = (total_reduction / baseline_total) * 100
-    
-    # Display results
-    logger.info("Results:")
-    logger.info("")
-    logger.info(f"{'Metric':<30} {'Baseline':<15} {'Optimized':<15} {'Improvement':<15}")
-    logger.info("-" * 70)
-    logger.info(
-        f"{'Avg Latency (ms/step)':<30} "
-        f"{baseline_avg:<15.2f} "
-        f"{optimized_avg:<15.2f} "
-        f"{latency_reduction:.2f} ms ({latency_reduction_pct:.1f}%)"
-    )
-    logger.info(
-        f"{'Total Time (ms)':<30} "
-        f"{baseline_total:<15.2f} "
-        f"{optimized_total:<15.2f} "
-        f"{total_reduction:.2f} ms ({total_reduction_pct:.1f}%)"
-    )
-    logger.info("")
-    
-    # Analysis
-    logger.info("Analysis:")
-    logger.info(f"  • Co-location reduces latency by {latency_reduction_pct:.1f}%")
-    logger.info(f"  • Per-step savings: {latency_reduction:.2f}ms")
-    logger.info(f"  • Total savings (10 steps): {total_reduction:.2f}ms")
-    logger.info("")
-    
-    # Create visualization
-    logger.info("Visual Comparison:")
-    logger.info("")
-    
-    baseline_bar = "█" * int(baseline_avg)
-    optimized_bar = "█" * int(optimized_avg)
-    
-    logger.info(f"Baseline:  {baseline_bar} {baseline_avg:.2f}ms")
-    logger.info(f"Optimized: {optimized_bar} {optimized_avg:.2f}ms")
-    logger.info("")
-    
-    # Conclusion
-    if latency_reduction_pct >= 30:
-        logger.info("✅ EXCELLENT: >30% improvement - semantic optimization works!")
-    elif latency_reduction_pct >= 15:
-        logger.info("✅ GOOD: >15% improvement - semantic optimization helps!")
-    elif latency_reduction_pct >= 10:
-        logger.info("⚠️  OK: >10% improvement - semantic optimization has some benefit")
-    else:
-        logger.info("❌ POOR: <10% improvement - need to investigate")
-    
-    logger.info("")
-    logger.info("=" * 70)
-    logger.info("Comparison complete!")
-    logger.info("=" * 70)
-
-
-if __name__ == "__main__":
-    main()
-```
-
-**Run comparison:**
-```bash
-cd benchmarks
-python compare_results.py
-```
-
-**Expected output:**
-```
-============================================================
-📊 Performance Comparison: Baseline vs Optimized
-============================================================
-
-Results:
-
-Metric                         Baseline        Optimized       Improvement    
-----------------------------------------------------------------------
-Avg Latency (ms/step)          12.45           6.23            6.22 ms (50.0%)
-Total Time (ms)                124.50          62.30           62.20 ms (50.0%)
-
-Analysis:
-  • Co-location reduces latency by 50.0%
-  • Per-step savings: 6.22ms
-  • Total savings (10 steps): 62.20ms
-
-Visual Comparison:
-
-Baseline:  ████████████ 12.45ms
-Optimized: ██████ 6.23ms
-
-✅ EXCELLENT: >30% improvement - semantic optimization works!
-
-============================================================
-Comparison complete!
-============================================================
-```
-
-**SUCCESS CHECKPOINT 16:** Comparison shows >30% improvement ✅
-
-#### Day 8 Checkpoint
-
-**End of Day 8 - YOU MUST HAVE:**
-- ✅ Optimized measurement collected
-- ✅ Comparison shows >10% improvement
-- ✅ Results documented
-
-**If improvement < 10%:** Debug before moving to Day 9!
-
-**Git commit:**
-```bash
-git add benchmarks/
-git commit -m "Day 8: Optimized performance measured, showing X% improvement"
-```
-
----
-
-### Day 9: Documentation and Analysis
-
-**Goal:** Document findings and create evaluation section
-
-**Time:** 4 hours
-
-#### Step 9.1: Create Evaluation Document (2 hours)
-
-```bash
-touch docs/EVALUATION_WEEK2.md
-```
-
-Content:
-```markdown
-# Week 2 Evaluation: Semantic Optimization
-
-## Research Question
-
-**Does semantic information enable performance improvements in disaggregated execution?**
-
-## Approach
-
-We implemented and evaluated LLM decode co-location optimization:
-
-### Baseline (Semantic-Blind)
-- Random placement of KV cache and decoder
-- Transfer KV cache (~0.4MB) every decode step
-- Total transfer per step: 0.38 MB
-
-### Optimized (Semantic-Aware)
-- Co-locate KV cache and decoder on same device
-- No KV cache transfer needed
-- Total transfer per step: 0.003 MB (token only)
-
-## Results
-
-| Metric | Baseline | Optimized | Improvement |
-|--------|----------|-----------|-------------|
-| Avg Latency/Step | 12.45ms | 6.23ms | **50.0%** ✅ |
-| Total Time (10 steps) | 124.50ms | 62.30ms | **50.0%** ✅ |
-| Data Transferred/Step | 0.38 MB | 0.003 MB | **99.2%** ✅ |
-
-## Analysis
-
-### Why the Improvement?
-
-**Baseline:** Every decode step:
-1. Transfer KV cache (0.38 MB): ~5.7ms
-2. Transfer token (0.003 MB): ~0.05ms
-3. Compute decode: ~6.5ms
-4. **Total: 12.25ms**
-
-**Optimized:** Every decode step:
-1. Transfer token (0.003 MB): ~0.05ms (KV cache already there!)
-2. Compute decode: ~6.15ms
-3. **Total: 6.20ms**
-
-**Improvement:** Eliminated 5.7ms of KV cache transfer per step!
-
-### Breakdown
-
-```
-Baseline:
-├─ Network transfer: 46% (5.75ms)
-├─ Compute: 52% (6.50ms)
-└─ Overhead: 2% (0.20ms)
-
-Optimized:
-├─ Network transfer: 1% (0.05ms)  ✅ Eliminated!
-├─ Compute: 97% (6.15ms)
-└─ Overhead: 2% (0.10ms)
-```
-
-## Key Findings
-
-### 1. Semantic Information is Critical ✅
-
-Without knowing it's an LLM decode phase:
-- System would place cache and decoder randomly
-- Every step transfers large cache
-- 50% performance penalty
-
-With semantic information:
-- System knows to co-locate
-- Cache stays on same device
-- 50% performance improvement
-
-### 2. Optimization is Automatic ✅
-
-Programmer writes:
-```python
-x = torch.randn(10, 10, device="remote_accelerator:0")
-y = model.decode_step(x)
-```
-
-Genie automatically:
-1. Recognizes decode pattern
-2. Applies co-location
-3. Enforces placement
-4. No code changes needed!
-
-### 3. Scales with Sequence Length 📈
-
-| KV Cache Size | Baseline | Optimized | Improvement |
-|---------------|----------|-----------|-------------|
-| 128 tokens (0.4MB) | 12.45ms | 6.23ms | 50% |
-| 1024 tokens (3.2MB) | 23.67ms | 6.28ms | 73% |
-| 2048 tokens (6.4MB) | 38.91ms | 6.32ms | 84% |
-
-**Insight:** Benefit increases with cache size (real LLMs have 5GB+ caches!)
-
-## Limitations
-
-1. **Simulated Transfer:** Used `time.sleep()` to simulate network transfer
-   - Real network has variability
-   - Need actual network measurements
-
-2. **Single Optimization:** Only tested co-location
-   - Other optimizations (prefill parallelization, etc.) not tested
-   - Need comprehensive evaluation
-
-3. **Simple Model:** SimpleLLM is toy model
-   - Real LLMs are more complex
-   - Need evaluation on actual models (GPT-2, BERT)
 
 ## Next Steps
 
-### Short-term (Week 3)
-1. Add real network measurements (not simulated)
-2. Test with actual model (GPT-2 small)
-3. Measure on real hardware (2 physical servers)
-
-### Long-term (Future Work)
-1. Implement additional optimizations:
-   - Prefill parallelization
-   - Vision pipeline scheduling
-   - Multi-modal parallel execution
-2. Comprehensive evaluation:
-   - Multiple workload types
-   - Various model sizes
-   - Real cluster deployment
-
-## Conclusion
-
-**Semantic information enables 50% performance improvement for LLM decode workload.**
-
-This demonstrates that framework-level disaggregation can exploit semantic information to achieve optimizations impossible for semantically-blind systems.
-
----
-
-**Measurements:** `benchmarks/baseline_no_colocation.json`, `benchmarks/optimized_with_colocation.json`  
-**Code:** `genie/semantic/optimizer.py`, `genie/core/executor.py`  
-**Date:** [Today's date]
+- [API Reference](api-reference.md)
+- [Deployment Guide](deployment.md)
+- [Performance Tuning](performance.md)
 ```
 
-#### Step 9.2: Create Summary Presentation (1 hour)
+### 9.3 Community Building
 
-```bash
-touch docs/WEEK2_RESULTS_SUMMARY.md
+**Launch Strategy:**
+
+1. **Week 1-2: Soft Launch**
+   - Announce on internal channels
+   - Gather feedback from early adopters
+   - Fix critical bugs
+
+2. **Week 3-4: Public Announcement**
+   - Blog post explaining vision
+   - Reddit/HN announcement
+   - Twitter thread with examples
+
+3. **Week 5-8: Community Growth**
+   - Respond to issues quickly (<24h)
+   - Merge first external PRs
+   - Publish tutorial videos
+
+4. **Week 9-12: Conference Submission**
+   - Submit to MLSys/OSDI
+   - Demo at conferences
+   - Workshop presentations
+
+**Engagement Metrics:**
+
+| Metric | 3 Months | 6 Months | 12 Months |
+|--------|----------|----------|-----------|
+| GitHub stars | 100 | 500 | 2000 |
+| Contributors | 5 | 15 | 30 |
+| PyPI downloads | 1K | 10K | 50K |
+| Issues closed | 20 | 100 | 300 |
+
+### 9.4 License & Attribution
+
+**Recommended License:** Apache 2.0
+
+**Rationale:**
+- Permissive (allows commercial use)
+- Patent grant (protects users)
+- Compatible with PyTorch (BSD license)
+- Industry standard for ML frameworks
+
+**Attribution:**
+
 ```
+Copyright 2024 Genie Contributors
 
-Content with visualizations:
-```markdown
-# Week 2 Results Summary
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
 
-## The Problem
-
-```
-❌ Semantic-Blind Placement (Baseline)
-┌────────────┐        5.7ms transfer         ┌────────────┐
-│  GPU 0     │ ←──────────────────────────  │  GPU 1     │
-│            │      (0.4 MB KV cache)       │            │
-│  Decoder   │                              │ KV Cache   │
-└────────────┘                              └────────────┘
-Every decode step: 12.45ms
-```
-
-```
-✅ Semantic-Aware Placement (Optimized)
-┌────────────┐
-│  GPU 0     │
-│            │
-│  Decoder   │  ← KV Cache (no transfer!)
-│  KV Cache  │
-└────────────┘
-Every decode step: 6.23ms (50% faster!)
-```
-
-## The Results
-
-### Performance Improvement
-```
-Baseline:  ████████████████████████ 12.45ms
-Optimized: ████████████ 6.23ms
-
-50% FASTER ✅
-```
-
-### Data Transfer Reduction
-```
-Baseline:  ████████████████████████████████ 0.38 MB/step
-Optimized: █ 0.003 MB/step
-
-99% LESS DATA ✅
-```
-
-## Why This Matters
-
-### For Research
-- **Proves semantic information enables optimizations**
-- Automatic optimization without code changes
-- Framework-level approach is viable
-
-### For OSDI Paper
-- Clear performance improvement (50%)
-- Measurable, reproducible
-- Simple to explain
-
-### For Real Systems
-- Scales with model size (bigger models → bigger gains)
-- Applies to production workloads
-- No programmer effort required
-
-## Implementation Status
-
-| Component | Status | Lines of Code |
-|-----------|--------|---------------|
-| HTTP Transport | ✅ Complete | ~300 |
-| LazyTensor Integration | ✅ Complete | ~50 |
-| Semantic Optimizer | ✅ Complete | ~100 |
-| Executor Co-location | ✅ Complete | ~80 |
-| Measurements | ✅ Complete | ~150 |
-| **Total** | **✅ Working** | **~680** |
-
-## What We Learned
-
-### What Worked
-1. ✅ HTTP/REST was perfect for prototype
-2. ✅ Co-location is simple but effective
-3. ✅ Simulation was adequate for proof-of-concept
-4. ✅ Incremental testing caught issues early
-
-### What Didn't Work
-1. ⚠️ Initially tried to build everything (too complex)
-2. ⚠️ First measurements were flawed (fixed in iteration)
-3. ⚠️ Metadata-only optimizations had no effect (fixed)
-
-### Key Insights
-1. **Semantic information is powerful** - 50% improvement from one optimization
-2. **Focus is critical** - One working optimization > Many broken ones
-3. **Measurement is essential** - Must compare to baseline
-
-## Next Steps
-
-### Week 3 Options
-
-**Option A: Add Second Optimization**
-- Implement prefill parallelization OR vision pipelining
-- Measure improvement
-- Have 2 working optimizations
-
-**Option B: Real Network Evaluation**
-- Deploy to 2 physical servers
-- Measure on real network
-- Validate simulation accuracy
-
-**Option C: Larger Models**
-- Test with GPT-2
-- Measure on real LLM
-- Show scalability
-
-**Recommendation:** Option B (real network) - validates our simulation
-
-## For Your Advisor
-
-### Elevator Pitch
-"We implemented LLM decode co-location and measured 50% latency improvement vs semantic-blind baseline. This proves semantic information enables automatic optimizations."
-
-### Technical Summary
-- Baseline: Random placement, 12.45ms/step
-- Optimized: Co-location, 6.23ms/step
-- Improvement: 50%
-- Lines of code: ~680
-- Time: 2 weeks
-
-### Next Steps
-- Add real network measurements (1 week)
-- OR add second optimization (1 week)
-- Then write evaluation section (1 week)
-
----
-
-**Status:** Week 2 complete, optimization working  
-**Timeline:** On track for 4-week plan  
-**Risk:** Low - have working system with measured improvement
-```
-
-#### Day 9 Checkpoint
-
-**End of Day 9 - YOU MUST HAVE:**
-- ✅ Evaluation document written
-- ✅ Results summary created
-- ✅ Clear visualization of improvement
-- ✅ Analysis of why optimization works
-
-**Git commit:**
-```bash
-git add docs/EVALUATION_WEEK2.md docs/WEEK2_RESULTS_SUMMARY.md
-git commit -m "Day 9: Week 2 evaluation documented"
+Based on research presented in:
+"Genie: Semantic Disaggregated Execution"
+HotNets 2024
 ```
 
 ---
 
-### Day 10: Week 2 Wrap-Up and Planning
+## 10. Risk Assessment
 
-**Goal:** Clean up, final testing, and plan Week 3
+### 10.1 Technical Risks
 
-**Time:** 3 hours
+| Risk | Probability | Impact | Mitigation |
+|------|-------------|--------|------------|
+| FX fails on >20% models | Medium | Medium | Hybrid approach with LazyTensor fallback |
+| Overhead >1μs/op | Low | High | Extensive profiling, optimization |
+| Scheduler complexity | High | Medium | Start with greedy, iterate to optimal |
+| RDMA integration issues | Medium | Low | Support TCP fallback |
+| Autograd compatibility | Medium | High | Phase 2 feature, extensive testing |
 
-#### Step 10.1: Final Testing (1 hour)
+### 10.2 Community Risks
 
-Run ALL tests to make sure nothing broke:
+| Risk | Probability | Impact | Mitigation |
+|------|-------------|--------|------------|
+| Low adoption | Medium | High | Focus on easy Tier 1 deployment |
+| Competing frameworks | Low | Medium | Differentiate with semantics |
+| Maintenance burden | Medium | Medium | Build contributor community early |
+| API churn | Low | High | Deprecation policy with long timeline |
 
-```bash
-# Week 1 tests
-pytest tests/test_simple_client.py -v
-python tests/test_lazy_tensor_remote.py
+### 10.3 Project Risks
 
-# Week 2 tests
-python tests/test_colocation.py
-
-# Examples
-python examples/simple_remote_demo.py
-python examples/test_simple_llm.py
-
-# Benchmarks
-cd benchmarks
-python measure_baseline_llm.py
-python measure_optimized_llm.py
-python compare_results.py
-cd ..
-```
-
-**All tests should pass!** ✅
-
-#### Step 10.2: Create Week 3 Plan (1 hour)
-
-```bash
-touch docs/WEEK3_PLAN.md
-```
-
-Content:
-```markdown
-# Week 3 Plan
-
-## Goal
-Validate results with real network OR add second optimization
-
-## Option A: Real Network Validation (Recommended)
-
-### Setup (Day 11-12)
-1. Set up 2 physical machines (or VMs)
-2. Install Genie on both
-3. Configure network
-4. Test connectivity
-
-### Measurement (Day 13-14)
-1. Run baseline measurement
-2. Run optimized measurement
-3. Compare to simulation
-4. Document findings
-
-### Analysis (Day 15)
-1. Analyze differences
-2. Update evaluation
-3. Write findings
-
-**Expected Outcome:** Validate that simulation was accurate (within 10%)
-
-## Option B: Second Optimization
-
-### Implementation (Day 11-13)
-1. Choose optimization (prefill parallel OR vision pipeline)
-2. Implement in optimizer
-3. Update executor
-4. Test
-
-### Measurement (Day 14)
-1. Measure baseline
-2. Measure optimized
-3. Compare
-
-### Documentation (Day 15)
-1. Document results
-2. Compare both optimizations
-3. Update evaluation
-
-**Expected Outcome:** Have 2 working optimizations
-
-## Option C: Larger Model
-
-### Setup (Day 11-12)
-1. Get GPT-2 small model
-2. Integrate with Genie
-3. Test local execution
-
-### Measurement (Day 13-14)
-1. Measure baseline
-2. Measure optimized
-3. Compare
-
-### Analysis (Day 15)
-1. Analyze results
-2. Compare to SimpleLLM
-3. Document findings
-
-**Expected Outcome:** Show optimization works on real model
-
-## Recommendation
-
-**Do Option A** (real network) because:
-1. Validates our simulation was accurate
-2. Addresses "limitation" from Week 2 evaluation
-3. Strengthens paper claims
-4. Lower risk than new optimization
-
-## Decision
-
-Choose one option and stick with it!
-```
-
-#### Step 10.3: Update Overall Status (30 min)
-
-```bash
-touch docs/OVERALL_STATUS.md
-```
-
-Content:
-```markdown
-# Genie Implementation Status
-
-**Last Updated:** [Today's date]  
-**Timeline:** Week 2 of 4 complete
-
-## Completed ✅
-
-### Week 1: HTTP Transport
-- HTTP server with FastAPI
-- Python client with requests
-- LazyTensor integration
-- End-to-end remote execution
-- Baseline measurements
-
-### Week 2: Semantic Optimization
-- LLM decode co-location optimization
-- Optimizer implementation
-- Executor co-location enforcement
-- Performance measurement
-- **Result: 50% improvement** ✅
-
-## Current Status
-
-### What Works
-1. ✅ Remote execution via HTTP
-2. ✅ LazyTensor device inference
-3. ✅ Semantic optimization (co-location)
-4. ✅ Performance measurement
-5. ✅ Baseline comparison
-
-### What Doesn't Work Yet
-1. ⚠️ Only single-input operations
-2. ⚠️ Only 8 operations supported
-3. ⚠️ Only one optimization implemented
-4. ⚠️ Simulated network (not real network)
-
-## Metrics
-
-| Metric | Target | Current | Status |
-|--------|--------|---------|--------|
-| Remote execution | Working | ✅ Working | Done |
-| Semantic optimization | 1+ working | ✅ 1 working | Done |
-| Performance improvement | >10% | ✅ 50% | Exceeded! |
-| Lines of code | <1000 | ~680 | Good |
-| Test coverage | All tests pass | ✅ All passing | Good |
-
-## Timeline
-
-```
-Week 1 (Done): ████████████████████ 100%
-Week 2 (Done): ████████████████████ 100%
-Week 3 (Plan): ░░░░░░░░░░░░░░░░░░░░   0%
-Week 4 (Plan): ░░░░░░░░░░░░░░░░░░░░   0%
-```
-
-## For OSDI Submission
-
-### Have
-- ✅ Working remote execution
-- ✅ Working semantic optimization
-- ✅ Measured performance improvement (50%)
-- ✅ Baseline comparison
-- ✅ Clear explanation of benefit
-
-### Need
-- ⚠️ Real network validation
-- ⚠️ Second optimization (optional)
-- ⚠️ Larger model evaluation (optional)
-- ⚠️ Written evaluation section
-
-### Risk Assessment
-- **Low risk** - Have working system with clear results
-- **Medium confidence** - 2 weeks remaining is reasonable
-- **Contingency** - Can submit with current results if needed
-
-## Next Actions
-
-**This Week:**
-1. Choose Week 3 direction (real network recommended)
-2. Execute Week 3 plan
-3. Document results
-
-**Next Week:**
-1. Write evaluation section
-2. Create graphs
-3. Final testing
-4. Submit!
-
-## Notes
-
-- HTTP transport was right choice - simple and effective
-- Focus on one optimization was critical
-- Measurement discipline paid off
-- 4-week timeline is on track
-```
-
-#### Step 10.4: Clean Up Code (30 min)
-
-```bash
-# Remove any debug prints
-# Add comments where needed
-# Format code consistently
-
-# Example: Add docstrings
-# Example: Remove old commented code
-# Example: Update README
-```
-
-#### Day 10 Checkpoint
-
-**End of Day 10 - Week 2 COMPLETE! 🎉**
-
-**YOU MUST HAVE:**
-- ✅ All tests passing
-- ✅ Week 3 plan created
-- ✅ Overall status documented
-- ✅ Code cleaned up
-
-**Git commit:**
-```bash
-git add docs/
-git commit -m "Day 10: Week 2 complete - 50% improvement demonstrated"
-git push origin http-transport-implementation
-```
+| Risk | Probability | Impact | Mitigation |
+|------|-------------|--------|------------|
+| Timeline slippage | Medium | Medium | Phased approach, MVP focus |
+| Scope creep | High | Medium | Strict feature prioritization |
+| Resource constraints | Low | High | Clear phase deliverables |
+| Paper rejection | Low | Medium | Strong evaluation, reproduce paper |
 
 ---
 
-## Week 2 Final Checklist
+## 11. Timeline & Milestones
 
-Before Week 3, verify:
+### 11.1 Detailed Timeline
 
-- [ ] SimpleLLM workload created
-- [ ] Baseline measured (no co-location)
-- [ ] Co-location implemented in optimizer
-- [ ] Co-location enforced in executor
-- [ ] Optimized performance measured
-- [ ] Results compared (>10% improvement)
-- [ ] Evaluation document written
-- [ ] All tests passing
-- [ ] Week 3 plan created
+**Phase 1: Core Architecture (Weeks 1-4)**
 
-**If ANY checkbox unchecked, complete it before Week 3!**
+| Week | Task | Deliverable | Risk |
+|------|------|-------------|------|
+| 1 | LazyTensor subclass | Proper torch.Tensor subclass with __torch_dispatch__ | Low |
+| 2 | Factory interceptor | Clean wrapping of ~25 factory functions (including tensor, as_tensor, from_numpy) | Low |
+| 2 | Remove library.py | Delete redundant mechanism | Low |
+| 2 | Capture context manager | Thread-local state signaling for transparent interception | Low |
+| 3 | Graph interface | Unified Graph/Node abstractions | Medium |
+| 4 | Testing & docs | Unit tests, API docs, performance benchmarks | Low |
 
----
+**Milestone 1:** Clean interception layer with 2 mechanisms supporting both API styles, >90% test coverage
 
-## Weeks 3-4: Brief Overview
+**Phase 2: Hybrid Graph (Weeks 5-8)**
 
-### Week 3: Choose ONE Path
+| Week | Task | Deliverable | Risk |
+|------|------|-------------|------|
+| 5 | FX adapter | FXGraphAdapter with unified interface | Low |
+| 6 | LazyDAG adapter | LazyDAGAdapter with unified interface | Low |
+| 7 | HybridGraphBuilder | Automatic fallback between FX and LazyDAG | Medium |
+| 8 | Capture API | Context manager, get_graph() | Low |
 
-**Path A: Real Network (Recommended)**
-- Day 11-12: Setup 2 machines
-- Day 13-14: Measure on real network
-- Day 15: Document
+**Milestone 2:** Hybrid graph working for 95% of models
 
-**Path B: Second Optimization**
-- Day 11-13: Implement prefill parallel
-- Day 14: Measure
-- Day 15: Document
+**Phase 3: Semantic Analysis (Weeks 9-12)**
 
-**Path C: Larger Model**
-- Day 11-12: Integrate GPT-2
-- Day 13-14: Measure
-- Day 15: Document
+| Week | Task | Deliverable | Risk |
+|------|------|-------------|------|
+| 9 | Pattern matchers | Attention, convolution, KV cache detection | Medium |
+| 10 | Phase detection | Prefill/decode classification | Medium |
+| 11 | Cost estimation | FLOPs, memory, intensity | Low |
+| 12 | Integration | Annotate API, metadata storage | Low |
 
-### Week 4: Writing
+**Milestone 3:** Semantic annotations on all nodes
 
-- Day 16-17: Write evaluation section
-- Day 18: Create graphs/tables
-- Day 19: Final testing
-- Day 20: Review and submit
+**Phase 4: Scheduler (Weeks 13-16)**
 
----
+| Week | Task | Deliverable | Risk |
+|------|------|-------------|------|
+| 13 | Cost model | Compute + transfer + queueing | Medium |
+| 14 | Placement algorithm | Greedy placer with co-location | Medium |
+| 15 | Schedule generation | Topological sort with pipelining hints | High |
+| 16 | Optimization | Performance tuning, edge cases | High |
 
-## Debugging Guide
+**Milestone 4:** Working scheduler with <10% overhead on local execution
 
-### Common Issues and Solutions
+**Phase 5: Tier 2 Execution (Weeks 17-20)**
 
-#### Issue 1: Server Won't Start
+| Week | Task | Deliverable | Risk |
+|------|------|-------------|------|
+| 17 | gRPC server | Remote execution server | Low |
+| 18 | gRPC client | Client-side execution backend | Low |
+| 19 | Multi-node | Cluster configuration, coordination | Medium |
+| 20 | Integration | End-to-end Tier 2 deployment | Medium |
 
-**Symptom:**
-```
-Error: Address already in use
-```
+**Milestone 5:** Multi-node disaggregation working
 
-**Solution:**
-```bash
-# Check what's using port 8888
-lsof -i :8888
+**Phase 6: Documentation & Release (Weeks 21-24)**
 
-# Kill it
-kill -9 <PID>
+| Week | Task | Deliverable | Risk |
+|------|------|-------------|------|
+| 21 | Documentation | Complete docs, tutorials, examples | Low |
+| 22 | Benchmarks | Performance validation, paper reproduction | Medium |
+| 23 | Polish | Bug fixes, API cleanup | Low |
+| 24 | Release | v1.0 release, announcement | Low |
 
-# Or use different port
-python -m genie.runtime.simple_server --port 8889
-```
+**Milestone 6:** v1.0 production release
 
-#### Issue 2: Client Can't Connect
+### 11.2 Success Criteria
 
-**Symptom:**
-```
-ConnectionRefusedError: [Errno 61] Connection refused
-```
+**Technical:**
+- ✅ <1μs per-operation overhead
+- ✅ >95% model compatibility (FX + LazyDAG)
+- ✅ <10% end-to-end disaggregation overhead
+- ✅ All paper results reproduced
+- ✅ Support for both device-based and context-based APIs
+- ✅ Transparent interception with thread-local capture context
 
-**Solutions:**
-1. Check server is running: `curl http://localhost:8888/health`
-2. Check firewall: `sudo ufw status`
-3. Try 127.0.0.1: `curl http://127.0.0.1:8888/health`
+**Community:**
+- ✅ 100+ GitHub stars in first 3 months
+- ✅ 5+ external contributors
+- ✅ 1000+ PyPI downloads
+- ✅ Zero critical bugs
 
-#### Issue 3: LazyTensor Not Created
-
-**Symptom:**
-```python
-x = torch.randn(10, 10, device="remote_accelerator:0")
-type(x)  # torch.Tensor (not LazyTensor!)
-```
-
-**Solution:**
-Check device registration:
-```python
-from genie.core.device import get_device
-device = get_device(0)
-print(device)  # Should print remote_accelerator:0
-```
-
-#### Issue 4: Remote Execution Fails
-
-**Symptom:**
-```
-RuntimeError: Remote execution failed
-```
-
-**Debug steps:**
-```python
-# 1. Check server health
-curl http://localhost:8888/health
-
-# 2. Check operation is supported
-# Look at simple_server.py SUPPORTED dict
-
-# 3. Enable debug logging
-import logging
-logging.basicConfig(level=logging.DEBUG)
-
-# 4. Check executor is routing correctly
-# Should see: "🌐 Remote execution: aten::relu"
-```
-
-#### Issue 5: Co-location Not Working
-
-**Symptom:**
-No performance improvement
-
-**Debug:**
-```python
-# Check metadata is set
-x = torch.randn(10, 10, device="remote_accelerator:0")
-print(hasattr(x, 'metadata'))
-print(x.metadata.colocation_enabled if hasattr(x, 'metadata') else None)
-
-# Check device assignment
-from genie.core.executor import _device_assignments
-print(_device_assignments)  # Should show group → device mapping
-```
-
-#### Issue 6: Tests Fail
-
-**Symptom:**
-```
-pytest tests/test_simple_client.py
-FAILED
-```
-
-**Debug:**
-```bash
-# Run with verbose output
-pytest tests/test_simple_client.py -v -s
-
-# Run single test
-pytest tests/test_simple_client.py::test_health_check -v
-
-# Check server is running
-curl http://localhost:8888/health
-```
+**Research:**
+- ✅ Paper accepted to top-tier venue (MLSys/OSDI/NSDI)
+- ✅ 3+ citations in first year
+- ✅ Industry adoption (1+ company)
 
 ---
 
-## Tips for Success
+## 12. Conclusion
 
-### 1. Work Incrementally
+This refactoring plan transforms Genie from a research prototype into a production-ready, open-source framework. Key improvements:
 
-❌ Don't:
-```
-- Implement entire Week 1 in one day
-- Test everything at the end
-```
+1. **Simplified Architecture:** 2 interception mechanisms instead of 3
+2. **Production Quality:** <1μs overhead, robust error handling
+3. **Wide Compatibility:** Hybrid graph (FX + LazyDAG) covers 95%+ models
+4. **Open-Source Ready:** Clean APIs, comprehensive docs, community focus
+5. **Incremental Deployment:** 3 tiers (local → cluster → RDMA)
 
-✅ Do:
-```
-- Complete one checkpoint
-- Test immediately
-- Commit before moving on
-```
+**Recommended Next Steps:**
 
-### 2. Test Often
+1. **Week 1:** Team alignment on this plan (incorporating peer review fixes)
+2. **Week 1-2:** Set up repository structure, CI/CD
+3. **Week 2-4:** Implement Phase 1 (core architecture with capture context fixes)
+4. **Week 4:** Review progress, adjust timeline
 
-After every change:
-```bash
-# Quick test
-curl http://localhost:8888/health
+**Key Decision Points:**
 
-# Full test
-pytest tests/
-```
+1. ✅ **Factory wrapping is necessary** (confirmed)
+2. ✅ **Target 3-tier deployment** (local → cluster → RDMA)
+3. ✅ **Open-source with Apache 2.0 license**
+4. ✅ **Support both API styles** (device-based + context-based)
+5. ✅ **Thread-local capture context signaling** (critical fix implemented)
+6. ⏳ **Timeline: 24 weeks to v1.0** (aggressive but achievable)
 
-### 3. Keep Server Running
-
-Open **3 terminals**:
-```
-Terminal 1: Server (python -m genie.runtime.simple_server)
-Terminal 2: Development (editing files)
-Terminal 3: Testing (running tests)
-```
-
-### 4. Save Results
-
-After each measurement:
-```bash
-# Save terminal output
-python benchmark.py | tee results.txt
-
-# Save JSON files
-cp baseline.json baseline_backup_$(date +%Y%m%d).json
-```
-
-### 5. Git Commit Often
-
-After each checkpoint:
-```bash
-git add -A
-git commit -m "Checkpoint X: Description"
-```
-
-### 6. Ask for Help
-
-**If stuck > 30 minutes:**
-1. Read error message carefully
-2. Check debugging guide above
-3. Google the error
-4. Ask for help (provide error message + what you tried)
-
-### 7. Take Breaks
-
-```
-Every hour: 5-minute break
-Every 2 hours: 15-minute break
-Every 4 hours: 30-minute break + meal
-```
-
-Tired programmer = buggy code!
+This plan balances ambition with pragmatism, ensuring we deliver a system that is both research-innovative and production-viable.
 
 ---
 
-## Success Criteria Summary
+## Appendix A: Alternative Approaches Considered
 
-### Week 1 Success = ✅
-- Server starts
-- curl health check works
-- Client test passes
-- LazyTensor remote execution works
-- Demo runs
-- Baseline measured
+### A.1 Pure FX Graph (Rejected)
 
-### Week 2 Success = ✅
-- SimpleLLM workload works
-- Baseline measured (no optimization)
-- Co-location implemented
-- Optimized measured
-- Improvement >10%
-- Evaluation documented
+**Pros:** Standard format, rich tooling  
+**Cons:** Fails on 20% of models with dynamic control flow  
+**Decision:** Use as primary with fallback
 
-### Week 3 Success = ✅
-- Chosen path completed
-- Additional data collected
-- Findings documented
+### A.2 Pure LazyTensor DAG (Rejected)
 
-### Week 4 Success = ✅
-- Evaluation section written
-- Graphs created
-- All tests passing
-- Ready to submit
+**Pros:** Always works, no tracer failures  
+**Cons:** Non-standard format, no tooling ecosystem  
+**Decision:** Use as fallback only
 
----
+### A.3 torch.library Only (Rejected)
 
-## Conclusion
+**Pros:** Official PyTorch extension mechanism  
+**Cons:** Doesn't intercept factory functions, redundant with __torch_dispatch__  
+**Decision:** Remove this mechanism
 
-**You now have a complete, step-by-step plan to:**
+### A.4 Four-Tier Deployment (Rejected)
 
-1. ✅ Build working HTTP transport (Week 1)
-2. ✅ Implement semantic optimization (Week 2)
-3. ✅ Measure >10% improvement (Week 2)
-4. ⏳ Validate or extend (Week 3)
-5. ⏳ Write evaluation (Week 4)
+**Pros:** More granular options
+**Cons:** Too complex for users to choose
+**Decision:** Three tiers is sufficient
 
-**Total timeline:** 4 weeks  
-**Confidence:** 80%  
-**Risk:** Low
+### A.5 Single API Style (Rejected)
 
-**Remember:**
-- Follow checkpoints strictly
-- Test after every step
-- Commit often
-- Ask for help early
-- Focus on making ONE optimization work perfectly
+**Option 1: Device-based only**
+**Pros:** Matches paper API exactly
+**Cons:** Less flexible for users
+**Decision:** Support both styles for maximum compatibility
 
-**You've got this!** 🚀
-
-Good luck!---
-
-## What If Things Go Wrong?
-
-Reality: Things take longer than expected. Here is how to adapt.
-
-### If Week 1 Takes Longer
-
-**Day 5 incomplete?**
-- Extend to Day 6
-- Skip documentation (Day 5.3)
-- Focus on getting basic demo working
-
-**Still stuck Day 6?**
-- **STOP and ask for help** - do not proceed to Week 2
-- Debug transport issues first
-- Week 2 depends on Week 1 working
-
-**Day 4 stuck?**
-- Fall back to simpler approach:
-  ```python
-  # Simple executor (no LazyTensor integration)
-  def execute_on_remote_simple(operation, tensor):
-      client = RemoteExecutionClient()
-      return client.execute(operation, tensor)
-
-  # Use directly:
-  result = execute_on_remote_simple("relu", my_tensor)
-  ```
-
-### If Week 2 Takes Longer
-
-**Day 7: Optimization not working?**
-- Check metadata is being set:
-  ```python
-  print(node.meta)  # Should show colocation_enabled=True
-  ```
-- Check executor is reading it:
-  ```python
-  print(lazy_tensor.metadata.colocation_enabled)
-  ```
-- Add debug prints everywhere:
-  ```python
-  logger.setLevel(logging.DEBUG)
-  ```
-
-**Day 8: No performance improvement?**
-- **Do not fake results!** Investigate why:
-  - Is co-location actually being enforced?
-  - Are measurements correct?
-  - Is baseline actually different from optimized?
-- If truly no benefit:
-  - Try different optimization
-  - OR accept results and explain why
-  - Honesty > fake data
-
-**Week 2 running long?**
-- **OK to extend to 3 weeks** for optimization
-- Quality > speed
-- Better to have 1 working optimization than 3 broken ones
-
-### If Week 3 Unclear
-
-**Do not know which option to pick?**
-- **Default: Option A (real network)**
-- Addresses biggest limitation
-- Validates simulation
-- Strengthens paper
-
-**Option A blocked (no hardware)?**
-- Do Option C (larger model)
-- Shows scalability
-- Still valuable
-
-**All options blocked?**
-- Skip Week 3 entirely
-- Go straight to Week 4 (writing)
-- **This is OK!** Have working optimization
-
-### If Week 4 Rushed
-
-**Not enough time to write everything?**
-- Write minimal evaluation section:
-  - 1 paragraph: what you did
-  - 1 table: results
-  - 1 paragraph: what it means
-- **Better to submit something than nothing**
-
-**Still not done?**
-- Submit what you have
-- Mark sections as "in progress"
-- **Submitting imperfect work > not submitting**
-
-### Emergency Fallback
-
-**If everything goes wrong and deadline is tomorrow:**
-
-**Minimum viable submission:**
-1. ✅ HTTP transport working (Week 1)
-2. ✅ Can execute operations remotely
-3. ⚠️ One baseline measurement
-4. ⚠️ Short evaluation section explaining what works
-
-**This is NOT ideal, but it is submittable.**
-
-### When to Ask for Help
-
-**Ask immediately if:**
-- Stuck >30 minutes on same error
-- Tests fail and you do not understand why
-- Major design decision needed
-- Week 1 not done by Day 6
-- Week 2 not done by Day 15
-
-**Do not suffer in silence!**
+**Option 2: Context-based only**
+**Pros:** Cleaner, more explicit
+**Cons:** Breaks existing paper code
+**Decision:** Support both styles for smooth migration
 
 ---
 
-## Tips for Junior Developers
+## Appendix B: Performance Profiling Strategy
 
-### Pair Programming
-
-**When stuck (>30 min):**
-1. **Rubber Duck Debugging**
-   - Explain problem out loud
-   - Often you will realize the issue while explaining
-
-2. **Ask a Colleague**
-   - "Can you look at this with me?"
-   - Fresh eyes catch issues you missed
-
-3. **Screen Share**
-   - Walk through code step-by-step
-   - Explain what you expected vs what happened
-
-### Code Review (Before Commit)
-
-1. **Self-Review**
-   ```bash
-   git diff  # Review all changes
-   ```
-   - Remove debug prints
-   - Add comments to tricky parts
-   - Check for hardcoded paths
-
-2. **Run Tests**
-   ```bash
-   pytest tests/ -v
-   ```
-   - All tests should pass
-   - If not, fix before commit
-
-3. **Commit Message**
-   ```bash
-   git commit -m "Clear description of what and why"
-   ```
-   - Good: "Day 4: Fix LazyTensor device inference for remote_accelerator"
-   - Bad: "Fixed bug"
-
-### Taking Breaks
-
-**Every hour:**
-- 5-minute break
-- Stand up, walk around
-- Rest your eyes
-
-**Every 2 hours:**
-- 15-minute break
-- Get water/coffee
-- Step away from computer
-
-**Every 4 hours:**
-- 30-minute break
-- Meal
-- Fresh air
-
-**Why:** Tired programmer = bugs. Rested programmer = productivity.
-
-### Mental Health
-
-- **Frustration is normal** - Programming is hard
-- **Stuck is normal** - Everyone gets stuck
-- **Asking for help is strength** - Not weakness
-- **Progress > perfection** - Done > perfect
-
-**Remember:** You are building something NEW. It is supposed to be hard!
-
----
-
-## Technical Concerns Addressed
-
-### 1. Metadata System Needs Clarity
-
-Your current plan has this flow:
-```
-Optimizer (FX graph) → ??? → Executor (LazyTensor)
-```
-
-The `???` needs to be explicit. I recommend:
-
-**Add to Week 2, Day 7:**
-
-```markdown
-#### Step 7.2B: Metadata Translation (30 min)
-
-**Problem:** Optimizer sets FX node metadata, but executor reads LazyTensor metadata.
-
-**Solution:** GraphBuilder translates during LazyTensor creation.
-
-**File:** `genie/core/graph.py` (or wherever LazyTensors are created)
+### B.1 Profiling Points
 
 ```python
-class GraphBuilder:
-    def create_lazy_tensor_from_fx(self, fx_node, operation, inputs, kwargs):
-        """Create LazyTensor and copy FX metadata."""
-        
-        # Create LazyTensor
-        lazy_tensor = LazyTensor(operation, inputs, kwargs)
-        
-        # Copy FX metadata to LazyTensor metadata
-        if hasattr(fx_node, meta):
-            for key in [colocation_enabled, colocation_group, force_device, priority]:
-                if key in fx_node.meta:
-                    setattr(lazy_tensor.metadata, key, fx_node.meta[key])
-                    logger.debug(f"Copied metadata {key}={fx_node.meta[key]} to LazyTensor {lazy_tensor.id}")
-        
-        return lazy_tensor
+# Where to measure overhead:
+1. LazyTensor.__new__      # Object creation
+2. __torch_dispatch__      # Operation interception
+3. Shape inference         # Meta tensor overhead
+4. Graph building          # Node insertion
+5. Semantic analysis       # Pattern matching
+6. Scheduling             # Placement optimization
 ```
 
-**Test:**
-```python
-# Create FX node with metadata
-fx_node.meta[colocation_enabled] = True
-fx_node.meta[force_device] = device_0
+### B.2 Profiling Tools
 
-# Create LazyTensor
-lt = builder.create_lazy_tensor_from_fx(fx_node, "aten::relu", [x], {})
+- **cProfile:** Python-level profiling
+- **py-spy:** Low-overhead sampling profiler
+- **torch.profiler:** PyTorch operation timing
+- **NVIDIA Nsight:** GPU kernel profiling
 
-# Verify metadata copied
-assert lt.metadata.colocation_enabled == True
-assert lt.metadata.force_device == device_0
-print("✅ Metadata translation works!")
-```
-```
+### B.3 Optimization Targets
 
-### 2. Global Device Assignment
+If overhead exceeds targets:
 
-Your plan uses global dict:
-```python
-_device_assignments = {}  # colocation_group → device
-```
-
-**Is this OK?**
-
-**For Phase 1: YES** ✅
-- Simple to implement
-- Works for single-threaded execution
-- Good enough for proof-of-concept
-
-**For production: NO** ❌
-- Not thread-safe
-- Cannot have different assignments per request
-- Global state is bad
-
-**For OSDI paper: Mention as limitation**
-
-Add to Week 2 evaluation:
-```markdown
-### Limitations
-
-4. **Global Device Assignment**
-   - Current implementation uses global dictionary
-   - Not thread-safe for concurrent requests
-   - Future: Use context-local or request-scoped assignment
-```
+1. **LazyTensor creation:** Use `__slots__`, avoid dict
+2. **Shape inference:** Cache results, fast paths for common ops
+3. **Graph building:** Batch operations, lazy updates
+4. **Semantic analysis:** Only compute when needed
+5. **Scheduling:** Greedy algorithm, not ILP
 
 ---
 
-## Final Checklist Before Starting
-
-### Critical Prerequisites ✅
-- [ ] Day 0 added (environment setup)
-- [ ] Day 4 split into 4A and 4B
-- [ ] Metadata translation clarified (Day 7, Step 7.2B)
-- [ ] "What if behind schedule" section added
-
-### Important Additions ✅
-- [ ] Pair programming tips added
-- [ ] Code review checklist added
-- [ ] Mental health reminders added
-
-### Documentation ✅
-- [ ] Each day has clear success criteria
-- [ ] Each week has final checklist
-- [ ] Debug guide is comprehensive
-- [ ] Git workflow is clear
-
----
-
-## My Final Assessment
-
-### What is Excellent ✅
-
-1. **Incremental approach** - Test after every step
-2. **Realistic timeline** - 4 weeks, not 2
-3. **Clear focus** - ONE optimization proven to work
-4. **Junior-friendly** - Exact commands, no assumptions
-5. **Debugging support** - Solutions to common issues
-6. **HTTP/REST** - Standard approach, not custom
-7. **Success criteria** - Clear checkpoints
-
-### What is Good ✅
-
-8. **Week breakdown** - Logical progression
-9. **Time estimates** - Reasonable and achievable
-10. **Testing strategy** - Test often, commit after checkpoints
-11. **Documentation** - Write as you go
-12. **Scope control** - Explicit about what is Phase 1 vs Phase 2
-
-### What Needs Minor Fixes ⚠️
-
-13. **Day 0 missing** - Add environment setup
-14. **Day 4 too complex** - Split into two days
-15. **Metadata flow unclear** - Add translation step
-16. **No fallback plan** - Add "what if behind schedule"
-
-### What Could Be Better (But Is OK) 📝
-
-17. **SimpleLLM uses simulation** - OK for proof-of-concept, validate in Week 3
-18. **Global device assignment** - OK for Phase 1, mention as limitation
-19. **FX graph assumptions** - Assumes you have FX integration working
-
----
-
-## Confidence Assessment
-
-| Week | Task | Difficulty | Time Est. | Success Probability |
-|------|------|------------|-----------|---------------------|
-| 0 | Environment Setup | Easy | 1-2 hours | 98% |
-| 1 | HTTP Transport | Medium | 25-30 hours | 95% |
-| 2 | Semantic Optimization | Hard | 25-30 hours | 75% |
-| 3 | Validation | Medium | 20-25 hours | 85% |
-| 4 | Writing | Easy | 15-20 hours | 95% |
-
-**Overall Success Probability: 85%** ✅
-
-**Confidence Factors:**
-- ✅ HTTP is well-understood (high confidence)
-- ⚠️ Optimization is novel (medium confidence)
-- ✅ Measurements are straightforward (high confidence)
-- ✅ Writing is deterministic (high confidence)
-
-**Risks:**
-- Week 2 optimization does not show improvement (15% chance)
-- Environment issues delay Week 1 (10% chance)
-- Complexity underestimated (10% chance)
-- Other unexpected issues (5% chance)
-
-**Mitigation:**
-- Test incrementally (catches issues early)
-- Have fallback plans (documented)
-- Ask for help early (do not suffer alone)
-- Accept imperfect results (honest > fake)
-
----
-
-## Comparison to Original Plan
-
-| Aspect | Original | Revised | Improvement |
-|--------|----------|---------|-------------|
-| Timeline | 2 weeks | 4 weeks | ✅ Realistic |
-| Approach | Custom TCP | HTTP/REST | ✅ Standard |
-| Focus | Many features | ONE optimization | ✅ Clear |
-| Testing | End-to-end only | After every step | ✅ Better |
-| Debugging | None | Comprehensive guide | ✅ Much better |
-| Risk Management | None | Explicit fallbacks | ✅ Better |
-| Success Probability | 40% | 85% | ✅ Much better |
-
----
-
-## Recommendations
-
-### Must Do Before Starting
-
-1. **Add Day 0** - Environment setup (1-2 hours)
-2. **Split Day 4** - Into 4A (device fix) and 4B (executor)
-3. **Clarify metadata flow** - Add Step 7.2B (translation)
-4. **Add fallback section** - "What if behind schedule"
-
-### Should Do
-
-5. **Add pair programming tips**
-6. **Add code review checklist**
-7. **Add mental health reminders**
-
-### Nice to Have
-
-8. **Add troubleshooting flowchart**
-9. **Add example commit messages**
-10. **Add "common mistakes" section**
-
-### For Advisor Discussion
-
-**Tell your advisor:**
-- "I have a detailed 4-week plan"
-- "Week 1: HTTP transport (high confidence)"
-- "Week 2: ONE optimization with measurement (medium confidence)"
-- "Week 3: Validation (flexible based on Week 2)"
-- "Week 4: Writing (straightforward)"
-- "Overall: 85% confidence of success"
-
-**Ask advisor:**
-- "Does 4 weeks timeline work for submission deadline?"
-- "Which Week 3 option should I prioritize?"
-- "What is minimum acceptable for submission?"
-
----
-
-## Final Verdict
-
-### Grade: A (Outstanding)
-
-**Why A grade:**
-- ✅ Addresses all my concerns from previous review
-- ✅ Realistic timeline and scope
-- ✅ Clear incremental approach
-- ✅ Junior-developer friendly
-- ✅ Comprehensive debugging support
-- ✅ Honest about limitations
-- ✅ Has fallback plans
-
-**Why not A+:**
-- ⚠️ Missing Day 0 (environment setup)
-- ⚠️ Day 4 needs splitting
-- ⚠️ Metadata flow needs clarification
-- ⚠️ No explicit risk management section
-
-**With my suggested additions, this becomes A+**
-
-### You Are Ready to Start ✅
-
-After adding:
-1. Day 0 (environment setup)
-2. Splitting Day 4
-3. Clarifying metadata flow
-4. Adding "what if behind schedule" section
-
-**You can execute this plan with high confidence.**
-
----
-
-## What to Do Next
-
-### Immediate (Today)
-
-1. **Add Day 0 section** to your plan (30 min)
-2. **Split Day 4** into 4A and 4B (15 min)
-3. **Add Step 7.2B** (metadata translation) (15 min)
-4. **Add "What If Behind Schedule" section** (30 min)
-
-**Total: ~90 minutes to finalize plan**
-
-### Tomorrow (Day 0)
-
-1. **Follow Day 0 instructions**
-2. **Setup environment**
-3. **Run smoke tests**
-4. **Verify all dependencies work**
-
-**Total: 1-2 hours**
-
-### Day After Tomorrow (Day 1)
-
-**Start Week 1, Day 1** with confidence!
-
----
-
-## Conclusion
-
-**This is an excellent plan.** With minor additions, it is ready for execution.
-
-**Key Strengths:**
-- ✅ Realistic scope (HTTP transport, ONE optimization)
-- ✅ Incremental testing (catch issues early)
-- ✅ Clear checkpoints (know when you are done)
-- ✅ Debugging support (do not get stuck)
-- ✅ Honest approach (no fake results)
-
-**Success Probability: 85%**
-
-**Timeline: 4 weeks**
-
-**Confidence: High**
-
-**Recommendation: Execute this plan!** 🚀
-
----
-
-**Final Words of Encouragement:**
-
-You have done the hard work of planning. Now comes the fun part: building!
-
-Remember:
-- Progress > Perfection
-- Working > Fancy
-- One step at a time
-- Ask for help early
-- Celebrate small wins
-
-**You have got this!** 💪
-
-Good luck! 🎯
+**Document Status:** READY FOR REVIEW  
+**Next Action:** Team review, approval, begin Phase 1 implementation
