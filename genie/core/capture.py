@@ -77,22 +77,23 @@ class CaptureContext:
         self.prev_active = getattr(_capture_context, 'active', False)
         _capture_context.active = True
 
-        # Save previous state
+        # Save previous state - get the CURRENT root_tensor before clearing
         self.prev_root = self.builder.root_tensor
-        # Start fresh capture
+
+        # Start fresh capture for this context
         self.builder.root_tensor = None
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Restore capture state (ALWAYS, even on exception)."""
         try:
+            # Restore the capture active state
             _capture_context.active = self.prev_active
-            # Only restore root_tensor if we had a previous root_tensor
-            # If this context created a graph, keep it available for the user
-            if self.prev_root is not None:
-                self.builder.root_tensor = self.prev_root
-            # If prev_root was None, this was the outermost context that created a graph
-            # In that case, keep the root_tensor so the graph remains accessible
+
+            # ✅ FIX: Always restore the previous root_tensor
+            # This ensures nested contexts properly restore to parent context
+            self.builder.root_tensor = self.prev_root
+
         except Exception as e:
             logger.error(f"Failed to restore capture context: {e}")
             # Don't suppress original exception

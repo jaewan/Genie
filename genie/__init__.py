@@ -56,6 +56,7 @@ from .semantic import (
     ExecutionSchedule,
     SchedulingStrategy,
 )
+from .semantic.annotator import annotate_graph, AnnotatedGraph
 
 # Convenience functions for common workflows
 def analyze(graph=None):
@@ -127,6 +128,10 @@ __all__ = [
     'PatternRegistry',
     'ExecutionSchedule',
     'SchedulingStrategy',
+
+    # Phase 3
+    'annotate_graph',
+    'AnnotatedGraph',
 
     # Convenience Functions
     'analyze',

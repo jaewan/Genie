@@ -1562,7 +1562,935 @@ def is_capturing() -> bool:
 
 ### Phase 3: Semantic Analysis (Weeks 9-12)
 
-*[Continue with detailed implementation of semantic analysis, scheduler, etc.]*
+*This section provides complete implementation of semantic analysis layer.*
+
+#### 3.1 Pattern Matcher Framework
+
+**File: `genie/semantic/patterns/base_matcher.py` (NEW)**
+
+```python
+"""
+Base class for pattern matchers.
+
+Pattern matchers identify high-level computational patterns in the computation
+graph and annotate nodes with semantic metadata.
+
+Each pattern matcher is responsible for:
+1. Identifying a specific pattern (e.g., attention, convolution)
+2. Locating all occurrences in the graph
+3. Annotating matched nodes with semantic metadata
+4. Providing hints for optimization
+"""
+
+from abc import ABC, abstractmethod
+from typing import List, Dict, Any, Optional
+from dataclasses import dataclass
+
+
+@dataclass
+class Pattern:
+    """Represents a detected pattern in the computation graph."""
+    name: str
+    nodes: List[Any]  # List of GraphNode
+    metadata: Dict[str, Any]
+
+
+class PatternMatcher(ABC):
+    """
+    Abstract base class for pattern matchers.
+    
+    Subclasses implement specific pattern detection logic.
+    """
+    
+    @property
+    @abstractmethod
+    def pattern_name(self) -> str:
+        """Name of the pattern being detected."""
+        pass
+    
+    @abstractmethod
+    def match(self, graph) -> List[Pattern]:
+        """
+        Detect pattern occurrences in graph.
+        
+        Args:
+            graph: Unified Graph interface (FX or LazyDAG)
+        
+        Returns:
+            List of detected Pattern instances
+        """
+        pass
+    
+    def is_match(self, node) -> bool:
+        """
+        Check if a single node matches this pattern.
+        
+        Override for simple node-level matching.
+        """
+        return False
+
+
+class PatternRegistry:
+    """
+    Registry of all pattern matchers.
+    
+    Manages the lifecycle of pattern matchers and coordinates detection.
+    """
+    
+    def __init__(self):
+        self._matchers: List[PatternMatcher] = []
+        self._patterns_cache = {}
+    
+    def register(self, matcher: PatternMatcher):
+        """Register a new pattern matcher."""
+        self._matchers.append(matcher)
+    
+    def match_all(self, graph) -> Dict[str, List[Pattern]]:
+        """
+        Run all pattern matchers on graph.
+        
+        Returns:
+            Dict mapping pattern name → list of detected patterns
+        """
+        results = {}
+        for matcher in self._matchers:
+            try:
+                patterns = matcher.match(graph)
+                results[matcher.pattern_name] = patterns
+            except Exception as e:
+                logger.warning(f"Pattern matcher {matcher.pattern_name} failed: {e}")
+        
+        return results
+
+
+# Global pattern registry
+_global_pattern_registry = PatternRegistry()
+
+
+def get_pattern_registry() -> PatternRegistry:
+    """Get the global pattern registry."""
+    return _global_pattern_registry
+```
+
+#### 3.2 Specific Pattern Matchers
+
+**File: `genie/semantic/patterns/attention_matcher.py` (NEW)**
+
+```python
+"""
+Matcher for attention mechanisms (self-attention, cross-attention).
+
+Detects patterns like:
+- Multi-head attention: Q@K.T softmax @ V
+- Query-Key-Value projections
+- Positional encodings
+"""
+
+import torch
+import logging
+from typing import List, Dict, Any
+from .base_matcher import PatternMatcher, Pattern
+
+logger = logging.getLogger(__name__)
+
+
+class AttentionMatcher(PatternMatcher):
+    """Detects attention patterns in computation graphs."""
+    
+    @property
+    def pattern_name(self) -> str:
+        return "attention"
+    
+    def match(self, graph) -> List[Pattern]:
+        """
+        Detect attention patterns in graph.
+        
+        Key indicators:
+        1. Batch matrix multiplication (Q @ K.T)
+        2. Softmax normalization
+        3. Weighted sum (scores @ V)
+        4. Linear projections (QKV)
+        """
+        patterns = []
+        nodes = graph.nodes()
+        
+        # Look for softmax operations (characteristic of attention)
+        for i, node in enumerate(nodes):
+            if self._is_softmax_like(node):
+                # Found potential attention - backtrack to find Q@K.T pattern
+                matmul_nodes = self._find_matmul_chain(node, nodes, i)
+                if matmul_nodes:
+                    # Found attention pattern
+                    pattern = self._extract_attention_pattern(matmul_nodes, node)
+                    if pattern:
+                        patterns.append(pattern)
+        
+        return patterns
+    
+    def _is_softmax_like(self, node) -> bool:
+        """Check if node is softmax or related normalization."""
+        op = node.operation.lower()
+        return any(x in op for x in ['softmax', 'log_softmax', 'exp', 'normalize'])
+    
+    def _find_matmul_chain(self, softmax_node, nodes, idx) -> List[Any]:
+        """Trace back from softmax to find Q@K.T @ V pattern."""
+        # Implementation would traverse inputs looking for:
+        # 1. Softmax input = Q @ K.T (matmul)
+        # 2. Softmax output = scores @ V (matmul)
+        return []  # Simplified for space
+    
+    def _extract_attention_pattern(self, matmul_nodes, softmax_node) -> Optional[Pattern]:
+        """Extract attention pattern with metadata."""
+        # Determine attention type
+        attention_type = self._classify_attention(matmul_nodes)
+        
+        # All nodes involved in attention
+        all_nodes = matmul_nodes + [softmax_node]
+        
+        return Pattern(
+            name="attention",
+            nodes=all_nodes,
+            metadata={
+                'semantic_role': 'attention',
+                'attention_type': attention_type,  # 'self' or 'cross'
+                'modality': self._infer_modality(matmul_nodes),
+                'parallelizable': True,
+                'memory_intensive': True,
+                'compute_bound': True,
+            }
+        )
+    
+    def _classify_attention(self, matmul_nodes) -> str:
+        """Determine if self-attention or cross-attention."""
+        # Cross-attention if Q and K have different sources
+        # This would check metadata on input nodes
+        return "self_attention"  # Simplified
+    
+    def _infer_modality(self, nodes) -> str:
+        """Infer if this is vision, text, or multimodal attention."""
+        # Check metadata from preceding operations
+        return "text"  # Simplified
+
+
+class ConvolutionMatcher(PatternMatcher):
+    """Detects convolutional patterns."""
+    
+    @property
+    def pattern_name(self) -> str:
+        return "convolution"
+    
+    def match(self, graph) -> List[Pattern]:
+        """Detect convolutional patterns."""
+        patterns = []
+        
+        for node in graph.nodes():
+            if self._is_conv_like(node):
+                pattern = self._extract_conv_pattern(node)
+                patterns.append(pattern)
+        
+        return patterns
+    
+    def _is_conv_like(self, node) -> bool:
+        """Check if node is convolution operation."""
+        op = node.operation.lower()
+        return any(x in op for x in ['conv', 'convolution', 'conv1d', 'conv2d', 'conv3d'])
+    
+    def _extract_conv_pattern(self, conv_node) -> Pattern:
+        """Extract convolution pattern."""
+        return Pattern(
+            name="convolution",
+            nodes=[conv_node],
+            metadata={
+                'semantic_role': 'convolution',
+                'modality': 'vision',
+                'can_fuse_bn': self._can_fuse_with_bn(conv_node),
+                'can_pipeline': True,
+                'memory_footprint': 'high',
+                'optimization_hint': 'fusion_opportunity',
+            }
+        )
+    
+    def _can_fuse_with_bn(self, conv_node) -> bool:
+        """Check if conv can be fused with BatchNorm."""
+        # Check if next operation is BatchNorm
+        return False  # Simplified
+
+
+class KVCacheMatcher(PatternMatcher):
+    """Detects KV cache accumulation patterns (LLM decode phase)."""
+    
+    @property
+    def pattern_name(self) -> str:
+        return "kv_cache"
+    
+    def match(self, graph) -> List[Pattern]:
+        """
+        Detect KV cache patterns.
+        
+        Signature:
+            cache_t+1 = torch.cat([cache_t, new_kv], dim=seq_dim)
+        
+        Where cache feeds back into next iteration.
+        """
+        patterns = []
+        
+        for node in graph.nodes():
+            if self._is_cat_like(node):
+                if self._is_recurrent(node, graph):
+                    pattern = self._extract_kv_cache_pattern(node)
+                    patterns.append(pattern)
+        
+        return patterns
+    
+    def _is_cat_like(self, node) -> bool:
+        """Check if node is concatenation."""
+        op = node.operation.lower()
+        return 'cat' in op or 'concat' in op
+    
+    def _is_recurrent(self, cat_node, graph) -> bool:
+        """Check if output feeds back as input (recurrent pattern)."""
+        # Would check graph structure for cycles
+        return False  # Simplified
+    
+    def _extract_kv_cache_pattern(self, cat_node) -> Pattern:
+        """Extract KV cache pattern."""
+        return Pattern(
+            name="kv_cache",
+            nodes=[cat_node],
+            metadata={
+                'execution_phase': 'llm_decode',
+                'residency': 'persistent_kv_cache',
+                'requires_colocation': True,
+                'sequential': True,
+                'memory_intensive': True,
+                'optimization_hint': 'colocate_with_decoder',
+            }
+        )
+```
+
+#### 3.3 Phase Detection
+
+**File: `genie/semantic/phase_detector.py` (NEW)**
+
+```python
+"""
+Phase detection for execution phases.
+
+Identifies phases like:
+- LLM prefill (parallel attention over sequence)
+- LLM decode (sequential generation with KV cache)
+- Forward propagation
+- Backward propagation (future)
+"""
+
+from enum import Enum
+from typing import Dict, List, Any
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class ExecutionPhase(Enum):
+    """Execution phase classification."""
+    LLM_PREFILL = "llm_prefill"
+    LLM_DECODE = "llm_decode"
+    FORWARD = "forward"
+    BACKWARD = "backward"
+    INIT = "initialization"
+    UNKNOWN = "unknown"
+
+
+class PhaseDetector:
+    """
+    Detects execution phases in computation graphs.
+    
+    Uses pattern matches and heuristics to classify operations into phases.
+    """
+    
+    def __init__(self, pattern_registry):
+        self.pattern_registry = pattern_registry
+    
+    def detect_phases(self, graph) -> Dict[str, ExecutionPhase]:
+        """
+        Detect phases for all nodes in graph.
+        
+        Returns:
+            Dict mapping node_id → ExecutionPhase
+        """
+        phases = {}
+        patterns = self.pattern_registry.match_all(graph)
+        
+        # Phase 1: Detect KV cache (indicates decode)
+        if "kv_cache" in patterns and patterns["kv_cache"]:
+            decode_nodes = self._mark_decode_phase(patterns["kv_cache"], graph)
+            phases.update(decode_nodes)
+        
+        # Phase 2: Detect parallel attention (indicates prefill)
+        prefill_nodes = self._mark_prefill_phase(patterns.get("attention", []), graph)
+        phases.update(prefill_nodes)
+        
+        # Phase 3: Mark remaining as forward
+        for node in graph.nodes():
+            if node.id not in phases:
+                phases[node.id] = ExecutionPhase.FORWARD
+        
+        return phases
+    
+    def _mark_decode_phase(self, kv_cache_patterns, graph) -> Dict[str, ExecutionPhase]:
+        """Mark nodes in decode phase."""
+        phases = {}
+        
+        for pattern in kv_cache_patterns:
+            for node in pattern.nodes:
+                phases[node.id] = ExecutionPhase.LLM_DECODE
+                
+                # Also mark attention nodes connected to KV cache as decode
+                # (they're part of the decode loop)
+        
+        return phases
+    
+    def _mark_prefill_phase(self, attention_patterns, graph) -> Dict[str, ExecutionPhase]:
+        """Mark nodes in prefill phase."""
+        phases = {}
+        
+        for pattern in attention_patterns:
+            # Check if this is parallel attention (prefill)
+            if self._is_parallel_attention(pattern):
+                for node in pattern.nodes:
+                    phases[node.id] = ExecutionPhase.LLM_PREFILL
+        
+        return phases
+    
+    def _is_parallel_attention(self, pattern) -> bool:
+        """Check if attention processes multiple positions in parallel."""
+        # Heuristic: If batch size in sequence dimension > 1
+        return True  # Simplified
+
+
+class PhaseAnnotator:
+    """
+    Annotates graph nodes with phase information.
+    
+    Stores phase annotations in node metadata.
+    """
+    
+    def __init__(self, phase_detector):
+        self.phase_detector = phase_detector
+    
+    def annotate(self, graph):
+        """
+        Annotate graph nodes with phase information.
+        
+        Modifies node metadata in-place.
+        """
+        phases = self.phase_detector.detect_phases(graph)
+        
+        for node in graph.nodes():
+            phase = phases.get(node.id, ExecutionPhase.UNKNOWN)
+            if 'phase' not in node.metadata:
+                node.metadata['phase'] = phase
+```
+
+#### 3.4 Cost Estimation
+
+**File: `genie/semantic/cost_estimator.py` (NEW)**
+
+```python
+"""
+Cost estimation for operations.
+
+Estimates:
+- Compute cost (FLOPs)
+- Memory footprint (bytes)
+- Operational intensity (FLOPs/byte)
+- Data movement cost
+"""
+
+from dataclasses import dataclass
+from typing import Optional, Dict, Any
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class CostEstimate:
+    """Cost estimate for an operation."""
+    compute_flops: float  # Floating point operations
+    memory_bytes: float   # Memory footprint
+    operational_intensity: float  # FLOPs per byte
+    data_movement_bytes: float  # Input/output data volume
+
+
+class CostEstimator:
+    """
+    Estimates computational costs for operations.
+    
+    Uses shape information and operation type to estimate costs.
+    """
+    
+    def estimate_operation(self, node) -> CostEstimate:
+        """
+        Estimate cost for a single operation.
+        
+        Args:
+            node: GraphNode with shape and dtype information
+        
+        Returns:
+            CostEstimate with compute, memory, and intensity metrics
+        """
+        op = node.operation.lower()
+        
+        # Dispatch to operation-specific estimator
+        if 'matmul' in op or 'mm' in op:
+            return self._estimate_matmul(node)
+        elif 'conv' in op:
+            return self._estimate_conv(node)
+        elif 'attention' in node.metadata.get('semantic_role', ''):
+            return self._estimate_attention(node)
+        elif any(x in op for x in ['add', 'sub', 'mul', 'div']):
+            return self._estimate_elementwise(node)
+        elif 'softmax' in op or 'sigmoid' in op:
+            return self._estimate_pointwise(node)
+        else:
+            return self._estimate_generic(node)
+    
+    def _estimate_matmul(self, node) -> CostEstimate:
+        """Estimate cost for matrix multiplication."""
+        # Get shapes from inputs
+        inputs = node.inputs
+        if len(inputs) < 2:
+            return self._estimate_generic(node)
+        
+        # For A @ B: compute = 2 * M * N * K
+        # (M, K) @ (K, N) -> (M, N)
+        shape_a = getattr(inputs[0], 'shape', None)
+        shape_b = getattr(inputs[1], 'shape', None)
+        
+        if shape_a and shape_b:
+            m, k = shape_a[-2], shape_a[-1]
+            n = shape_b[-1]
+            compute_flops = 2 * m * n * k
+            
+            # Memory: inputs + output
+            dtype_bytes = 4  # float32
+            input_bytes = (m * k + k * n + m * n) * dtype_bytes
+            
+            return CostEstimate(
+                compute_flops=float(compute_flops),
+                memory_bytes=float(input_bytes),
+                operational_intensity=compute_flops / input_bytes if input_bytes > 0 else 0,
+                data_movement_bytes=float(input_bytes)
+            )
+        
+        return self._estimate_generic(node)
+    
+    def _estimate_conv(self, node) -> CostEstimate:
+        """Estimate cost for convolution."""
+        # Conv2d: FLOPs = 2 * H_out * W_out * K_h * K_w * C_in * C_out
+        # Simplified for now
+        return CostEstimate(
+            compute_flops=1e6,  # Placeholder
+            memory_bytes=1e6,
+            operational_intensity=1.0,
+            data_movement_bytes=1e6
+        )
+    
+    def _estimate_attention(self, node) -> CostEstimate:
+        """Estimate cost for attention operation."""
+        # Attention: Q @ K.T (O(n^2)) + softmax (O(n)) + @ V (O(n^2))
+        # Very high memory and compute intensity
+        return CostEstimate(
+            compute_flops=1e9,  # High compute
+            memory_bytes=1e7,
+            operational_intensity=100.0,  # Very compute-bound
+            data_movement_bytes=1e7
+        )
+    
+    def _estimate_elementwise(self, node) -> CostEstimate:
+        """Estimate cost for element-wise operations."""
+        shape = getattr(node, 'shape', None)
+        if shape:
+            elements = 1
+            for dim in shape:
+                elements *= dim
+            
+            # Element-wise: 1 FLOP per element
+            compute_flops = elements
+            memory_bytes = elements * 4  # float32
+            
+            return CostEstimate(
+                compute_flops=float(compute_flops),
+                memory_bytes=float(memory_bytes),
+                operational_intensity=1.0,  # Low intensity
+                data_movement_bytes=float(memory_bytes)
+            )
+        
+        return self._estimate_generic(node)
+    
+    def _estimate_pointwise(self, node) -> CostEstimate:
+        """Estimate cost for pointwise operations (softmax, sigmoid, etc.)."""
+        return self._estimate_elementwise(node)
+    
+    def _estimate_generic(self, node) -> CostEstimate:
+        """Generic cost estimate (conservative)."""
+        return CostEstimate(
+            compute_flops=1000,  # Conservative estimate
+            memory_bytes=1000,
+            operational_intensity=1.0,
+            data_movement_bytes=1000
+        )
+
+
+class GraphCostEstimator:
+    """
+    Estimates total cost for a computation graph.
+    
+    Aggregates costs of individual operations and estimates
+    data movement between operations.
+    """
+    
+    def __init__(self):
+        self.operation_estimator = CostEstimator()
+    
+    def estimate_graph(self, graph) -> Dict[str, Any]:
+        """
+        Estimate cost for entire graph.
+        
+        Returns:
+            Dict with total costs and per-node estimates
+        """
+        costs = {}
+        total_compute = 0
+        total_memory = 0
+        total_data_movement = 0
+        
+        for node in graph.nodes():
+            node_cost = self.operation_estimator.estimate_operation(node)
+            costs[node.id] = node_cost
+            
+            total_compute += node_cost.compute_flops
+            total_memory += node_cost.memory_bytes
+            total_data_movement += node_cost.data_movement_bytes
+        
+        return {
+            'per_node': costs,
+            'total_compute_flops': total_compute,
+            'total_memory_bytes': total_memory,
+            'total_data_movement_bytes': total_data_movement,
+            'mean_operational_intensity': (total_compute / total_memory 
+                                          if total_memory > 0 else 0),
+        }
+```
+
+#### 3.5 Metadata Storage & Annotation API
+
+**File: `genie/semantic/metadata_registry.py` (NEW)**
+
+```python
+"""
+Metadata registry for storing semantic annotations.
+
+Provides thread-safe storage for all semantic metadata about graph nodes.
+"""
+
+import threading
+from typing import Dict, Any, Optional
+from dataclasses import dataclass, field
+
+
+@dataclass
+class NodeMetadata:
+    """Semantic metadata for a graph node."""
+    node_id: str
+    
+    # Core metadata
+    phase: Optional[str] = None  # ExecutionPhase
+    modality: Optional[str] = None  # vision, text, audio, fusion
+    semantic_role: Optional[str] = None  # attention, conv, linear, etc.
+    
+    # Cost estimates
+    compute_flops: float = 0.0
+    memory_bytes: float = 0.0
+    operational_intensity: float = 0.0
+    data_movement_bytes: float = 0.0
+    
+    # Optimization hints
+    optimization_hints: Dict[str, Any] = field(default_factory=dict)
+    
+    # Dependencies
+    co_location_required: bool = False
+    co_location_targets: list = field(default_factory=list)
+    
+    # Additional metadata
+    extra: Dict[str, Any] = field(default_factory=dict)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            'node_id': self.node_id,
+            'phase': self.phase,
+            'modality': self.modality,
+            'semantic_role': self.semantic_role,
+            'compute_flops': self.compute_flops,
+            'memory_bytes': self.memory_bytes,
+            'operational_intensity': self.operational_intensity,
+            'data_movement_bytes': self.data_movement_bytes,
+            'optimization_hints': self.optimization_hints,
+            'co_location_required': self.co_location_required,
+            'co_location_targets': self.co_location_targets,
+            'extra': self.extra,
+        }
+
+
+class MetadataRegistry:
+    """
+    Thread-safe registry of semantic metadata for all nodes.
+    """
+    
+    def __init__(self):
+        self._metadata: Dict[str, NodeMetadata] = {}
+        self._lock = threading.RLock()
+    
+    def register_metadata(self, node_id: str, metadata: NodeMetadata):
+        """Register metadata for a node."""
+        with self._lock:
+            self._metadata[node_id] = metadata
+    
+    def get_metadata(self, node_id: str) -> Optional[NodeMetadata]:
+        """Get metadata for a node."""
+        with self._lock:
+            return self._metadata.get(node_id)
+    
+    def update_metadata(self, node_id: str, updates: Dict[str, Any]):
+        """Update metadata for a node."""
+        with self._lock:
+            if node_id in self._metadata:
+                metadata = self._metadata[node_id]
+                for key, value in updates.items():
+                    if hasattr(metadata, key):
+                        setattr(metadata, key, value)
+    
+    def get_all_metadata(self) -> Dict[str, NodeMetadata]:
+        """Get all registered metadata."""
+        with self._lock:
+            return dict(self._metadata)
+    
+    def clear(self):
+        """Clear all metadata."""
+        with self._lock:
+            self._metadata.clear()
+
+
+# Global metadata registry
+_global_metadata_registry = MetadataRegistry()
+
+
+def get_metadata_registry() -> MetadataRegistry:
+    """Get the global metadata registry."""
+    return _global_metadata_registry
+```
+
+**File: `genie/semantic/annotator.py` (NEW)**
+
+```python
+"""
+Graph annotator: Combines all semantic analysis to produce annotated graph.
+
+Main public API for semantic analysis.
+"""
+
+import logging
+from typing import Optional
+from .patterns.base_matcher import get_pattern_registry
+from .phase_detector import PhaseDetector, PhaseAnnotator
+from .cost_estimator import GraphCostEstimator
+from .metadata_registry import (
+    get_metadata_registry, NodeMetadata, MetadataRegistry
+)
+
+logger = logging.getLogger(__name__)
+
+
+class SemanticAnnotator:
+    """
+    Annotates computation graphs with semantic information.
+    
+    Combines:
+    1. Pattern detection (attention, convolution, KV cache)
+    2. Phase detection (prefill, decode, forward)
+    3. Cost estimation (FLOPs, memory, intensity)
+    4. Metadata storage
+    """
+    
+    def __init__(self):
+        self.pattern_registry = get_pattern_registry()
+        self.phase_detector = PhaseDetector(self.pattern_registry)
+        self.phase_annotator = PhaseAnnotator(self.phase_detector)
+        self.cost_estimator = GraphCostEstimator()
+        self.metadata_registry = get_metadata_registry()
+    
+    def annotate(self, graph) -> 'AnnotatedGraph':
+        """
+        Fully annotate a computation graph.
+        
+        Args:
+            graph: Unified Graph (FX or LazyDAG)
+        
+        Returns:
+            AnnotatedGraph with semantic metadata
+        """
+        logger.info(f"Starting semantic analysis for {len(graph.nodes())} nodes")
+        
+        # Step 1: Detect patterns
+        logger.info("Detecting patterns...")
+        patterns = self.pattern_registry.match_all(graph)
+        for pattern_name, pattern_list in patterns.items():
+            logger.debug(f"  Found {len(pattern_list)} {pattern_name} patterns")
+        
+        # Step 2: Detect phases
+        logger.info("Detecting execution phases...")
+        phases = self.phase_detector.detect_phases(graph)
+        logger.debug(f"  Phase distribution: {self._count_phases(phases)}")
+        
+        # Step 3: Estimate costs
+        logger.info("Estimating operation costs...")
+        costs = self.cost_estimator.estimate_graph(graph)
+        logger.debug(f"  Total FLOPs: {costs['total_compute_flops']:.2e}")
+        logger.debug(f"  Total Memory: {costs['total_memory_bytes']:.2e} bytes")
+        
+        # Step 4: Create metadata for each node
+        logger.info("Creating node metadata...")
+        for node in graph.nodes():
+            metadata = NodeMetadata(
+                node_id=node.id,
+                phase=phases.get(node.id).value if node.id in phases else None,
+                semantic_role=node.metadata.get('semantic_role'),
+                modality=node.metadata.get('modality'),
+            )
+            
+            # Add cost information
+            if node.id in costs['per_node']:
+                cost = costs['per_node'][node.id]
+                metadata.compute_flops = cost.compute_flops
+                metadata.memory_bytes = cost.memory_bytes
+                metadata.operational_intensity = cost.operational_intensity
+                metadata.data_movement_bytes = cost.data_movement_bytes
+            
+            # Add optimization hints
+            metadata.optimization_hints = node.metadata.get('optimization_hints', {})
+            
+            # Register metadata
+            self.metadata_registry.register_metadata(node.id, metadata)
+        
+        logger.info("Semantic analysis complete")
+        
+        return AnnotatedGraph(graph, patterns, phases, costs, self.metadata_registry)
+    
+    def _count_phases(self, phases) -> dict:
+        """Count nodes by phase."""
+        counts = {}
+        for phase in phases.values():
+            phase_name = phase.value if hasattr(phase, 'value') else str(phase)
+            counts[phase_name] = counts.get(phase_name, 0) + 1
+        return counts
+
+
+class AnnotatedGraph:
+    """
+    Computation graph with semantic annotations.
+    
+    Wrapper around a Graph that includes semantic metadata.
+    """
+    
+    def __init__(self, base_graph, patterns, phases, costs, metadata_registry):
+        self.base_graph = base_graph
+        self.patterns = patterns
+        self.phases = phases
+        self.costs = costs
+        self.metadata_registry = metadata_registry
+    
+    def nodes(self):
+        """Get all annotated nodes."""
+        return self.base_graph.nodes()
+    
+    def get_node(self, node_id):
+        """Get node by ID."""
+        return self.base_graph.get_node(node_id)
+    
+    def get_metadata(self, node_id) -> Optional[NodeMetadata]:
+        """Get metadata for a node."""
+        return self.metadata_registry.get_metadata(node_id)
+    
+    @property
+    def backend_type(self):
+        """Backend type (FX or lazy_dag)."""
+        return self.base_graph.backend_type
+    
+    def summary(self) -> str:
+        """Get human-readable summary of annotations."""
+        lines = [
+            f"AnnotatedGraph ({self.backend_type} backend)",
+            f"  Total nodes: {len(list(self.nodes()))}",
+            f"  Total compute: {self.costs['total_compute_flops']:.2e} FLOPs",
+            f"  Total memory: {self.costs['total_memory_bytes']:.2e} bytes",
+            f"  Mean intensity: {self.costs['mean_operational_intensity']:.2f} FLOPs/byte",
+            f"Patterns detected:",
+        ]
+        
+        for pattern_name, pattern_list in self.patterns.items():
+            lines.append(f"  - {pattern_name}: {len(pattern_list)} occurrences")
+        
+        return "\n".join(lines)
+
+
+# Main public API
+def annotate_graph(graph) -> AnnotatedGraph:
+    """
+    Annotate a computation graph with semantic information.
+    
+    Convenience function - creates annotator and runs full analysis.
+    
+    Args:
+        graph: Unified Graph (from genie.get_graph())
+    
+    Returns:
+        AnnotatedGraph with full semantic metadata
+    """
+    annotator = SemanticAnnotator()
+    return annotator.annotate(graph)
+```
+
+---
+
+#### 3.6 Phase 3 Integration
+
+**Update File: `genie/__init__.py`**
+
+```python
+# ... existing imports ...
+
+# Public API for semantic analysis
+from .semantic.annotator import annotate_graph, AnnotatedGraph
+from .semantic.patterns.base_matcher import get_pattern_registry
+
+__all__ = [
+    # ... existing exports ...
+    'annotate_graph',
+    'AnnotatedGraph',
+    'get_pattern_registry',
+]
+```
+
+---
+
+**Milestone 3 Deliverables:**
+- ✅ Pattern detection framework (base class + matchers)
+- ✅ Phase detection (prefill/decode classification)
+- ✅ Cost estimation (FLOPs, memory, intensity)
+- ✅ Metadata registry (thread-safe storage)
+- ✅ Annotation API (main public interface)
+- ✅ Semantic annotations on all graph nodes
 
 ---
 

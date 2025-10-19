@@ -7,6 +7,7 @@ with models that have dynamic control flow.
 
 import torch
 import torch.fx as fx
+import threading
 from typing import Optional, Any
 import logging
 
@@ -18,7 +19,10 @@ logger = logging.getLogger(__name__)
 
 class HybridGraphBuilder:
     """
-    Builds computation graph using hybrid strategy.
+    Thread-local graph builder.
+
+    Each thread gets its own graph builder instance to avoid
+    race conditions during concurrent capture.
 
     Strategy:
     1. Try torch.fx.symbolic_trace (covers ~80% of models)
@@ -26,6 +30,9 @@ class HybridGraphBuilder:
 
     Both representations are exposed through unified Graph interface.
     """
+
+    # Thread-local storage for per-thread builders
+    _thread_local = threading.local()
 
     def __init__(self):
         self.fx_graph: Optional[fx.Graph] = None
@@ -108,6 +115,8 @@ class HybridGraphBuilder:
         Register LazyTensor operation (called from LazyTensor.__init__).
 
         This tracks all tensors as they're created, enabling DAG construction.
+
+        Thread-safe: Each thread has its own builder instance.
         """
         # FIX: Remove unused all_tensors tracking (memory leak)
         self.root_tensor = tensor  # Track most recent (used as output)
@@ -145,21 +154,17 @@ class HybridGraphBuilder:
         return execute_subgraph(target_tensor)
 
 
-# Global graph builder
-_global_builder: Optional[HybridGraphBuilder] = None
+def get_global_builder() -> HybridGraphBuilder:
+    """Get thread-local graph builder."""
+    if not hasattr(HybridGraphBuilder._thread_local, 'builder'):
+        HybridGraphBuilder._thread_local.builder = HybridGraphBuilder()
+    return HybridGraphBuilder._thread_local.builder
 
 
 def initialize_global_builder():
-    """Initialize global graph builder (called on import)."""
-    global _global_builder
-    _global_builder = HybridGraphBuilder()
+    """Initialize thread-local graph builder (called on import)."""
+    # Create builder for main thread
+    builder = get_global_builder()
 
-    # Set as LazyTensor's graph builder
-    LazyTensor._graph_builder = _global_builder
-
-
-def get_global_builder() -> HybridGraphBuilder:
-    """Get the global graph builder."""
-    if _global_builder is None:
-        raise RuntimeError("Graph builder not initialized")
-    return _global_builder
+    # Note: Don't set LazyTensor._graph_builder anymore since we use thread-local
+    # LazyTensor instances will get the thread-local builder when needed

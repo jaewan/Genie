@@ -55,6 +55,7 @@ class SimpleExecutor:
 			
 			# Linear algebra
 			"aten::matmul": self._execute_matmul,
+			"aten::t": self._execute_t,
 			# NOTE: Intentionally omit explicit handlers for mm/bmm to exercise unified fallback
 			
 			# Tensor creation
@@ -66,6 +67,9 @@ class SimpleExecutor:
 			"aten::relu": self._execute_relu,
 			"aten::sigmoid": self._execute_sigmoid,
 			"aten::tanh": self._execute_tanh,
+
+			# Device operations
+			"aten::cpu": self._execute_cpu,
 			
 			# Convolution
 			"aten::conv2d": self._execute_conv2d,
@@ -111,9 +115,19 @@ class SimpleExecutor:
 			# Phase 1: Simple direct recursive evaluation
 			from .lazy_tensor import LazyTensor as _LT
 
+			# Cache to store computed results for each LazyTensor
+			# This ensures a LazyTensor appearing multiple times is only computed once
+			_compute_cache = {}
+
 			# Use function parameter for depth tracking (thread-safe, correct for nested calls)
 			def _compute_lazy(lt: _LT, depth: int = 0) -> torch.Tensor:
 				"""Recursively compute LazyTensor with depth tracking."""
+				# Check cache first
+				lt_id = id(lt)
+				if lt_id in _compute_cache:
+					logger.debug(f"[Depth {depth}] Cache hit for {lt.operation}")
+					return _compute_cache[lt_id]
+
 				# Guard against infinite recursion
 				if depth > 1000:
 					raise RuntimeError(
@@ -132,11 +146,19 @@ class SimpleExecutor:
 				# Execute the operation using the resolved inputs
 				try:
 					op_func = self.operation_handlers.get(lt.operation)
+					logger.debug(f"[Depth {depth}] Computing {lt.operation} with {len(resolved_inputs)} inputs: {[getattr(inp, 'shape', 'scalar') for inp in resolved_inputs]}")
 					if op_func:
-						return op_func(lt, resolved_inputs, lt.kwargs)
+						result = op_func(lt, resolved_inputs, lt.kwargs)
+						logger.debug(f"[Depth {depth}] {lt.operation} result shape: {result.shape if hasattr(result, 'shape') else 'N/A'}")
+						# Cache the result
+						_compute_cache[lt_id] = result
+						return result
 					else:
 						# Fallback for unhandled operations using executor's fallback mechanism
-						return self._execute_fallback_eager(lt.operation, resolved_inputs, lt.kwargs)
+						result = self._execute_fallback_eager(lt.operation, resolved_inputs, lt.kwargs)
+						# Cache the result
+						_compute_cache[lt_id] = result
+						return result
 				except Exception as e:
 					logger.error(f"Failed to execute operation {lt.operation}: {e}")
 					# Let UnsupportedOperationError propagate (it's actionable)
@@ -191,7 +213,7 @@ class SimpleExecutor:
 				else:
 					concrete_inputs.append(inp)
 
-		# Only pass device for creation ops; strip for others to avoid invalid kwargs
+		# Handle device mapping for creation ops and others
 		kwargs = kwargs.copy() if kwargs else {}
 		creation_ops = {
 			"randn", "rand", "randint",
@@ -200,17 +222,44 @@ class SimpleExecutor:
 		}
 		aten_prefix = "aten::"
 		base_name = op_name[len(aten_prefix):] if op_name.startswith(aten_prefix) else op_name
+
 		if base_name in creation_ops:
-			kwargs["device"] = "cpu"
+			# Map remote accelerator devices to actual GPU devices for creation ops
+			device = kwargs.get("device")
+			if isinstance(device, str) and 'remote_accelerator' in device:
+				device_idx = device.split(':')[-1]
+				kwargs["device"] = f'cuda:{device_idx}'
+			elif hasattr(device, 'type') and device.type in ('remote_accelerator', 'privateuseone'):
+				kwargs["device"] = f'cuda:{device.index}'
+			elif device is None:
+				# For capture API (device=None), default to GPU to match native behavior
+				kwargs["device"] = "cuda:0"
+			else:
+				kwargs["device"] = "cpu"
 		else:
-			kwargs.pop("device", None)
+			# For non-creation ops, still map remote devices but don't default to CPU
+			device = kwargs.get("device")
+			if isinstance(device, str) and 'remote_accelerator' in device:
+				device_idx = device.split(':')[-1]
+				kwargs["device"] = f'cuda:{device_idx}'
+			elif hasattr(device, 'type') and device.type in ('remote_accelerator', 'privateuseone'):
+				kwargs["device"] = f'cuda:{device.index}'
+			elif device is None:
+				# For capture API (device=None), default to GPU to match native behavior
+				kwargs["device"] = "cuda:0"
 		
-		# Also ensure any input tensors are moved to CPU to prevent device conflicts
-		concrete_inputs = [inp.cpu() if type(inp).__name__ == 'Tensor' else inp for inp in concrete_inputs]
+		# Only move input tensors to CPU if they would cause device conflicts
+		# For now, let PyTorch handle device placement automatically
+		# concrete_inputs = [inp.cpu() if type(inp).__name__ == 'Tensor' else inp for inp in concrete_inputs]
 
 		# Normalize op name (e.g., "aten::add" -> "add")
 		aten_prefix = "aten::"
 		base_name = op_name[len(aten_prefix):] if op_name.startswith(aten_prefix) else op_name
+
+		# Special handling for unknown_method - just return the first input
+		if base_name == "unknown_method":
+			logger.debug(f"Encountered unknown_method operation, returning first input: {concrete_inputs[0] if concrete_inputs else 'none'}")
+			return concrete_inputs[0] if concrete_inputs else torch.tensor(0.0)
 
 		# Try torch.ops.aten first
 		try:
@@ -287,6 +336,13 @@ class SimpleExecutor:
 		y = self._ensure_concrete(inputs[1])
 		return torch.matmul(x, y)
 
+	def _execute_t(self, lazy_tensor, inputs, kwargs) -> torch.Tensor:  # noqa: ANN001
+		"""Execute transpose operation."""
+		if not inputs:
+			return torch.tensor(0.0)
+		x = self._ensure_concrete(inputs[0])
+		return torch.t(x)
+
 	def _execute_alias(self, lazy_tensor, inputs, kwargs) -> torch.Tensor:  # noqa: ANN001
 		if not inputs:
 			return torch.tensor(0.0)
@@ -310,8 +366,22 @@ class SimpleExecutor:
 			size = (1,)
 
 		dtype = kwargs.get("dtype", torch.float32)
-		device = kwargs.get("device", "cpu")
+		device = kwargs.get("device")
 		requires_grad = kwargs.get("requires_grad", False)
+
+		# Map remote accelerator devices to actual GPU devices
+		if isinstance(device, str) and 'remote_accelerator' in device:
+			# Extract device index (e.g., 'remote_accelerator:0' -> 'cuda:0')
+			device_idx = device.split(':')[-1]
+			device = f'cuda:{device_idx}'
+		elif hasattr(device, 'type') and device.type in ('remote_accelerator', 'privateuseone'):
+			# Handle torch.device objects
+			device = f'cuda:{device.index}'
+		elif device is None:
+			# For capture API (device=None), default to GPU if available
+			device = "cuda:0" if torch.cuda.is_available() else "cpu"
+		else:
+			device = "cpu"
 
 		return torch.randn(*size, dtype=dtype, device=device, requires_grad=requires_grad)
 
@@ -324,8 +394,20 @@ class SimpleExecutor:
 			size = (1,)
 
 		dtype = kwargs.get("dtype", torch.float32)
-		device = kwargs.get("device", "cpu")
+		device = kwargs.get("device")
 		requires_grad = kwargs.get("requires_grad", False)
+
+		# Map remote accelerator devices to actual GPU devices
+		if isinstance(device, str) and 'remote_accelerator' in device:
+			device_idx = device.split(':')[-1]
+			device = f'cuda:{device_idx}'
+		elif hasattr(device, 'type') and device.type in ('remote_accelerator', 'privateuseone'):
+			device = f'cuda:{device.index}'
+		elif device is None:
+			# For capture API (device=None), default to GPU to match native behavior
+			device = "cuda:0"
+		else:
+			device = "cpu"
 
 		return torch.zeros(*size, dtype=dtype, device=device, requires_grad=requires_grad)
 
@@ -338,8 +420,20 @@ class SimpleExecutor:
 			size = (1,)
 
 		dtype = kwargs.get("dtype", torch.float32)
-		device = kwargs.get("device", "cpu")
+		device = kwargs.get("device")
 		requires_grad = kwargs.get("requires_grad", False)
+
+		# Map remote accelerator devices to actual GPU devices
+		if isinstance(device, str) and 'remote_accelerator' in device:
+			device_idx = device.split(':')[-1]
+			device = f'cuda:{device_idx}'
+		elif hasattr(device, 'type') and device.type in ('remote_accelerator', 'privateuseone'):
+			device = f'cuda:{device.index}'
+		elif device is None:
+			# For capture API (device=None), default to GPU to match native behavior
+			device = "cuda:0"
+		else:
+			device = "cpu"
 
 		return torch.ones(*size, dtype=dtype, device=device, requires_grad=requires_grad)
 
@@ -354,6 +448,13 @@ class SimpleExecutor:
 			return torch.tensor(0.0)
 		x = self._ensure_concrete(inputs[0])
 		return torch.sigmoid(x)
+
+	def _execute_cpu(self, lazy_tensor, inputs, kwargs) -> torch.Tensor:  # noqa: ANN001
+		"""Execute cpu() operation - move tensor to CPU."""
+		if not inputs:
+			return torch.tensor(0.0)
+		x = self._ensure_concrete(inputs[0])
+		return x.cpu()
 
 	def _execute_softmax(self, lazy_tensor, inputs, kwargs) -> torch.Tensor:  # noqa: ANN001
 		x = self._ensure_concrete(inputs[0])

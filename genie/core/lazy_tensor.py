@@ -6,12 +6,12 @@ import threading
 from itertools import count
 from typing import Any, Dict, List, Optional, Tuple
 import torch
+from functools import lru_cache
 
 logger = logging.getLogger(__name__)
 
-# Thread-local storage to track when we're inside __torch_function__
-# This prevents infinite recursion when accessing tensor properties
-_in_torch_function = threading.local()
+# Import interception control for cleaner recursion handling
+from .interception_control import should_intercept, disable_interception, InterceptionContext
 
 
 class LazyTensor(torch.Tensor):
@@ -49,7 +49,9 @@ class LazyTensor(torch.Tensor):
 
     # Class-level state
     _graph_builder: Optional['GraphBuilder'] = None
-    _shape_cache: Dict[Tuple, Optional[torch.Size]] = {}
+
+    # Shape inference cache (bounded size to prevent memory leaks)
+    _shape_cache: Dict[str, Optional[torch.Size]] = {}
 
     # Fast path for simple operations (avoids FakeTensorMode overhead)
     _SIMPLE_OPS = {
@@ -81,25 +83,32 @@ class LazyTensor(torch.Tensor):
         CRITICAL: Must use _make_subclass for proper tensor subclass.
         This creates a tensor wrapper WITHOUT allocating actual storage.
         """
-        # Infer shape/dtype if not provided
-        if shape is None:
-            shape = torch.Size([])  # Use empty shape as placeholder
-            # Shape inference will be done lazily when needed
+        with disable_interception(InterceptionContext.CONSTRUCTION):
+            # Infer shape/dtype if not provided
+            if shape is None:
+                shape = torch.Size([])  # Use empty shape as placeholder
+                # Shape inference will be done lazily when needed
 
-        if dtype is None:
-            dtype = cls._infer_dtype(inputs, kwargs or {})
-        if dtype is None:
-            dtype = torch.float32  # Fallback
+            if dtype is None:
+                dtype = cls._infer_dtype(inputs, kwargs or {})
+            if dtype is None:
+                dtype = torch.float32  # Fallback
 
-        # Handle remote devices - use meta for storage
-        if device is None:
-            device = torch.device('meta')  # Symbolic device (no storage)
-        elif isinstance(device, str) and ('remote_accelerator' in device or 'privateuseone' in device):
-            # For remote devices, use meta device for storage
-            device = torch.device('meta')
-        elif isinstance(device, torch.device) and device.type in ('remote_accelerator', 'privateuseone'):
-            # Handle torch.device objects for remote devices
-            device = torch.device('meta')
+            # Ensure dtype is a PyTorch dtype, not numpy dtype
+            if hasattr(dtype, 'dtype'):
+                dtype = dtype.dtype  # Convert numpy dtype to torch dtype
+            if not isinstance(dtype, torch.dtype):
+                dtype = torch.float32  # Fallback
+
+            # Handle remote devices - use meta for storage
+            if device is None:
+                device = torch.device('meta')  # Symbolic device (no storage)
+            elif isinstance(device, str) and ('remote_accelerator' in device or 'privateuseone' in device):
+                # For remote devices, use meta device for storage
+                device = torch.device('meta')
+            elif isinstance(device, torch.device) and device.type in ('remote_accelerator', 'privateuseone'):
+                # Handle torch.device objects for remote devices
+                device = torch.device('meta')
 
         # Create tensor wrapper using official API
         # This is what makes LazyTensor a "real" tensor
@@ -149,60 +158,95 @@ class LazyTensor(torch.Tensor):
 
         object.__setattr__(self, '_original_device', original_device)
 
-        # Register with hybrid graph builder
-        if LazyTensor._graph_builder is not None:
-            LazyTensor._graph_builder.add_operation(self)
+        # Register with thread-local graph builder
+        from .graph_builder import get_global_builder
+        try:
+            builder = get_global_builder()
+            builder.add_operation(self)
+        except RuntimeError:
+            # Graph builder not initialized yet - skip for now
+            pass
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
         """
         Intercept ALL operations involving LazyTensor.
 
-        This is automatically called by PyTorch's dispatcher for any
-        operation that involves a LazyTensor operand.
-
-        Args:
-            func: ATen operation (e.g., torch.ops.aten.add.Tensor)
-            types: Tuple of types involved (contains LazyTensor)
-            args: Positional arguments (default empty tuple)
-            kwargs: Keyword arguments (default None)
-
-        Returns:
-            LazyTensor representing the deferred operation
+        CRITICAL: PyTorch dispatcher only calls this when at least one arg
+        is a LazyTensor. We should ALWAYS intercept unless explicitly disabled.
         """
         kwargs = kwargs or {}
 
+        # ✅ ONLY check for disabled contexts (construction, materialization)
+        from .interception_control import get_current_context, InterceptionContext
+        if get_current_context() != InterceptionContext.NONE:
+            # We're inside LazyTensor construction or materialization - skip
+            return func(*args, **kwargs)
+
         # Handle special operations that force materialization
+        # Check both direct equality and method descriptor equality
+        is_materialization_op = False
         if func in cls._MATERIALIZATION_OPS:
+            is_materialization_op = True
+        elif hasattr(func, '__name__') and hasattr(func, '__qualname__'):
+            # Check if this is a method that matches a materialization operation
+            for mat_op in cls._MATERIALIZATION_OPS:
+                if (hasattr(mat_op, '__name__') and mat_op.__name__ == func.__name__ and
+                    hasattr(mat_op, '__qualname__') and mat_op.__qualname__ == func.__qualname__):
+                    is_materialization_op = True
+                    break
+
+        if is_materialization_op:
             # These operations need concrete tensors
             materialized_args = tuple(
                 arg.materialize() if type(arg).__name__ == 'LazyTensor' else arg
                 for arg in args
             )
+            # For method calls, call the method directly on the materialized tensor
+            if hasattr(func, '__name__') and func.__name__.startswith('__'):
+                # This is a method call - call it directly on the first materialized tensor
+                if materialized_args and isinstance(materialized_args[0], torch.Tensor):
+                    method_name = func.__name__
+                    method = getattr(materialized_args[0], method_name)
+                    return method(*materialized_args[1:], **kwargs)
+            # For regular function calls, use the function
             return func(*materialized_args, **kwargs)
 
-        # Check if we're outside a capture context with LazyTensors
-        # In this case, materialize all LazyTensors and let PyTorch handle it
+        # ✅ Check for mixed operations ONLY when outside capture
         from .capture import is_capturing
         if not is_capturing():
             # Count LazyTensors vs concrete tensors
             lazy_count = sum(1 for arg in args if type(arg).__name__ == 'LazyTensor')
-            concrete_tensor_count = sum(1 for arg in args if isinstance(arg, torch.Tensor) and type(arg).__name__ != 'LazyTensor')
-            
-            # If we have LazyTensors with concrete tensors outside capture context,
-            # materialize all LazyTensors and let PyTorch handle it normally
+            concrete_tensor_count = sum(1 for arg in args
+                                       if isinstance(arg, torch.Tensor)
+                                       and type(arg).__name__ != 'LazyTensor')
+
+            # If mixing LazyTensor with concrete tensors, materialize and execute normally
             if lazy_count > 0 and concrete_tensor_count > 0:
                 # Materialize all LazyTensor arguments
-                materialized_args = tuple(
-                    arg.materialize() if type(arg).__name__ == 'LazyTensor' else arg
-                    for arg in args
-                )
+                materialized_args = []
+                target_device = None
+
+                for arg in args:
+                    if type(arg).__name__ == 'LazyTensor':
+                        materialized = arg.materialize()
+                        # If we haven't determined target device yet, use this tensor's device
+                        if target_device is None and isinstance(materialized, torch.Tensor):
+                            target_device = materialized.device
+                        materialized_args.append(materialized)
+                    else:
+                        materialized_args.append(arg)
+
+                # Move all tensors to the same device if needed
+                if target_device is not None:
+                    for i, arg in enumerate(materialized_args):
+                        if isinstance(arg, torch.Tensor) and arg.device != target_device:
+                            materialized_args[i] = arg.to(target_device)
+
                 return func(*materialized_args, **kwargs)
 
-        # Normalize operation name
+        # ✅ Normal case: Create new LazyTensor (ALWAYS if we got here)
         op_name = cls._normalize_op_name(func)
-
-        # Create new LazyTensor for the result
         result = cls(
             operation=op_name,
             inputs=list(args),
@@ -268,10 +312,15 @@ class LazyTensor(torch.Tensor):
         kwargs = kwargs or {}
 
         # Prevent recursion when accessing tensor properties
-        if getattr(_in_torch_function, 'active', False):
+        from .interception_control import get_current_context, InterceptionContext
+        if get_current_context() != InterceptionContext.NONE:
             return NotImplemented
 
-        _in_torch_function.active = True
+        # Mark that we're in torch function context
+        from .interception_control import _interception_context
+        prev_context = getattr(_interception_context, 'context', InterceptionContext.NONE)
+        _interception_context.context = InterceptionContext.PROPERTY_ACCESS
+
         try:
             # Check if any of the arguments are LazyTensors
             # Use direct type check to avoid triggering torch operations
@@ -285,7 +334,19 @@ class LazyTensor(torch.Tensor):
                 return NotImplemented
 
             # Operations that force materialization - handle these specially to avoid recursion
+            # Check both direct equality and method descriptor equality
+            is_materialization_op = False
             if func in cls._MATERIALIZATION_OPS:
+                is_materialization_op = True
+            elif hasattr(func, '__name__') and hasattr(func, '__qualname__'):
+                # Check if this is a method that matches a materialization operation
+                for mat_op in cls._MATERIALIZATION_OPS:
+                    if (hasattr(mat_op, '__name__') and mat_op.__name__ == func.__name__ and
+                        hasattr(mat_op, '__qualname__') and mat_op.__qualname__ == func.__qualname__):
+                        is_materialization_op = True
+                        break
+
+            if is_materialization_op:
                 # Find the LazyTensor in arguments and materialize it
                 lazy_tensor = None
                 for arg in args:
@@ -301,13 +362,29 @@ class LazyTensor(torch.Tensor):
                     # and calling the method without going through torch dispatch
                     try:
                         materialized = lazy_tensor.materialize()
-                        # Special handling for __len__
-                        if func.__name__ == '__len__':
-                            return len(materialized)
-                        # Call the method directly on the materialized tensor
-                        method_name = func.__name__
-                        method = getattr(materialized, method_name)
-                        return method(*args[1:], **kwargs)
+                        # Special handling for methods - call them directly
+                        if hasattr(func, '__name__'):
+                            method_name = func.__name__
+                            if method_name.startswith('__') and method_name.endswith('__'):
+                                # Handle special method names
+                                if method_name == '__len__':
+                                    return len(materialized)
+                                elif method_name == '__bool__':
+                                    return bool(materialized)
+                                elif method_name == '__int__':
+                                    return int(materialized)
+                                elif method_name == '__float__':
+                                    return float(materialized)
+                                # For other dunder methods, return the materialized tensor
+                                # and let the caller handle it
+                                return materialized
+                            else:
+                                # Regular method call
+                                method = getattr(materialized, method_name)
+                                return method(*args[1:], **kwargs)
+                        else:
+                            # Fallback: just return materialized tensor
+                            return materialized
                     except:
                         # If anything fails, just return the materialized tensor
                         return lazy_tensor.materialize()
@@ -319,17 +396,30 @@ class LazyTensor(torch.Tensor):
                 # Count LazyTensors vs concrete tensors
                 lazy_count = sum(1 for arg in args if type(arg).__name__ == 'LazyTensor')
                 concrete_tensor_count = sum(1 for arg in args if isinstance(arg, torch.Tensor) and type(arg).__name__ != 'LazyTensor')
-                
+
                 # If we have a mix of LazyTensor and concrete tensors outside capture context,
                 # materialize all LazyTensors and let PyTorch handle it normally
                 if lazy_count > 0 and concrete_tensor_count > 0:
                     # Materialize all LazyTensor arguments
                     materialized_args = []
+                    target_device = None
+
                     for arg in args:
                         if type(arg).__name__ == 'LazyTensor':
-                            materialized_args.append(arg.materialize())
+                            materialized = arg.materialize()
+                            # If we haven't determined target device yet, use this tensor's device
+                            if target_device is None and isinstance(materialized, torch.Tensor):
+                                target_device = materialized.device
+                            materialized_args.append(materialized)
                         else:
                             materialized_args.append(arg)
+
+                    # Move all tensors to the same device if needed
+                    if target_device is not None:
+                        for i, arg in enumerate(materialized_args):
+                            if isinstance(arg, torch.Tensor) and arg.device != target_device:
+                                materialized_args[i] = arg.to(target_device)
+
                     # Call the function with materialized arguments
                     return func(*materialized_args, **kwargs)
 
@@ -342,7 +432,7 @@ class LazyTensor(torch.Tensor):
             )
             return result
         finally:
-            _in_torch_function.active = False
+            _interception_context.context = prev_context
 
     # ===================================================================
     # FACTORY METHODS
@@ -586,10 +676,9 @@ class LazyTensor(torch.Tensor):
         Returns:
             Concrete torch.Tensor with actual data
         """
-        if LazyTensor._graph_builder is None:
-            raise RuntimeError("No graph builder registered")
-
-        return LazyTensor._graph_builder.materialize(self)
+        from .graph_builder import get_global_builder
+        builder = get_global_builder()
+        return builder.materialize(self)
 
 
     # Operations that force materialization
@@ -636,19 +725,66 @@ class LazyTensor(torch.Tensor):
             except:
                 pass  # Fall through to FakeTensorMode
 
-        # Create cache key from operation and input shapes
-        input_shapes = []
+        # Use cached shape inference with LazyTensor IDs as keys
+        return LazyTensor._infer_shape_with_cache(operation, inputs, kwargs)
+
+    @classmethod
+    def _infer_shape_with_cache(cls, operation: str, inputs: List[Any], kwargs: Dict[str, Any]) -> Optional[torch.Size]:
+        """Cached shape inference with LazyTensor IDs as keys."""
+        # Build cache key from operation and input tensor IDs
+        cache_parts = [operation]
         for inp in inputs:
-            if hasattr(inp, 'shape'):
-                input_shapes.append(tuple(inp.shape))
+            if isinstance(inp, LazyTensor):
+                # Use tensor ID + shape (shape needed for correctness)
+                cache_parts.append(f"lt_{inp.tensor_id}_{inp.shape}")
+            elif isinstance(inp, torch.Tensor):
+                # Use shape + dtype for concrete tensors
+                cache_parts.append(f"t_{tuple(inp.shape)}_{inp.dtype}")
             else:
-                input_shapes.append(None)
+                # Scalar or non-tensor
+                cache_parts.append(f"s_{repr(inp)}")
 
-        cache_key = (operation, tuple(input_shapes))
+        cache_key = "|".join(str(p) for p in cache_parts)
 
-        # Check cache first
-        if cache_key in LazyTensor._shape_cache:
-            return LazyTensor._shape_cache[cache_key]
+        # Check cache (bounded size to prevent memory leak)
+        if cache_key in cls._shape_cache:
+            return cls._shape_cache[cache_key]
+
+        # Compute shape
+        result = cls._infer_shape_original(operation, inputs, kwargs)
+
+        # Cache result (with LRU eviction)
+        if len(cls._shape_cache) > 10000:  # Bound cache size
+            # Remove oldest 20%
+            items = list(cls._shape_cache.items())
+            cls._shape_cache = dict(items[-8000:])
+
+        cls._shape_cache[cache_key] = result
+        return result
+
+    @staticmethod
+    def _infer_shape_original(
+        operation: str,
+        inputs: List[Any],
+        kwargs: Dict[str, Any]
+    ) -> Optional[torch.Size]:
+        """
+        Original shape inference logic.
+        """
+        # Build cache key from operation and input tensor IDs
+        cache_parts = [operation]
+        for inp in inputs:
+            if isinstance(inp, LazyTensor):
+                # Use tensor ID + shape (shape needed for correctness)
+                cache_parts.append(f"lt_{inp.tensor_id}_{inp.shape}")
+            elif isinstance(inp, torch.Tensor):
+                # Use shape + dtype for concrete tensors
+                cache_parts.append(f"t_{tuple(inp.shape)}_{inp.dtype}")
+            else:
+                # Scalar or non-tensor
+                cache_parts.append(f"s_{repr(inp)}")
+
+        cache_key = "|".join(str(p) for p in cache_parts)
 
         try:
             # Use PyTorch's FakeTensor mode for accurate shape inference
@@ -706,7 +842,7 @@ class LazyTensor(torch.Tensor):
         except Exception as e:
             logger.debug(f"Shape inference failed for {operation}: {e}")
             # Fallback: try simple heuristics
-            result = cls._infer_shape_fallback(operation, inputs)
+            result = LazyTensor._infer_shape_fallback(operation, inputs)
             # Cache fallback result too
             LazyTensor._shape_cache[cache_key] = result
             return result
@@ -802,7 +938,32 @@ class LazyTensor(torch.Tensor):
         """Infer output dtype from inputs or kwargs."""
         # Explicit dtype in kwargs
         if 'dtype' in kwargs and kwargs['dtype'] is not None:
-            return kwargs['dtype']
+            dtype = kwargs['dtype']
+            # Convert numpy dtypes to PyTorch dtypes
+            if hasattr(dtype, 'type') and hasattr(dtype.type, '__module__'):
+                if dtype.type.__module__ == 'numpy':
+                    # Convert numpy dtype to PyTorch dtype
+                    if dtype == torch.float32.numpy_dtype():
+                        return torch.float32
+                    elif dtype == torch.float64.numpy_dtype():
+                        return torch.float64
+                    elif dtype == torch.int64.numpy_dtype():
+                        return torch.int64
+                    elif dtype == torch.int32.numpy_dtype():
+                        return torch.int32
+                    # Add more conversions as needed
+                    else:
+                        # Fallback: try to map by name
+                        dtype_name = str(dtype).split('.')[-1].replace('Dtype', '').lower()
+                        dtype_map = {
+                            'float32': torch.float32,
+                            'float64': torch.float64,
+                            'int32': torch.int32,
+                            'int64': torch.int64,
+                            'bool': torch.bool,
+                        }
+                        return dtype_map.get(dtype_name, torch.float32)
+            return dtype
 
         # Infer from first tensor input
         for inp in inputs:
@@ -832,7 +993,12 @@ class LazyTensor(torch.Tensor):
             torch.ops.aten.add.Tensor -> aten::add
             torch.add -> aten::add
             add -> aten::add
+            <method 'cpu' of ...> -> aten::cpu
         """
+        # Debug logging for problematic cases
+        if hasattr(func, '__name__') and func.__name__ == '__get__':
+            logger.debug(f"Normalizing __get__ method: {func}")
+
         if hasattr(func, '__name__'):
             name = func.__name__
         elif hasattr(func, '_schema'):
@@ -842,10 +1008,69 @@ class LazyTensor(torch.Tensor):
             if '::' in name:
                 name = name.split('::')[-1]
         else:
-            name = str(func)
+            # Handle method objects (e.g., <method 'cpu' of ...>)
+            func_str = str(func)
+            if "'method '" in func_str and " of " in func_str:
+                # Extract method name from string representation
+                method_part = func_str.split("'method '")[1].split("'")[0]
+                name = method_part
+            else:
+                name = str(func)
 
         # Remove overload suffix (e.g., add.Tensor -> add)
         name = name.split('.')[0]
+
+        # Handle special cases for method names that start with __
+        if name.startswith('__') and name.endswith('__'):
+            # This is likely a dunder method, map to the actual operation
+            if name == '__len__':
+                name = 'len'
+            elif name == '__add__':
+                name = 'add'
+            elif name == '__matmul__':
+                name = 'matmul'
+            elif name == '__sub__':
+                name = 'sub'
+            elif name == '__mul__':
+                name = 'mul'
+            elif name == '__truediv__':
+                name = 'div'
+            elif name == '__floordiv__':
+                name = 'floordiv'
+            elif name == '__mod__':
+                name = 'remainder'
+            elif name == '__pow__':
+                name = 'pow'
+            elif name == '__lshift__':
+                name = 'lshift'
+            elif name == '__rshift__':
+                name = 'rshift'
+            elif name == '__and__':
+                name = 'bitwise_and'
+            elif name == '__or__':
+                name = 'bitwise_or'
+            elif name == '__xor__':
+                name = 'bitwise_xor'
+            elif name == '__invert__':
+                name = 'bitwise_not'
+            elif name == '__lt__':
+                name = 'lt'
+            elif name == '__le__':
+                name = 'le'
+            elif name == '__gt__':
+                name = 'gt'
+            elif name == '__ge__':
+                name = 'ge'
+            elif name == '__eq__':
+                name = 'eq'
+            elif name == '__ne__':
+                name = 'ne'
+            else:
+                # For other dunder methods that don't have direct aten equivalents,
+                # especially internal methods like __get__, __set__, etc.
+                # These are internal Python methods that shouldn't be intercepted
+                logger.debug(f"Ignoring internal dunder method: {name} for func: {func}")
+                name = 'unknown_method'
 
         # Ensure aten:: prefix
         if not name.startswith('aten::'):
@@ -913,7 +1138,8 @@ class LazyTensor(torch.Tensor):
     def shape(self) -> torch.Size:
         """Get the shape of this tensor."""
         # Prevent recursion when accessing shape
-        if getattr(_in_torch_function, 'active', False):
+        from .interception_control import get_current_context, InterceptionContext
+        if get_current_context() != InterceptionContext.NONE:
             return object.__getattribute__(self, '_shape') or torch.Size([])
 
         self._ensure_shape()
@@ -923,7 +1149,8 @@ class LazyTensor(torch.Tensor):
     def dtype(self) -> torch.dtype:
         """Get the dtype of this tensor."""
         # Prevent recursion when accessing dtype
-        if getattr(_in_torch_function, 'active', False):
+        from .interception_control import get_current_context, InterceptionContext
+        if get_current_context() != InterceptionContext.NONE:
             return object.__getattribute__(self, '_dtype') or torch.float32
 
         return object.__getattribute__(self, '_dtype') or torch.float32
@@ -932,7 +1159,8 @@ class LazyTensor(torch.Tensor):
     def device(self):
         """Get the device of this tensor."""
         # Prevent recursion when accessing device
-        if getattr(_in_torch_function, 'active', False):
+        from .interception_control import get_current_context, InterceptionContext
+        if get_current_context() != InterceptionContext.NONE:
             original_device = object.__getattribute__(self, '_original_device')
             if original_device is not None:
                 # For remote devices, return a torch.device with privateuseone type
@@ -953,6 +1181,13 @@ class LazyTensor(torch.Tensor):
     def original_device(self):
         """Get the original device (before meta conversion)."""
         return object.__getattribute__(self, '_original_device')
+
+    @property
+    def T(self):
+        """Transpose property - return transposed view."""
+        # Use torch.t to go through the normal dispatch mechanism
+        # This ensures proper graph building
+        return torch.t(self)
 
     # ===================================================================
     # STRING REPRESENTATION

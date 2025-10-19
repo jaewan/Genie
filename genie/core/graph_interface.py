@@ -34,6 +34,11 @@ class GraphNode(ABC):
         """Input nodes."""
         pass
 
+    @abstractmethod
+    def get_consumers(self) -> List['GraphNode']:
+        """Nodes that consume this node's output."""
+        pass
+
     @property
     @abstractmethod
     def metadata(self) -> Dict[str, Any]:
@@ -156,6 +161,13 @@ class FXNodeAdapter(GraphNode):
 
         return inputs
 
+    def get_consumers(self) -> List[GraphNode]:
+        """Nodes that consume this node's output."""
+        consumers = []
+        for user in self.fx_node.users:
+            consumers.append(FXNodeAdapter(user))
+        return consumers
+
     @property
     def metadata(self) -> Dict[str, Any]:
         return self.fx_node.meta.get('semantic', {})
@@ -201,6 +213,7 @@ class LazyDAGAdapter(Graph):
 
             # Create adapter and add to result
             node_adapter = LazyDAGNodeAdapter(tensor)
+            node_adapter._parent_adapter = self  # Set parent reference for consumer lookup
             result.append(node_adapter)
 
         visit(self.root)
@@ -245,6 +258,24 @@ class LazyDAGNodeAdapter(GraphNode):
             for inp in self.tensor.inputs
             if isinstance(inp, LazyTensor)
         ]
+
+    def get_consumers(self) -> List[GraphNode]:
+        """Nodes that consume this node's output."""
+        # For LazyDAG, we need to traverse the graph to find consumers
+        # This is expensive but necessary for pattern matching
+        consumers = []
+
+        # Get the adapter's parent graph to traverse
+        parent_adapter = getattr(self, '_parent_adapter', None)
+        if parent_adapter and hasattr(parent_adapter, 'nodes'):
+            # Look through all nodes to find consumers
+            for node in parent_adapter.nodes():
+                for inp in node.inputs:
+                    if inp.id == self.id:
+                        consumers.append(node)
+                        break
+
+        return consumers
 
     @property
     def metadata(self) -> Dict[str, Any]:

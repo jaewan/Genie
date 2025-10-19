@@ -136,8 +136,16 @@ class FactoryInterceptor:
 
             # CRITICAL FIX: Don't intercept meta or cpu devices
             # These are used internally by PyTorch and LazyTensor for shape inference
-            if device in ('meta', 'cpu') or (isinstance(device, torch.device) and device.type in ('meta', 'cpu')):
-                return original_func(*args, **kwargs)
+            if (device is not None and
+                (device == 'meta' or device == 'cpu' or
+                 (isinstance(device, torch.device) and device.type in ('meta', 'cpu')))):
+                # Convert torch.device to string for original function
+                if isinstance(device, torch.device):
+                    fixed_kwargs = kwargs.copy()
+                    fixed_kwargs['device'] = device.type
+                    return original_func(*args, **fixed_kwargs)
+                else:
+                    return original_func(*args, **kwargs)
 
             # Check if we're inside executor materialization (skip interception in that case)
             if _executor_module:
