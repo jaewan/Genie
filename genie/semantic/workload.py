@@ -95,5 +95,3 @@ class ExecutionPlan:
 	placement: Dict[str, Any]  # fragment_id -> device/node
 	transfers: List[Dict[str, Any]]
 	feature_flags: Dict[str, bool]
-
-

@@ -153,5 +153,3 @@ class SemanticAnalyzer:
 			feature_flags={"overlap_io": False, "micro_batching": False},
 		)
 		return plan
-
-

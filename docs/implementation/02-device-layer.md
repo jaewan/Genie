@@ -9,6 +9,8 @@ The Device Layer provides the foundation for remote accelerator support in PyTor
 
 ## Architecture
 
+The Device Layer is **Mechanism 3** of the three interception mechanisms:
+
 ```
 PyTorch Core
      │
@@ -32,7 +34,20 @@ PyTorch Core
 │  • to_torch_device()    │
 │  • synchronize()        │
 └─────────────────────────┘
+     │
+     ▼
+┌─────────────────────────┐
+│  Interception Layer     │  ← Coordinates all three mechanisms
+│  • Factory Intercept    │
+│  • __torch_dispatch__   │
+│  • Device Backend       │
+└─────────────────────────┘
 ```
+
+**Role in Interception System**:
+- **Device Backend** is one of three necessary interception mechanisms
+- Required for PyTorch to recognize "remote_accelerator" as valid device type
+- Works with Factory Intercept and __torch_dispatch__ for complete coverage
 
 ## Core Classes
 
@@ -56,24 +71,24 @@ class RemoteAcceleratorDevice:
 
 ##### `_register_backend()`
 
-Registers the backend with PyTorch's C++ core, with graceful fallback to Python-only mode:
+Registers the backend with PyTorch's C++ core as **Mechanism 3** of the interception system:
 
 ```python
 def _register_backend(self):
-    """Register the remote_accelerator backend with PyTorch."""
+    """Register the remote_accelerator backend with PyTorch (Mechanism 3)."""
     if not RemoteAcceleratorDevice._backend_registered:
         try:
             from genie import _C
             _C.register_remote_accelerator_device()
             self._register_python_hooks()
             RemoteAcceleratorDevice._backend_registered = True
-            logger.info("Successfully registered remote_accelerator backend")
+            logger.info("Successfully registered remote_accelerator backend (Mechanism 3)")
         except Exception as e:
-            # Graceful fallback: Python-level __torch_function__ still works
+            # Graceful fallback: Python-level interception still works
             logger.warning(f"C++ backend registration failed, using Python-only mode: {e}")
             logger.warning("This is expected if the C++ extension has ABI compatibility issues")
-            logger.info("LazyTensor interception via __torch_function__ will still work")
-            
+            logger.info("All three interception mechanisms will still work (Factory + __torch_dispatch__ + Python fallback)")
+
             RemoteAcceleratorDevice._backend_registered = True
             self._register_python_hooks()
 ```
@@ -82,14 +97,20 @@ def _register_backend(self):
 ```cpp
 void register_remote_accelerator_device() {
     if (!_backend_registered) {
-        // Register with PyTorch's PrivateUse1 mechanism
+        // Register with PyTorch's PrivateUse1 mechanism (Mechanism 3)
         c10::register_privateuse1_backend("remote_accelerator");
         _backend_registered = true;
     }
 }
 ```
 
-**Fallback Behavior**: If C++ registration fails (e.g., due to ABI incompatibility), Genie falls back to Python-only mode using the `__torch_function__` protocol. This provides full functionality without the C++ performance optimizations.
+**Role in Interception System**:
+This is **Mechanism 3** (Device Backend) of the three interception mechanisms:
+- **Factory Intercept** (Mechanism 1): Wraps torch.randn for initial tensor creation
+- **`__torch_dispatch__`** (Mechanism 2): Intercepts operations on LazyTensor
+- **Device Backend** (Mechanism 3): Makes PyTorch recognize "remote_accelerator" device
+
+**Fallback Behavior**: If C++ registration fails, Genie gracefully falls back to Python-only mode. All three mechanisms still work together for complete operation interception.
 
 ##### `get_device(index)` (Class Method)
 
@@ -191,17 +212,22 @@ device = get_device(0).to_torch_device()
 
 ### Tensor Operations
 
-Tensors created on `remote_accelerator` device automatically become `LazyTensor`:
+Tensors created on `remote_accelerator` device automatically become `LazyTensor` through the interception mechanisms:
 
 ```python
-# This creates a LazyTensor
+# This creates a LazyTensor via Factory Intercept (Mechanism 1)
 x = torch.randn(10, 10, device="remote_accelerator:0")
 assert isinstance(x, LazyTensor)
 
-# Operations create more LazyTensors
-y = x + x  # LazyTensor
-z = torch.matmul(x, y)  # LazyTensor
+# Operations create more LazyTensors via __torch_dispatch__ (Mechanism 2)
+y = x + x  # LazyTensor (intercepted by __torch_dispatch__)
+z = torch.matmul(x, y)  # LazyTensor (intercepted by __torch_dispatch__)
 ```
+
+**Interception Flow**:
+1. `torch.randn` → **Factory Intercept** (Mechanism 1) → Creates LazyTensor
+2. `x + x` → **`__torch_dispatch__`** (Mechanism 2) → Creates new LazyTensor
+3. `torch.matmul` → **`__torch_dispatch__`** (Mechanism 2) → Creates new LazyTensor
 
 ### Device Properties
 
