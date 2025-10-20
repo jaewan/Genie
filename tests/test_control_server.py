@@ -26,7 +26,7 @@ pytest_plugins = ('pytest_asyncio',)
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from genie.runtime.control_server import (
+from genie.runtime.control_plane import (
     ControlPlaneServer, ClientHandler, ControlMessage, MessageType,
     TransferRequest, TransferResponse, NodeCapabilities, TransferStatus,
     get_control_server, start_control_server, stop_control_server
@@ -461,7 +461,7 @@ class TestGlobalFunctions:
     def test_get_control_server(self):
         """Test global server instance"""
         # Reset global state
-        import genie.runtime.control_server
+        import genie.runtime.control_plane
         genie.runtime.control_server._control_server = None
         
         server1 = get_control_server("test-node")
@@ -475,7 +475,7 @@ class TestGlobalFunctions:
     async def test_start_stop_control_server(self):
         """Test global server start/stop"""
         # Reset global state
-        import genie.runtime.control_server
+        import genie.runtime.control_plane
         genie.runtime.control_server._control_server = None
         
         # This would normally start a real server

@@ -20,7 +20,7 @@ from genie.runtime.transport_coordinator import (
     TransportCoordinator, DataPlaneConfig, initialize_transport, shutdown_transport
 )
 from genie.runtime.async_zero_copy_bridge import AsyncZeroCopyBridge
-from genie.runtime.control_server import ControlPlaneServer
+from genie.runtime.control_plane import ControlPlaneServer
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

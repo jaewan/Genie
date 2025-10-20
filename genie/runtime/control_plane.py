@@ -38,7 +38,7 @@ class MessageType(IntEnum):
     CAPABILITY_EXCHANGE = 2
     HEARTBEAT = 3
     GOODBYE = 4
-    
+
     # Transfer coordination
     TRANSFER_REQUEST = 10
     TRANSFER_READY = 11
@@ -46,7 +46,7 @@ class MessageType(IntEnum):
     TRANSFER_COMPLETE = 13
     TRANSFER_ERROR = 14
     TRANSFER_CANCEL = 15
-    
+
     # Status and monitoring
     STATUS_REQUEST = 20
     STATUS_RESPONSE = 21
@@ -86,48 +86,461 @@ class TransferRequest:
     size: int
     dtype: str
     shape: List[int]
-    source_gpu: int = 0
-    target_gpu: int = 0
-    priority: int = 1
-    timeout_seconds: float = 300.0
-    requires_ack: bool = True
-    compression: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
+    timestamp: float = field(default_factory=time.time)
+    timeout_seconds: float = 300.0  # 5 minute default timeout
 
 @dataclass
-class TransferResponse:
-    """Transfer response information"""
-    transfer_id: str
-    accepted: bool
-    reason: str = ""
-    estimated_time_seconds: float = 0.0
-    allocated_gpu: int = 0
-    data_port: int = 5556  # UDP port for data transfer
-    metadata: Dict[str, Any] = field(default_factory=dict)
+class ClientHandler:
+    """Client connection handler"""
+    client_id: str
+    reader: asyncio.StreamReader
+    writer: asyncio.StreamWriter
+    node_id: str
+    connected: bool = True
+    last_heartbeat: float = field(default_factory=time.time)
+    capabilities: Optional[NodeCapabilities] = None
 
 @dataclass
 class ControlMessage:
     """Control plane message"""
     type: MessageType
     sender: str
-    # Optional explicit receiver for point-to-point flows (integration harness)
-    receiver: str = ""
-    timestamp: float = field(default_factory=time.time)
-    message_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    payload: Dict[str, Any] = field(default_factory=dict)
-    
+    timestamp: float
+    message_id: str
+    payload: Dict[str, Any]
+
     def to_json(self) -> str:
-        """Convert message to JSON string"""
         data = asdict(self)
-        data['type'] = int(self.type)  # Convert enum to int
+        data['type'] = int(self.type)
         return json.dumps(data)
-    
+
     @classmethod
     def from_json(cls, json_str: str) -> 'ControlMessage':
-        """Create message from JSON string"""
         data = json.loads(json_str)
-        data['type'] = MessageType(data['type'])  # Convert int to enum
+        data['type'] = MessageType(data['type'])
         return cls(**data)
+
+
+class ControlPlaneServer:
+    """
+    Main control plane server implementation.
+
+    Handles multiple client connections and coordinates transfers.
+    """
+
+    def __init__(self, node_id: str, host: str = '0.0.0.0', port: int = 5555):
+        self.node_id = node_id
+        self.host = host
+        self.port = port
+        self.server = None
+
+        # Client management
+        self.clients: Dict[str, ClientHandler] = {}
+        self.client_handlers: Dict[str, weakref.WeakSet] = {}
+
+        # Transfer coordination
+        self.active_transfers: Dict[str, TransferRequest] = {}
+        self.transfer_callbacks: Dict[str, Dict[str, Callable]] = {}
+
+        # Node capabilities (self)
+        self.capabilities = NodeCapabilities(
+            node_id=node_id,
+            gpu_count=1,  # TODO: Auto-detect
+            data_port=5556
+        )
+
+        # Background tasks
+        self.heartbeat_task = None
+        self.cleanup_task = None
+
+        # Configuration
+        self.heartbeat_interval = 30.0  # seconds
+        self.heartbeat_timeout = 90.0   # seconds
+
+    async def start(self):
+        """Start the control plane server"""
+        try:
+            self.server = await asyncio.start_server(
+                self._handle_client,
+                self.host,
+                self.port
+            )
+
+            addrs = ', '.join(str(sock.getsockname()) for sock in self.server.sockets)
+            logger.info(f"Control plane server listening on {addrs}")
+
+            # Start background tasks
+            self.heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+            self.cleanup_task = asyncio.create_task(self._cleanup_loop())
+
+        except Exception as e:
+            logger.error(f"Failed to start control plane server: {e}")
+            raise
+
+    async def stop(self):
+        """Stop the control plane server"""
+        logger.info("Stopping control plane server...")
+
+        # Cancel background tasks
+        if self.heartbeat_task:
+            self.heartbeat_task.cancel()
+        if self.cleanup_task:
+            self.cleanup_task.cancel()
+
+        # Close all client connections
+        for client in list(self.clients.values()):
+            try:
+                client.writer.close()
+                await client.writer.wait_closed()
+            except:
+                pass
+
+        # Close server
+        if self.server:
+            self.server.close()
+            await self.server.wait_closed()
+
+        logger.info("Control plane server stopped")
+
+    def get_capabilities(self) -> NodeCapabilities:
+        """Get node capabilities"""
+        return self.capabilities
+
+    def register_client(self, client_id: str, handler: ClientHandler):
+        """Register a new client"""
+        self.clients[client_id] = handler
+        self.client_handlers.setdefault(client_id, weakref.WeakSet()).add(handler)
+
+    def unregister_client(self, client_id: str):
+        """Unregister a client"""
+        if client_id in self.clients:
+            del self.clients[client_id]
+        if client_id in self.client_handlers:
+            del self.client_handlers[client_id]
+
+    def add_transfer_callback(self, event: str, callback: Callable):
+        """Add callback for transfer events"""
+        if event not in self.transfer_callbacks:
+            self.transfer_callbacks[event] = {}
+        self.transfer_callbacks[event][callback.__name__] = callback
+
+    async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        """Handle incoming client connection"""
+        addr = writer.get_extra_info('peername')
+        logger.info(f"New control plane connection from {addr}")
+
+        client_id = f"{addr[0]}:{addr[1]}"
+        client = ClientHandler(client_id, reader, writer, client_id.split(':')[0])
+
+        try:
+            self.register_client(client_id, client)
+
+            while not reader.at_eof():
+                try:
+                    # Read message length (4 bytes, big-endian)
+                    length_data = await reader.readexactly(4)
+                    message_length = int.from_bytes(length_data, 'big')
+
+                    # Read message
+                    message_data = await reader.readexactly(message_length)
+                    message_str = message_data.decode('utf-8')
+                    message = ControlMessage.from_json(message_str)
+
+                    # Handle message
+                    response = await self._handle_message(message, client)
+                    if response:
+                        await self._send_message(writer, response)
+
+                except asyncio.IncompleteReadError:
+                    logger.info(f"Client {client_id} disconnected")
+                    break
+                except Exception as e:
+                    logger.error(f"Error handling message from {client_id}: {e}")
+                    break
+
+        except Exception as e:
+            logger.error(f"Client handler error for {client_id}: {e}")
+        finally:
+            self.unregister_client(client_id)
+            logger.info(f"Client {client_id} disconnected")
+
+    async def _handle_message(self, message: ControlMessage, client: ClientHandler) -> Optional[ControlMessage]:
+        """Handle incoming message"""
+        logger.debug(f"Received {message.type.name} from {message.sender}")
+
+        if message.type == MessageType.CAPABILITY_EXCHANGE:
+            return self._handle_capability_exchange(message, client)
+
+        elif message.type == MessageType.TRANSFER_REQUEST:
+            return await self._handle_transfer_request(message, client)
+
+        elif message.type == MessageType.HEARTBEAT:
+            client.last_heartbeat = time.time()
+            return ControlMessage(
+                type=MessageType.HEARTBEAT,
+                sender=self.node_id,
+                timestamp=time.time(),
+                message_id=str(uuid.uuid4()),
+                payload={'status': 'alive'}
+            )
+
+        elif message.type == MessageType.TRANSFER_COMPLETE:
+            return await self._handle_transfer_complete(message, client)
+
+        return None
+
+    def _handle_capability_exchange(self, message: ControlMessage, client: ClientHandler) -> ControlMessage:
+        """Handle capability exchange"""
+        # Update client capabilities
+        if 'capabilities' in message.payload:
+            client.capabilities = NodeCapabilities(**message.payload['capabilities'])
+
+        # Return our capabilities
+        return ControlMessage(
+            type=MessageType.CAPABILITY_EXCHANGE,
+            sender=self.node_id,
+            timestamp=time.time(),
+            message_id=str(uuid.uuid4()),
+            payload={'capabilities': asdict(self.capabilities)}
+        )
+
+    async def _handle_transfer_request(self, message: ControlMessage, client: ClientHandler) -> ControlMessage:
+        """Handle transfer request"""
+        transfer_id = message.payload['transfer_id']
+        metadata = message.payload
+
+        logger.info(f"Transfer request: {transfer_id} from {message.sender}")
+
+        # Create transfer request object
+        transfer_request = TransferRequest(
+            transfer_id=transfer_id,
+            tensor_id=metadata.get('tensor_id', transfer_id),
+            source_node=message.sender,
+            target_node=self.node_id,
+            size=metadata['size'],
+            dtype=metadata['dtype'],
+            shape=metadata['shape'],
+            metadata=metadata.get('metadata', {}),
+            timestamp=time.time()
+        )
+
+        # Store transfer
+        self.active_transfers[transfer_id] = transfer_request
+
+        # Accept transfer (for Phase 1, always accept)
+        accepted = True
+
+        return ControlMessage(
+            type=MessageType.TRANSFER_READY,
+            sender=self.node_id,
+            timestamp=time.time(),
+            message_id=str(uuid.uuid4()),
+            payload={
+                'transfer_id': transfer_id,
+                'accepted': accepted,
+                'data_port': self.capabilities.data_port
+            }
+        )
+
+    async def _handle_transfer_complete(self, message: ControlMessage, client: ClientHandler) -> ControlMessage:
+        """Handle transfer completion"""
+        transfer_id = message.payload['transfer_id']
+        logger.info(f"Transfer complete: {transfer_id}")
+
+        # Remove from active transfers
+        if transfer_id in self.active_transfers:
+            del self.active_transfers[transfer_id]
+
+        return None
+
+    async def _send_message(self, writer: asyncio.StreamWriter, message: ControlMessage):
+        """Send message to client"""
+        message_str = message.to_json()
+        message_data = message_str.encode('utf-8')
+
+        # Send length prefix
+        length_data = len(message_data).to_bytes(4, 'big')
+        writer.write(length_data + message_data)
+        await writer.drain()
+
+    async def _heartbeat_loop(self):
+        """Send periodic heartbeats to connected clients"""
+        while True:
+            try:
+                await asyncio.sleep(self.heartbeat_interval)
+
+                heartbeat_msg = ControlMessage(
+                    type=MessageType.HEARTBEAT,
+                    sender=self.node_id,
+                    timestamp=time.time(),
+                    message_id=str(uuid.uuid4()),
+                    payload={'timestamp': time.time()}
+                )
+
+                for client in list(self.clients.values()):
+                    try:
+                        await self._send_message(client.writer, heartbeat_msg)
+                    except Exception as e:
+                        logger.error(f"Failed to send heartbeat to {client.client_id}: {e}")
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Heartbeat loop error: {e}")
+
+    async def _cleanup_loop(self):
+        """Background cleanup loop"""
+        while True:
+            try:
+                await asyncio.sleep(60)  # Cleanup every minute
+
+                current_time = time.time()
+
+                # Check for timed out clients
+                disconnected_clients = []
+                for client_id, client in self.clients.items():
+                    if current_time - client.last_heartbeat > self.heartbeat_timeout:
+                        disconnected_clients.append(client_id)
+
+                # Remove timed out clients
+                for client_id in disconnected_clients:
+                    logger.warning(f"Removing timed out client: {client_id}")
+                    client = self.clients[client_id]
+                    client.connected = False
+                    self.unregister_client(client_id)
+
+                # Check for stale transfers
+                stale_transfers = []
+                for transfer_id, transfer in self.active_transfers.items():
+                    # Simple timeout check - in practice, this would be more sophisticated
+                    if current_time - transfer.timeout_seconds > 3600:  # 1 hour default timeout
+                        stale_transfers.append(transfer_id)
+
+                # Remove stale transfers
+                for transfer_id in stale_transfers:
+                    logger.warning(f"Removing stale transfer: {transfer_id}")
+                    del self.active_transfers[transfer_id]
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Cleanup loop error: {e}")
+
+# Global server instance
+_control_server: Optional[ControlPlaneServer] = None
+
+def get_control_server(node_id: str = None) -> ControlPlaneServer:
+    """Get global control server instance"""
+    global _control_server
+    if _control_server is None:
+        if node_id is None:
+            node_id = f"genie-node-{socket.gethostname()}"
+        _control_server = ControlPlaneServer(node_id)
+    return _control_server
+
+async def start_control_server(node_id: str = None, host: str = '0.0.0.0', port: int = 5555):
+    """Start the global control server"""
+    server = get_control_server(node_id)
+    server.host = host
+    server.port = port
+    await server.start()
+
+async def stop_control_server():
+    """Stop the global control server"""
+    global _control_server
+    if _control_server:
+        await _control_server.stop()
+        _control_server = None
+
+
+class ControlPlane:
+    """
+    Simplified wrapper for ControlPlaneServer.
+
+    Provides client-side API for coordinator.
+    """
+    def __init__(self, node_id: str, port: int = 5555):
+        self.node_id = node_id
+        self.port = port
+        self.server = ControlPlaneServer(node_id, '0.0.0.0', port)
+
+    async def start(self):
+        """Start control plane server."""
+        await self.server.start()
+
+    async def stop(self):
+        """Stop control plane server."""
+        await self.server.stop()
+
+    async def negotiate_transfer(
+        self,
+        transfer_id: str,
+        target: str,
+        metadata: Dict[str, Any]
+    ) -> bool:
+        """
+        Negotiate transfer with target (client-side).
+
+        Opens connection, sends TRANSFER_REQUEST, waits for response.
+        """
+        # Parse target
+        if ':' in target:
+            host, port_str = target.rsplit(':', 1)
+            port = int(port_str)
+        else:
+            host = target
+            port = self.port
+
+        try:
+            # Connect
+            reader, writer = await asyncio.open_connection(host, port)
+
+            # Send transfer request
+            request = ControlMessage(
+                type=MessageType.TRANSFER_REQUEST,
+                sender=self.node_id,
+                timestamp=time.time(),
+                message_id=str(uuid.uuid4()),
+                payload={
+                    'transfer_id': transfer_id,
+                    'tensor_id': transfer_id,  # Use transfer_id as tensor_id for now
+                    'source_node': self.node_id,
+                    'target_node': target,
+                    'size': metadata['size_bytes'],
+                    'dtype': metadata['dtype'],
+                    'shape': metadata['shape'],
+                    'metadata': metadata
+                }
+            )
+
+            # Send message
+            message_str = request.to_json()
+            message_data = message_str.encode('utf-8')
+            length_data = len(message_data).to_bytes(4, 'big')
+            writer.write(length_data + message_data)
+            await writer.drain()
+
+            # Wait for response
+            length_data = await reader.readexactly(4)
+            message_length = int.from_bytes(length_data, 'big')
+            message_data = await reader.readexactly(message_length)
+            message_str = message_data.decode('utf-8')
+            response = ControlMessage.from_json(message_str)
+
+            # Check if accepted
+            accepted = response.payload.get('accepted', False)
+
+            # Close
+            writer.close()
+            await writer.wait_closed()
+
+            return accepted
+
+        except Exception as e:
+            logger.error(f"Negotiation failed: {e}")
+            return False
+
 
 class ClientHandler:
     """Handles individual client connections"""
@@ -775,3 +1188,91 @@ async def stop_control_server():
     if _control_server:
         await _control_server.stop()
         _control_server = None
+
+
+class ControlPlane:
+    """
+    Simplified wrapper for ControlPlaneServer.
+
+    Provides client-side API for coordinator.
+    """
+    def __init__(self, node_id: str, port: int = 5555):
+        self.node_id = node_id
+        self.port = port
+        self.server = ControlPlaneServer(node_id, '0.0.0.0', port)
+
+    async def start(self):
+        """Start control plane server."""
+        await self.server.start()
+
+    async def stop(self):
+        """Stop control plane server."""
+        await self.server.stop()
+
+    async def negotiate_transfer(
+        self,
+        transfer_id: str,
+        target: str,
+        metadata: Dict[str, Any]
+    ) -> bool:
+        """
+        Negotiate transfer with target (client-side).
+
+        Opens connection, sends TRANSFER_REQUEST, waits for response.
+        """
+        # Parse target
+        if ':' in target:
+            host, port_str = target.rsplit(':', 1)
+            port = int(port_str)
+        else:
+            host = target
+            port = self.port
+
+        try:
+            # Connect
+            reader, writer = await asyncio.open_connection(host, port)
+
+            # Send transfer request
+            request = ControlMessage(
+                type=MessageType.TRANSFER_REQUEST,
+                sender=self.node_id,
+                timestamp=time.time(),
+                message_id=str(uuid.uuid4()),
+                payload={
+                    'transfer_id': transfer_id,
+                    'tensor_id': transfer_id,  # Use transfer_id as tensor_id for now
+                    'source_node': self.node_id,
+                    'target_node': target,
+                    'size': metadata['size_bytes'],
+                    'dtype': metadata['dtype'],
+                    'shape': metadata['shape'],
+                    'metadata': metadata
+                }
+            )
+
+            # Send message
+            message_str = request.to_json()
+            message_data = message_str.encode('utf-8')
+            length_data = len(message_data).to_bytes(4, 'big')
+            writer.write(length_data + message_data)
+            await writer.drain()
+
+            # Wait for response
+            length_data = await reader.readexactly(4)
+            message_length = int.from_bytes(length_data, 'big')
+            message_data = await reader.readexactly(message_length)
+            message_str = message_data.decode('utf-8')
+            response = ControlMessage.from_json(message_str)
+
+            # Check if accepted
+            accepted = response.payload.get('accepted', False)
+
+            # Close
+            writer.close()
+            await writer.wait_closed()
+
+            return accepted
+
+        except Exception as e:
+            logger.error(f"Negotiation failed: {e}")
+            return False

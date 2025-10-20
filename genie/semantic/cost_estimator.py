@@ -26,14 +26,66 @@ class CostEstimate:
     operational_intensity: float  # FLOPs per byte
     data_movement_bytes: float  # Input/output data volume
 
+    # Network costs (NEW for Phase 4)
+    transfer_time_ms: float = 0.0  # Estimated transfer time
+    queueing_delay_ms: float = 0.0  # Estimated queueing delay
+
+
+class NetworkTopology:
+    """Network topology information for cost estimation.
+
+    This is a simplified interface that delegates to the global NetworkTopologyManager.
+    """
+
+    def __init__(self):
+        # Import here to avoid circular dependency
+        from ..core.network_topology import get_network_topology
+        self._manager = get_network_topology()
+
+    def register_node(self, node_id: str, bandwidth_gbps: float, latency_ms: float):
+        """Register network information for a node."""
+        from ..core.network_topology import NetworkDevice
+        device = NetworkDevice(
+            node_id=node_id,
+            bandwidth_gbps=bandwidth_gbps,
+            latency_ms=latency_ms,
+            device_type='gpu',  # Default assumption
+            compute_tflops=10.0,  # Default assumption
+            memory_gb=16.0       # Default assumption
+        )
+        self._manager.register_device(device)
+
+    def get_bandwidth(self, src_node: str, dst_node: str) -> float:
+        """Get bandwidth between source and destination nodes."""
+        return self._manager.get_bandwidth(src_node, dst_node)
+
+    def get_latency(self, src_node: str, dst_node: str) -> float:
+        """Get latency between source and destination nodes."""
+        return self._manager.get_latency(src_node, dst_node)
+
+    def estimate_transfer_time(self, bytes_to_transfer: float, src_node: str, dst_node: str) -> float:
+        """Estimate transfer time in milliseconds."""
+        return self._manager.estimate_transfer_time(bytes_to_transfer, src_node, dst_node)
+
+    def estimate_queueing_delay(self, src_node: str, dst_node: str, queue_depth: int = 1) -> float:
+        """Estimate queueing delay based on network congestion."""
+        return self._manager.estimate_queueing_delay(src_node, dst_node, queue_depth)
+
+    def update_from_coordinator(self):
+        """Update network information from coordinator."""
+        self._manager.update_from_coordinator()
+
 
 class CostEstimator:
     """
     Estimates computational costs for operations.
-    
+
     Uses shape information and operation type to estimate costs.
     """
-    
+
+    def __init__(self, network_topology: Optional[NetworkTopology] = None):
+        self.network_topology = network_topology or NetworkTopology()
+
     def estimate_operation(self, node) -> CostEstimate:
         """
         Estimate cost for a single operation.
@@ -138,11 +190,21 @@ class CostEstimator:
                 output_bytes = B * out_features * dtype_bytes
                 memory_bytes = input_bytes + weight_bytes + output_bytes
 
+                # Estimate transfer costs (for remote execution)
+                transfer_time_ms = self.network_topology.estimate_transfer_time(
+                    input_bytes + output_bytes, "local", "remote"
+                )
+                queueing_delay_ms = self.network_topology.estimate_queueing_delay(
+                    "local", "remote", 1  # Assume queue depth 1 for now
+                )
+
                 return CostEstimate(
                     compute_flops=float(compute_flops),
                     memory_bytes=float(memory_bytes),
                     operational_intensity=compute_flops / memory_bytes if memory_bytes > 0 else 0,
-                    data_movement_bytes=float(input_bytes + output_bytes)
+                    data_movement_bytes=float(input_bytes + output_bytes),
+                    transfer_time_ms=transfer_time_ms,
+                    queueing_delay_ms=queueing_delay_ms
                 )
             else:
                 # General matmul case
@@ -287,11 +349,21 @@ class CostEstimator:
         output_bytes = N * C_out * H_out * W_out * dtype_bytes
         memory_bytes = input_bytes + weight_bytes + output_bytes
 
+        # Estimate transfer costs (for remote execution)
+        transfer_time_ms = self.network_topology.estimate_transfer_time(
+            input_bytes + output_bytes, "local", "remote"
+        )
+        queueing_delay_ms = self.network_topology.estimate_queueing_delay(
+            "local", "remote", 1
+        )
+
         return CostEstimate(
             compute_flops=float(compute_flops),
             memory_bytes=float(memory_bytes),
             operational_intensity=compute_flops / memory_bytes if memory_bytes > 0 else 0,
-            data_movement_bytes=float(input_bytes + output_bytes)
+            data_movement_bytes=float(input_bytes + output_bytes),
+            transfer_time_ms=transfer_time_ms,
+            queueing_delay_ms=queueing_delay_ms
         )
     
     def _estimate_attention(self, tensor) -> CostEstimate:
@@ -377,11 +449,21 @@ class CostEstimator:
         output_bytes = B * L * H * dtype_bytes
         memory_bytes = qkv_bytes + scores_bytes + output_bytes
 
+        # Estimate transfer costs (for remote execution)
+        transfer_time_ms = self.network_topology.estimate_transfer_time(
+            qkv_bytes + output_bytes, "local", "remote"
+        )
+        queueing_delay_ms = self.network_topology.estimate_queueing_delay(
+            "local", "remote", 1
+        )
+
         return CostEstimate(
             compute_flops=float(total_flops),
             memory_bytes=float(memory_bytes),
             operational_intensity=total_flops / memory_bytes if memory_bytes > 0 else 0,
-            data_movement_bytes=float(qkv_bytes + output_bytes)
+            data_movement_bytes=float(qkv_bytes + output_bytes),
+            transfer_time_ms=transfer_time_ms,
+            queueing_delay_ms=queueing_delay_ms
         )
     
     def _estimate_elementwise(self, tensor) -> CostEstimate:
@@ -397,11 +479,21 @@ class CostEstimator:
                 compute_flops = elements
                 memory_bytes = elements * 4  # float32
 
+                # Estimate transfer costs (for remote execution)
+                transfer_time_ms = self.network_topology.estimate_transfer_time(
+                    memory_bytes, "local", "remote"
+                )
+                queueing_delay_ms = self.network_topology.estimate_queueing_delay(
+                    "local", "remote", 1
+                )
+
                 return CostEstimate(
                     compute_flops=float(compute_flops),
                     memory_bytes=float(memory_bytes),
                     operational_intensity=1.0,  # Low intensity
-                    data_movement_bytes=float(memory_bytes)
+                    data_movement_bytes=float(memory_bytes),
+                    transfer_time_ms=transfer_time_ms,
+                    queueing_delay_ms=queueing_delay_ms
                 )
             except (TypeError, AttributeError):
                 pass
@@ -414,11 +506,21 @@ class CostEstimator:
     
     def _estimate_generic(self, tensor) -> CostEstimate:
         """Generic cost estimate (conservative)."""
+        # Estimate transfer costs (for remote execution)
+        transfer_time_ms = self.network_topology.estimate_transfer_time(
+            1000, "local", "remote"
+        )
+        queueing_delay_ms = self.network_topology.estimate_queueing_delay(
+            "local", "remote", 1
+        )
+
         return CostEstimate(
             compute_flops=1000,  # Conservative estimate
             memory_bytes=1000,
             operational_intensity=1.0,
-            data_movement_bytes=1000
+            data_movement_bytes=1000,
+            transfer_time_ms=transfer_time_ms,
+            queueing_delay_ms=queueing_delay_ms
         )
 
     def _is_attention_context(self, node) -> bool:
@@ -467,20 +569,26 @@ class GraphCostEstimator:
         total_compute = 0
         total_memory = 0
         total_data_movement = 0
-        
+        total_transfer_time = 0
+        total_queueing_delay = 0
+
         for node in graph.nodes():
             node_cost = self.operation_estimator.estimate_operation(node)
             costs[node.id] = node_cost
-            
+
             total_compute += node_cost.compute_flops
             total_memory += node_cost.memory_bytes
             total_data_movement += node_cost.data_movement_bytes
-        
+            total_transfer_time += node_cost.transfer_time_ms
+            total_queueing_delay += node_cost.queueing_delay_ms
+
         return {
             'per_node': costs,
             'total_compute_flops': total_compute,
             'total_memory_bytes': total_memory,
             'total_data_movement_bytes': total_data_movement,
-            'mean_operational_intensity': (total_compute / total_memory 
+            'total_transfer_time_ms': total_transfer_time,
+            'total_queueing_delay_ms': total_queueing_delay,
+            'mean_operational_intensity': (total_compute / total_memory
                                           if total_memory > 0 else 0),
         }

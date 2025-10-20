@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import threading
@@ -94,11 +95,63 @@ class SimpleExecutor:
 		else:
 			return value
 
+	async def _execute_remote(self, target_lazy_tensor) -> torch.Tensor:
+		"""Execute LazyTensor on remote accelerator."""
+		from .coordinator import get_coordinator
+		from .lazy_tensor import LazyTensor as _LT
+
+		# Get coordinator (will create if doesn't exist)
+		coordinator = get_coordinator()
+
+		# Materialize all inputs first (need to handle async properly)
+		resolved_inputs = []
+		for arg in target_lazy_tensor.inputs:
+			if isinstance(arg, _LT):
+				# Recursively execute inputs (they might also be remote)
+				if hasattr(arg, 'device') and str(arg.device).startswith('remote_accelerator'):
+					# Remote input - execute remotely
+					resolved_inputs.append(await self._execute_remote(arg))
+				else:
+					# Local input - execute locally first
+					resolved_inputs.append(self.execute_subgraph(arg))
+			else:
+				resolved_inputs.append(arg)
+
+		# For now, assume single-input operations
+		# In a complete implementation, you'd handle multi-input operations properly
+		input_tensor = resolved_inputs[0] if resolved_inputs else None
+
+		if input_tensor is None:
+			raise ValueError("Remote execution requires at least one input tensor")
+
+		# Extract target server from device string
+		device_str = str(target_lazy_tensor.device)
+		# Expected format: "remote_accelerator:server:port"
+		parts = device_str.split(':')
+		if len(parts) < 3:
+			raise ValueError(f"Invalid remote device format: {device_str}")
+
+		target = f"{parts[1]}:{parts[2]}"  # server:port
+
+		# Execute remotely
+		try:
+			result = await coordinator.send_and_execute(
+				input_tensor,
+				operation=target_lazy_tensor.operation,
+				target=target,
+				metadata={'phase': 'remote_compute'}
+			)
+
+			return result
+
+		except Exception as e:
+			logger.error(f"Remote execution failed for {target_lazy_tensor.operation}: {e}")
+			raise MaterializationError(f"Remote execution failed: {e}") from e
+
 	def execute_subgraph(self, target_lazy_tensor) -> torch.Tensor:  # noqa: ANN001
 		"""Execute computation graph up to target tensor.
 
-		For Phase 1, uses simple direct recursive evaluation on LazyTensor chain.
-		Remote execution and FX-based execution are Phase 2+ features.
+		Supports both local and remote execution based on device type.
 		"""
 		current_thread = threading.get_ident()
 
@@ -112,8 +165,22 @@ class SimpleExecutor:
 
 		_in_executor.active = True
 		try:
-			# Phase 1: Simple direct recursive evaluation
+			# Check if this targets a remote device
 			from .lazy_tensor import LazyTensor as _LT
+			if (isinstance(target_lazy_tensor, _LT) and
+				hasattr(target_lazy_tensor, 'device') and
+				str(target_lazy_tensor.device).startswith('remote_accelerator')):
+
+				# Remote execution path - need to run in async context
+				try:
+					loop = asyncio.get_running_loop()
+					return loop.run_until_complete(self._execute_remote(target_lazy_tensor))
+				except RuntimeError:
+					# No running loop, create one
+					return asyncio.run(self._execute_remote(target_lazy_tensor))
+
+			# Phase 1: Simple direct recursive evaluation
+
 
 			# Cache to store computed results for each LazyTensor
 			# This ensures a LazyTensor appearing multiple times is only computed once
