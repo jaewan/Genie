@@ -554,9 +554,10 @@ class LazyTensor(torch.Tensor):
                 torch_dtype = numpy_to_torch_dtype.get(str(inferred_dtype), torch.float32)
 
         # Create tensor wrapper using official API - avoid torch.empty to prevent interception
+        # Use empty with meta device, then expand to target shape
         wrapper = torch.Tensor._make_subclass(
             cls,
-            torch.tensor(0, dtype=torch_dtype, device=device).expand(shape),
+            torch.empty(shape, dtype=torch_dtype, device=device),
             require_grad=False  # Disable autograd for now (Phase 2 addition)
         )
 
@@ -817,7 +818,7 @@ class LazyTensor(torch.Tensor):
                             torch.empty(inp_shape, dtype=inp_dtype or torch.float32, device='meta')
                         )
                     elif isinstance(inp, torch.Tensor):
-                        # Convert to meta tensor
+                        # Convert to meta tensor (ensure consistent device)
                         fake_inputs.append(inp.to('meta'))
                     else:
                         # Scalar or non-tensor (keep as-is)

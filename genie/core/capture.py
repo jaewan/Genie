@@ -71,6 +71,7 @@ class CaptureContext:
         self.builder = get_global_builder()
         self.prev_root = None
         self.prev_active = False
+        self.captured_root = None  # Store the captured root on exit
 
     def __enter__(self):
         # Signal to factory interceptor that we're in capture mode
@@ -85,14 +86,20 @@ class CaptureContext:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Restore capture state (ALWAYS, even on exception)."""
+        """Preserve captured graph but restore parent context state."""
         try:
+            # ✅ FIX: Preserve the captured graph for retrieval
+            self.captured_root = self.builder.root_tensor
+            
             # Restore the capture active state
             _capture_context.active = self.prev_active
 
-            # ✅ FIX: Always restore the previous root_tensor
-            # This ensures nested contexts properly restore to parent context
-            self.builder.root_tensor = self.prev_root
+            # Only restore previous root if not at top level
+            # This preserves the captured graph at the top level
+            if self.prev_active:
+                # We're in a nested context, restore parent
+                self.builder.root_tensor = self.prev_root
+            # else: We're at top level, keep the captured root for get_graph()
 
         except Exception as e:
             logger.error(f"Failed to restore capture context: {e}")

@@ -91,6 +91,9 @@ class SimpleExecutor:
 			# Call materialize() directly to avoid recursion through __torch_function__
 			return value.materialize()
 		elif type(value).__name__ == 'Tensor':
+			# Don't try to move meta tensors to CPU - they can't be copied
+			if value.device.type == 'meta':
+				return value
 			return value.cpu() if value.device.type != 'cpu' else value
 		else:
 			return value
@@ -295,12 +298,31 @@ class SimpleExecutor:
 			device = kwargs.get("device")
 			if isinstance(device, str) and 'remote_accelerator' in device:
 				device_idx = device.split(':')[-1]
-				kwargs["device"] = f'cuda:{device_idx}'
+				try:
+					# Check if device index is valid
+					device_idx_int = int(device_idx)
+					if device_idx_int < torch.cuda.device_count():
+						kwargs["device"] = f'cuda:{device_idx}'
+					else:
+						# Fall back to CPU for invalid device indices
+						kwargs["device"] = "cpu"
+				except (ValueError, IndexError):
+					# Fall back to CPU for invalid device indices
+					kwargs["device"] = "cpu"
 			elif hasattr(device, 'type') and device.type in ('remote_accelerator', 'privateuseone'):
-				kwargs["device"] = f'cuda:{device.index}'
+				try:
+					if device.index < torch.cuda.device_count():
+						kwargs["device"] = f'cuda:{device.index}'
+					else:
+						kwargs["device"] = "cpu"
+				except (AttributeError, IndexError):
+					kwargs["device"] = "cpu"
 			elif device is None:
 				# For capture API (device=None), default to GPU to match native behavior
-				kwargs["device"] = "cuda:0"
+				if torch.cuda.is_available():
+					kwargs["device"] = "cuda:0"
+				else:
+					kwargs["device"] = "cpu"
 			else:
 				kwargs["device"] = "cpu"
 		else:
@@ -308,16 +330,29 @@ class SimpleExecutor:
 			device = kwargs.get("device")
 			if isinstance(device, str) and 'remote_accelerator' in device:
 				device_idx = device.split(':')[-1]
-				kwargs["device"] = f'cuda:{device_idx}'
+				try:
+					device_idx_int = int(device_idx)
+					if device_idx_int < torch.cuda.device_count():
+						kwargs["device"] = f'cuda:{device_idx}'
+					else:
+						# Remove device kwarg for invalid indices - don't pass it
+						kwargs.pop("device", None)
+				except (ValueError, IndexError):
+					kwargs.pop("device", None)
 			elif hasattr(device, 'type') and device.type in ('remote_accelerator', 'privateuseone'):
-				kwargs["device"] = f'cuda:{device.index}'
+				try:
+					if device.index < torch.cuda.device_count():
+						kwargs["device"] = f'cuda:{device.index}'
+					else:
+						kwargs.pop("device", None)
+				except (AttributeError, IndexError):
+					kwargs.pop("device", None)
 			elif device is None:
-				# For capture API (device=None), default to GPU to match native behavior
-				kwargs["device"] = "cuda:0"
-		
-		# Only move input tensors to CPU if they would cause device conflicts
-		# For now, let PyTorch handle device placement automatically
-		# concrete_inputs = [inp.cpu() if type(inp).__name__ == 'Tensor' else inp for inp in concrete_inputs]
+				# For capture API (device=None), don't pass device to comparison ops
+				kwargs.pop("device", None)
+			else:
+				# For other devices, remove device kwarg - non-creation ops shouldn't have it
+				kwargs.pop("device", None)
 
 		# Normalize op name (e.g., "aten::add" -> "add")
 		aten_prefix = "aten::"
