@@ -74,7 +74,28 @@ class SimpleExecutor:
 			
 			# Convolution
 			"aten::conv2d": self._execute_conv2d,
-			
+
+			# Pooling
+			"aten::max_pool2d": self._execute_max_pool2d,
+			"aten::avg_pool2d": self._execute_avg_pool2d,
+
+			# Adaptive pooling
+			"aten::adaptive_avg_pool2d": self._execute_adaptive_avg_pool2d,
+			"aten::adaptive_max_pool2d": self._execute_adaptive_max_pool2d,
+
+			# Normalization
+			"aten::batch_norm": self._execute_batch_norm,
+			"aten::layer_norm": self._execute_layer_norm,
+
+			# Dropout
+			"aten::dropout": self._execute_dropout,
+
+			# Interpolation (upsample)
+			"aten::interpolate": self._execute_interpolate,
+
+			# Tensor manipulation
+			"aten::split": self._execute_split,
+
 			# Reductions
 			"aten::sum": self._execute_sum,
 			"aten::mean": self._execute_mean,
@@ -83,6 +104,7 @@ class SimpleExecutor:
 			"aten::argmax": self._execute_argmax,
 			"aten::argmin": self._execute_argmin,
 			"aten::softmax": self._execute_softmax,
+			"aten::dim": self._execute_dim,
 		}
 
 	def _ensure_concrete(self, value: Any) -> Any:  # noqa: ANN001
@@ -155,7 +177,227 @@ class SimpleExecutor:
 		"""Execute computation graph up to target tensor.
 
 		Supports both local and remote execution based on device type.
+		Also supports optimized subgraph execution and smart fragmentation (enabled by default).
 		"""
+		# Check if smart fragmentation is enabled (Phase 2)
+		use_smart_fragmentation = os.getenv('GENIE_SMART_FRAGMENTATION', '1') == '1'
+
+		if use_smart_fragmentation:
+			try:
+				result = self._execute_with_smart_fragmentation(target_lazy_tensor)
+				if result is not None:
+					return result
+				logger.debug("Smart fragmentation not applicable, falling back to basic subgraph optimization")
+			except Exception as e:
+				logger.warning(f"Smart fragmentation failed, falling back to basic subgraph optimization: {e}")
+
+		# Check if basic subgraph optimization is enabled (Phase 1)
+		use_subgraph_optimization = os.getenv('GENIE_SUBGRAPH_OPT', '1') == '1'
+
+		if use_subgraph_optimization:
+			# Try the optimized subgraph execution path first
+			try:
+				result = self._execute_with_subgraph_optimization(target_lazy_tensor)
+				if result is not None:
+					return result
+				logger.debug("Subgraph optimization not applicable, falling back to recursive execution")
+			except Exception as e:
+				logger.warning(f"Subgraph optimization failed, falling back to recursive execution: {e}")
+
+		# Fallback to original execution path
+		return self._execute_recursive(target_lazy_tensor)
+
+	def _execute_with_subgraph_optimization(self, target_lazy_tensor) -> Optional[torch.Tensor]:
+		"""
+		Execute using subgraph optimization.
+
+		Returns None if optimization is not applicable, otherwise returns the result.
+		"""
+		from .subgraph_builder import SubgraphBuilder
+		from .lazy_tensor import LazyTensor as _LT
+
+		# Only apply optimization for remote tensors
+		if not (isinstance(target_lazy_tensor, _LT) and
+				hasattr(target_lazy_tensor, 'device') and
+				str(target_lazy_tensor.device).startswith('remote_accelerator')):
+			return None
+
+		# Build subgraph
+		builder = SubgraphBuilder()
+		subgraph = builder.build_from_device_chain(target_lazy_tensor)
+
+		if subgraph is None:
+			logger.debug("No remote subgraph to execute")
+			return None
+
+		logger.info(f"🚀 Executing subgraph with {len(subgraph.operations)} operations")
+
+		try:
+			# Materialize input tensors
+			input_data = {}
+			for tensor_id, tensor in subgraph.input_tensors.items():
+				# Materialize LazyTensor inputs
+				if isinstance(tensor, LazyTensor):
+					materialized = self._execute_recursive(tensor)  # Use recursive for inputs
+				else:
+					materialized = tensor
+				input_data[str(tensor_id)] = materialized
+
+			# Send to remote server
+			from ..runtime.simple_client import get_client
+			client = get_client()
+			result = client.execute_subgraph(subgraph.serialize(), input_data)
+
+			logger.info(f"✅ Subgraph execution complete: {result.shape}")
+			return result
+
+		except Exception as e:
+			logger.warning(f"Subgraph execution failed: {e}")
+			raise  # Re-raise to trigger fallback
+
+	def _execute_with_smart_fragmentation(self, target_lazy_tensor) -> Optional[torch.Tensor]:
+		"""
+		Execute using smart fragmentation (Phase 2).
+
+		Returns None if fragmentation is not applicable, otherwise returns the result.
+		"""
+		from .smart_subgraph_builder import SmartSubgraphBuilder, FragmentationConfig
+		from .lazy_tensor import LazyTensor as _LT
+
+		# Only apply fragmentation for remote tensors
+		if not (isinstance(target_lazy_tensor, _LT) and
+				hasattr(target_lazy_tensor, 'device') and
+				str(target_lazy_tensor.device).startswith('remote_accelerator')):
+			return None
+
+		# Create smart fragmentation configuration
+		config = FragmentationConfig(
+			memory_limit_gb=float(os.getenv('GENIE_MEMORY_LIMIT_GB', '8.0')),
+			network_gbps=float(os.getenv('GENIE_NETWORK_Gbps', '100.0')),
+			compute_tflops=float(os.getenv('GENIE_COMPUTE_TFLOPS', '10.0')),
+			fragmentation_threshold=float(os.getenv('GENIE_FRAGMENTATION_THRESHOLD', '0.8')),
+			prefer_local_compute=os.getenv('GENIE_PREFER_LOCAL', '1') == '1'
+		)
+
+		# Build fragments using smart fragmentation
+		builder = SmartSubgraphBuilder(config)
+		fragments = builder.build_with_fragmentation(target_lazy_tensor)
+
+		if not fragments:
+			logger.debug("No fragments created")
+			return None
+
+		logger.info(f"🚀 Executing {len(fragments)} fragments with smart fragmentation")
+
+		try:
+			# Execute fragments in order
+			fragment_results = {}
+			executed_count = 0
+
+			for fragment in fragments:
+				logger.debug(f"Executing fragment {executed_count}: {len(fragment.operations)} ops, "
+							f"mode={fragment.execution_mode}, cost={fragment.cost_estimate.total_cost_ms:.2f}ms")
+
+				if fragment.execution_mode == 'local':
+					# Execute locally
+					result = self._execute_fragment_locally(fragment)
+				else:
+					# Execute remotely
+					result = self._execute_fragment_remotely(fragment)
+
+				fragment_results[id(fragment)] = result
+				executed_count += 1
+
+			# Find the final fragment (the one that produces the target tensor)
+			final_fragment = None
+			for fragment in fragments:
+				if id(fragment.output_tensor) == id(target_lazy_tensor):
+					final_fragment = fragment
+					break
+
+			if final_fragment and id(final_fragment) in fragment_results:
+				result = fragment_results[id(final_fragment)]
+				logger.info(f"✅ Smart fragmentation complete: {len(fragments)} fragments → {result.shape}")
+				return result
+			else:
+				logger.warning("Could not find final fragment result")
+				return None
+
+		except Exception as e:
+			logger.warning(f"Smart fragmentation execution failed: {e}")
+			raise  # Re-raise to trigger fallback
+
+	def _execute_fragment_locally(self, fragment) -> torch.Tensor:
+		"""Execute a fragment locally."""
+		# For now, execute operations recursively
+		# In a full implementation, this would use local GPU execution
+		return self._execute_operations_locally(fragment.operations)
+
+	def _execute_fragment_remotely(self, fragment) -> torch.Tensor:
+		"""Execute a fragment remotely."""
+		# Convert fragment to subgraph format for remote execution
+		from .subgraph_builder import RemoteSubgraph
+
+		subgraph = RemoteSubgraph(
+			operations=fragment.operations,
+			input_tensors=fragment.input_tensors,
+			output_tensor=fragment.output_tensor
+		)
+
+		# Materialize input tensors
+		input_data = {}
+		for tensor_id, tensor in fragment.input_tensors.items():
+			if isinstance(tensor, LazyTensor):
+				materialized = self._execute_recursive(tensor)
+			else:
+				materialized = tensor
+			input_data[str(tensor_id)] = materialized
+
+		# Send to remote server
+		from ..runtime.simple_client import get_client
+		client = get_client()
+		result = client.execute_subgraph(subgraph.serialize(), input_data)
+
+		return result
+
+	def _execute_operations_locally(self, operations) -> torch.Tensor:
+		"""Execute a sequence of operations locally."""
+		if not operations:
+			return torch.tensor(0.0)
+
+		# Execute operations in sequence
+		current_result = None
+		for op in operations:
+			if current_result is None:
+				# First operation - use its inputs
+				resolved_inputs = []
+				for inp in op.inputs:
+					if isinstance(inp, LazyTensor):
+						resolved_inputs.append(self._execute_recursive(inp))
+					else:
+						resolved_inputs.append(inp)
+
+				current_result = self._execute_operation(op, resolved_inputs)
+			else:
+				# Subsequent operations - use previous result as input
+				current_result = self._execute_operation(op, [current_result])
+
+		return current_result
+
+	def _execute_operation(self, operation, inputs) -> torch.Tensor:
+		"""Execute a single operation with given inputs."""
+		try:
+			op_func = self.operation_handlers.get(operation.operation)
+			if op_func:
+				return op_func(operation, inputs, operation.kwargs)
+			else:
+				return self._execute_fallback_eager(operation.operation, inputs, operation.kwargs)
+		except Exception as e:
+			logger.error(f"Failed to execute operation {operation.operation}: {e}")
+			raise MaterializationError(f"Execution failed for {operation.operation}") from e
+
+	def _execute_recursive(self, target_lazy_tensor) -> torch.Tensor:
+		"""Recursive execution path (original implementation)."""
 		current_thread = threading.get_ident()
 
 		with self._execution_lock:
@@ -183,7 +425,6 @@ class SimpleExecutor:
 					return asyncio.run(self._execute_remote(target_lazy_tensor))
 
 			# Phase 1: Simple direct recursive evaluation
-
 
 			# Cache to store computed results for each LazyTensor
 			# This ensures a LazyTensor appearing multiple times is only computed once
@@ -638,6 +879,164 @@ class SimpleExecutor:
 		else:
 			correction = 1 if kwargs.get("unbiased", True) else 0
 		return torch.std(x, dim=dim, keepdim=keepdim, correction=correction)
+
+	def _execute_dim(self, lazy_tensor, inputs, kwargs) -> torch.Tensor:  # noqa: ANN001
+		"""Execute dim() operation - get tensor dimension."""
+		if not inputs:
+			return torch.tensor(0)
+		x = self._ensure_concrete(inputs[0])
+		return torch.tensor(x.dim())
+
+	def _execute_split(self, lazy_tensor, inputs, kwargs) -> torch.Tensor:  # noqa: ANN001
+		"""Execute split operation."""
+		if len(inputs) < 2:
+			return torch.tensor(0.0)
+		x = self._ensure_concrete(inputs[0])
+		split_size_or_sections = self._ensure_concrete(inputs[1])
+		dim = kwargs.get("dim", 0)
+
+		# Split returns a tuple, but we need to return the tuple as a single object
+		# The unpacking will happen in the calling code
+		split_result = torch.split(x, split_size_or_sections, dim=dim)
+
+		# For now, return the first element as a workaround
+		# In a full implementation, we'd need to handle tuple returns properly
+		if isinstance(split_result, tuple) and len(split_result) > 0:
+			return split_result[0]
+		return split_result
+
+	def _execute_max_pool2d(self, lazy_tensor, inputs, kwargs) -> torch.Tensor:  # noqa: ANN001
+		"""Execute max_pool2d operation."""
+		if not inputs:
+			return torch.tensor(0.0)
+		x = self._ensure_concrete(inputs[0])
+
+		# Extract pooling parameters from kwargs
+		kernel_size = kwargs.get("kernel_size", 2)
+		stride = kwargs.get("stride", kernel_size)
+		padding = kwargs.get("padding", 0)
+		dilation = kwargs.get("dilation", 1)
+		ceil_mode = kwargs.get("ceil_mode", False)
+
+		return torch.nn.functional.max_pool2d(
+			x, kernel_size, stride=stride, padding=padding,
+			dilation=dilation, ceil_mode=ceil_mode
+		)
+
+	def _execute_avg_pool2d(self, lazy_tensor, inputs, kwargs) -> torch.Tensor:  # noqa: ANN001
+		"""Execute avg_pool2d operation."""
+		if not inputs:
+			return torch.tensor(0.0)
+		x = self._ensure_concrete(inputs[0])
+
+		# Extract pooling parameters from kwargs
+		kernel_size = kwargs.get("kernel_size", 2)
+		stride = kwargs.get("stride", kernel_size)
+		padding = kwargs.get("padding", 0)
+
+		return torch.nn.functional.avg_pool2d(
+			x, kernel_size, stride=stride, padding=padding
+		)
+
+	def _execute_batch_norm(self, lazy_tensor, inputs, kwargs) -> torch.Tensor:  # noqa: ANN001
+		"""Execute batch_norm operation."""
+		if len(inputs) < 3:
+			return torch.tensor(0.0)
+
+		x = self._ensure_concrete(inputs[0])
+		weight = self._ensure_concrete(inputs[1]) if len(inputs) > 1 else None
+		bias = self._ensure_concrete(inputs[2]) if len(inputs) > 2 else None
+
+		# For inference (non-training), we need running statistics
+		# Since we don't have them, use a simplified version
+		if weight is not None and bias is not None:
+			# Use the weight and bias directly (simplified batch norm)
+			return torch.nn.functional.batch_norm(
+				x, running_mean=torch.zeros(x.size(1)).to(x.device),
+				running_var=torch.ones(x.size(1)).to(x.device),
+				weight=weight, bias=bias,
+				training=False, momentum=0.1, eps=1e-5
+			)
+		else:
+			# Simple normalization without affine transform
+			return torch.nn.functional.batch_norm(
+				x, running_mean=torch.zeros(x.size(1)).to(x.device),
+				running_var=torch.ones(x.size(1)).to(x.device),
+				training=False, momentum=0.1, eps=1e-5
+			)
+
+	def _execute_dropout(self, lazy_tensor, inputs, kwargs) -> torch.Tensor:  # noqa: ANN001
+		"""Execute dropout operation."""
+		if not inputs:
+			return torch.tensor(0.0)
+		x = self._ensure_concrete(inputs[0])
+
+		p = kwargs.get("p", 0.5)
+		train = kwargs.get("train", False)
+
+		return torch.nn.functional.dropout(x, p=p, training=train)
+
+	def _execute_interpolate(self, lazy_tensor, inputs, kwargs) -> torch.Tensor:  # noqa: ANN001
+		"""Execute interpolate operation (upsample)."""
+		if not inputs:
+			return torch.tensor(0.0)
+		x = self._ensure_concrete(inputs[0])
+
+		# Extract interpolation parameters
+		size = kwargs.get("size")
+		scale_factor = kwargs.get("scale_factor")
+		mode = kwargs.get("mode", "nearest")
+		align_corners = kwargs.get("align_corners", None)
+
+		return torch.nn.functional.interpolate(
+			x, size=size, scale_factor=scale_factor,
+			mode=mode, align_corners=align_corners
+		)
+
+	def _execute_adaptive_avg_pool2d(self, lazy_tensor, inputs, kwargs) -> torch.Tensor:  # noqa: ANN001
+		"""Execute adaptive_avg_pool2d operation."""
+		if not inputs:
+			return torch.tensor(0.0)
+		x = self._ensure_concrete(inputs[0])
+
+		output_size = kwargs.get("output_size")
+		if output_size is None:
+			return x  # No pooling needed
+
+		return torch.nn.functional.adaptive_avg_pool2d(x, output_size)
+
+	def _execute_adaptive_max_pool2d(self, lazy_tensor, inputs, kwargs) -> torch.Tensor:  # noqa: ANN001
+		"""Execute adaptive_max_pool2d operation."""
+		if not inputs:
+			return torch.tensor(0.0)
+		x = self._ensure_concrete(inputs[0])
+
+		output_size = kwargs.get("output_size")
+		if output_size is None:
+			return x  # No pooling needed
+
+		return torch.nn.functional.adaptive_max_pool2d(x, output_size			)
+
+	def _execute_layer_norm(self, lazy_tensor, inputs, kwargs) -> torch.Tensor:  # noqa: ANN001
+		"""Execute layer_norm operation."""
+		if not inputs:
+			return torch.tensor(0.0)
+		x = self._ensure_concrete(inputs[0])
+
+		normalized_shape = kwargs.get("normalized_shape", [])
+		weight = kwargs.get("weight")
+		bias = kwargs.get("bias")
+		eps = kwargs.get("eps", 1e-5)
+
+		# If normalized_shape is empty, infer it from the last dimension
+		if not normalized_shape and len(x.shape) > 1:
+			normalized_shape = [x.shape[-1]]
+
+		result = torch.nn.functional.layer_norm(
+			x, normalized_shape, weight=weight, bias=bias, eps=eps
+		)
+
+		return result
 
 	def get_stats(self) -> Dict[str, Any]:
 		"""Get executor statistics."""

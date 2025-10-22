@@ -35,16 +35,32 @@ class PhaseDetector:
     def __init__(self, pattern_registry):
         self.pattern_registry = pattern_registry
     
-    def detect_phases(self, graph) -> Dict[str, ExecutionPhase]:
+    def detect_phases(self, graph, patterns=None) -> Dict[str, ExecutionPhase]:
         """
         Detect phases for all nodes in graph.
-            
+
+        Args:
+            graph: Computation graph
+            patterns: Pre-computed patterns (optional, for compatibility)
+
         Returns:
             Dict mapping node_id → ExecutionPhase
         """
         phases = {}
-        patterns = self.pattern_registry.match_all(graph)
-        
+
+        # If patterns not provided, get them using new API
+        if patterns is None:
+            from .pattern_registry import MatchingMode
+            pattern_result = self.pattern_registry.match_patterns(graph, mode=MatchingMode.EXHAUSTIVE)
+            if pattern_result.is_ok:
+                matches = pattern_result.unwrap()
+                patterns = self._convert_matches_to_patterns(matches)
+            else:
+                logger.warning(f"Pattern matching failed in phase detection: {pattern_result.error}")
+                patterns = {}
+
+        # Phase detection logic using patterns...
+
         # Phase 1: Detect KV cache (indicates decode)
         if "kv_cache" in patterns and patterns["kv_cache"]:
             decode_nodes = self._mark_decode_phase(patterns["kv_cache"], graph)
@@ -90,6 +106,26 @@ class PhaseDetector:
         """Check if attention processes multiple positions in parallel."""
         # Heuristic: If batch size in sequence dimension > 1
         return True  # Simplified
+
+    def _convert_matches_to_patterns(self, matches):
+        """Convert new MatchedPattern format to old Pattern format."""
+        from .patterns.base_matcher import Pattern
+
+        patterns = {}
+        for match in matches:
+            # Create a simple Pattern object from MatchedPattern
+            pattern = Pattern(
+                name=match.pattern_name,
+                nodes=[],  # TODO: Extract nodes from match if available
+                metadata={
+                    'confidence': match.confidence,
+                    'optimization_hints': match.optimization_hints,
+                    'metadata': match.metadata
+                }
+            )
+            patterns[match.pattern_name] = [pattern]
+
+        return patterns
 
 
 class PhaseAnnotator:

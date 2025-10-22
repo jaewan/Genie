@@ -9,7 +9,7 @@ from genie.semantic.pattern_registry import PatternRegistry
 from genie.semantic.workload import WorkloadProfile, WorkloadType, WorkloadClassifier
 from genie.semantic.fx_analyzer import FXAnalyzer
 from genie.semantic.hooks import HookManager
-from genie.semantic.graph_utils import analyze_operations_advanced, track_performance, compute_graph_id
+from genie.semantic.graph_utils import analyze_operations_advanced, track_performance
 import logging
 import os
 

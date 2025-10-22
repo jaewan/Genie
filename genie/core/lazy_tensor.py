@@ -118,10 +118,18 @@ class LazyTensor(torch.Tensor):
             require_grad=False  # Disable autograd for now (Phase 2 addition)
         )
 
+        # Store original device info before modifying kwargs
+        original_device = None
+        if kwargs:
+            original_device = kwargs.get('device')
+
         # Replace the original device in kwargs with the processed device for __init__
         if kwargs:
             kwargs = kwargs.copy()
             kwargs['device'] = device
+
+        # Store original device on the wrapper using object.__setattr__ to avoid recursion
+        object.__setattr__(wrapper, '_original_device', original_device)
 
         return wrapper
 
@@ -150,13 +158,7 @@ class LazyTensor(torch.Tensor):
         object.__setattr__(self, '_dtype', dtype)
         object.__setattr__(self, '_device', device)
 
-        # Store original device info (for remote devices) - need to extract from original kwargs before processing
-        # The device parameter here is already processed (meta), so we need to look at the original kwargs
-        original_device = None
-        if hasattr(self, '_kwargs') and self._kwargs:
-            original_device = self._kwargs.get('device')
-
-        object.__setattr__(self, '_original_device', original_device)
+        # Original device is already stored in __new__
 
         # Register with thread-local graph builder
         from .graph_builder import get_global_builder
@@ -247,10 +249,30 @@ class LazyTensor(torch.Tensor):
 
         # ✅ Normal case: Create new LazyTensor (ALWAYS if we got here)
         op_name = cls._normalize_op_name(func)
+
+        # Infer device from input tensors if not explicitly provided
+        inferred_device = None
+        if 'device' not in kwargs:
+            # Look for device in input LazyTensors
+            for arg in args:
+                if type(arg).__name__ == 'LazyTensor':
+                    # Check original device first
+                    if hasattr(arg, '_original_device') and arg._original_device:
+                        inferred_device = arg._original_device
+                        break
+                    # Then check if it's a remote device by checking the device type
+                    elif hasattr(arg, 'device') and arg.device:
+                        device_str = str(arg.device)
+                        if 'remote_accelerator' in device_str or 'privateuseone' in device_str:
+                            inferred_device = arg._original_device or arg.device
+                            break
+
+        # Create LazyTensor with inferred device
         result = cls(
             operation=op_name,
             inputs=list(args),
-            kwargs=kwargs
+            kwargs=kwargs,
+            device=inferred_device  # Pass device directly
         )
 
         return result
@@ -258,43 +280,44 @@ class LazyTensor(torch.Tensor):
     # Operator methods that route through torch_dispatch
     def __matmul__(self, other):
         """Matrix multiplication using @ operator."""
+        # Use torch.matmul to ensure it goes through __torch_dispatch__
         return torch.matmul(self, other)
     
     def __rmatmul__(self, other):
         """Right matrix multiplication."""
-        return torch.matmul(other, self)
-    
+        return torch.ops.aten.matmul(other, self)
+
     def __add__(self, other):
         """Addition using + operator."""
-        return torch.add(self, other)
-    
+        return torch.ops.aten.add(self, other)
+
     def __radd__(self, other):
         """Right addition."""
-        return torch.add(other, self)
-    
+        return torch.ops.aten.add(other, self)
+
     def __sub__(self, other):
         """Subtraction using - operator."""
-        return torch.sub(self, other)
-    
+        return torch.ops.aten.sub(self, other)
+
     def __rsub__(self, other):
         """Right subtraction."""
-        return torch.sub(other, self)
-    
+        return torch.ops.aten.sub(other, self)
+
     def __mul__(self, other):
         """Multiplication using * operator."""
-        return torch.mul(self, other)
-    
+        return torch.ops.aten.mul(self, other)
+
     def __rmul__(self, other):
         """Right multiplication."""
-        return torch.mul(other, self)
-    
+        return torch.ops.aten.mul(other, self)
+
     def __truediv__(self, other):
         """Division using / operator."""
-        return torch.div(self, other)
-    
+        return torch.ops.aten.div(self, other)
+
     def __rtruediv__(self, other):
         """Right division."""
-        return torch.div(other, self)
+        return torch.ops.aten.div(other, self)
 
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
@@ -463,6 +486,9 @@ class LazyTensor(torch.Tensor):
         shape = torch.Size(data.shape) if hasattr(data, 'shape') else torch.Size([])
         inferred_dtype = dtype or (data.dtype if hasattr(data, 'dtype') else torch.float32)
 
+        # Store original device before processing
+        original_device = device
+
         # Handle remote devices - use meta for storage
         if device is None:
             device = torch.device('meta')  # Symbolic device (no storage)
@@ -500,6 +526,9 @@ class LazyTensor(torch.Tensor):
             require_grad=False  # Disable autograd for now (Phase 2 addition)
         )
 
+        # Store original device on wrapper (same pattern as __new__)
+        object.__setattr__(wrapper, '_original_device', original_device)
+
         # Replace the original device in kwargs with the processed device for __init__
         kwargs = {'dtype': dtype, 'device': device, 'requires_grad': requires_grad}
         if kwargs:
@@ -524,6 +553,9 @@ class LazyTensor(torch.Tensor):
         # Create LazyTensor with correct operation name
         shape = torch.Size(data.shape) if hasattr(data, 'shape') else torch.Size([])
         inferred_dtype = dtype or (data.dtype if hasattr(data, 'dtype') else torch.float32)
+
+        # Store original device before processing
+        original_device = device
 
         # Handle remote devices - use meta for storage
         if device is None:
@@ -560,6 +592,9 @@ class LazyTensor(torch.Tensor):
             torch.empty(shape, dtype=torch_dtype, device=device),
             require_grad=False  # Disable autograd for now (Phase 2 addition)
         )
+
+        # Store original device on wrapper (same pattern as __new__)
+        object.__setattr__(wrapper, '_original_device', original_device)
 
         # Replace the original device in kwargs with the processed device for __init__
         kwargs = {'dtype': dtype, 'device': device}

@@ -1,0 +1,30 @@
+{
+  "timestamp": 1761114612.3651829,
+  "tests": {
+    "pattern_matching": {
+      "status": "PASS",
+      "message": "Pattern matching OK: 3.1ms, 1 patterns",
+      "time_ms": 3.094196319580078,
+      "patterns_matched": 1
+    },
+    "caching": {
+      "status": "PASS",
+      "message": "Cache OK: 172.4x speedup, 0.00 hit rate",
+      "hit_rate": 0.0,
+      "speedup": 172.44622966313372
+    },
+    "indexing": {
+      "status": "PASS",
+      "message": "Index OK: 0.00 hit rate",
+      "index_hit_rate": 0.0
+    },
+    "thread_safety": {
+      "status": "PASS",
+      "message": "Thread safety OK: 1.0 success rate",
+      "success_rate": 1.0,
+      "errors": []
+    }
+  },
+  "overall_status": "PASS",
+  "issues": []
+}

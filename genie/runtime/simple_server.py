@@ -3,13 +3,15 @@ Simple HTTP server for remote tensor execution.
 File: genie/runtime/simple_server.py
 """
 
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
-from fastapi.responses import Response
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request
+from fastapi.responses import Response, JSONResponse
 import torch
 import io
+import json
 import logging
 from datetime import datetime
 import traceback
+import os
 
 # Configure logging
 logging.basicConfig(
@@ -28,11 +30,15 @@ app = FastAPI(
 # Global device (will be set on startup)
 DEVICE = None
 
+# Subgraph executor (will be initialized on startup)
+SUBGRAPH_EXECUTOR = None
+
 # Statistics
 STATS = {
     'requests_total': 0,
     'requests_success': 0,
     'requests_failed': 0,
+    'subgraph_requests': 0,
     'start_time': None
 }
 
@@ -40,7 +46,7 @@ STATS = {
 @app.on_event("startup")
 async def startup_event():
     """Initialize server on startup."""
-    global DEVICE, STATS
+    global DEVICE, SUBGRAPH_EXECUTOR, STATS
 
     # Set device
     if torch.cuda.is_available():
@@ -49,6 +55,15 @@ async def startup_event():
     else:
         DEVICE = torch.device("cpu")
         logger.warning("⚠️  No GPU available, using CPU")
+
+    # Initialize subgraph executor
+    try:
+        from ..server.subgraph_executor import SubgraphExecutor
+        SUBGRAPH_EXECUTOR = SubgraphExecutor(gpu_id=0)
+        logger.info("✅ SubgraphExecutor initialized")
+    except Exception as e:
+        logger.warning(f"⚠️  Failed to initialize SubgraphExecutor: {e}")
+        logger.info("   Subgraph execution will be disabled")
 
     STATS['start_time'] = datetime.now()
     logger.info(f"✅ Server ready on device: {DEVICE}")
@@ -63,7 +78,8 @@ async def root():
         "status": "running",
         "endpoints": {
             "health": "/health",
-            "execute": "/execute (POST)"
+            "execute": "/execute (POST) - single operation",
+            "execute_subgraph": "/execute_subgraph (POST) - optimized subgraph"
         }
     }
 
@@ -84,11 +100,13 @@ async def health_check():
         "device": str(DEVICE),
         "device_type": DEVICE.type if DEVICE else "unknown",
         "cuda_available": torch.cuda.is_available(),
+        "subgraph_executor": "available" if SUBGRAPH_EXECUTOR else "unavailable",
         "uptime": uptime,
         "stats": {
             "total_requests": STATS['requests_total'],
             "successful": STATS['requests_success'],
-            "failed": STATS['requests_failed']
+            "failed": STATS['requests_failed'],
+            "subgraph_requests": STATS['subgraph_requests']
         }
     }
 
@@ -163,6 +181,87 @@ async def execute_operation(
         raise HTTPException(
             status_code=500,
             detail=f"Execution failed: {str(e)}"
+        )
+
+
+@app.post("/execute_subgraph")
+async def handle_subgraph_execution(request: Request):
+    """
+    NEW ENDPOINT: Execute subgraph on server GPU.
+
+    This implements the core optimization from the network enhancement plan:
+    execute entire computation graphs in a single network request.
+
+    Request (multipart/form-data):
+        - request: JSON subgraph specification
+        - tensors: Serialized tensor data
+
+    Response:
+        - Binary tensor data (final result)
+
+    Test with:
+        curl -X POST http://localhost:8888/execute_subgraph \
+             -F "request=@request.json" \
+             -F "tensors=@tensors.pt" \
+             --output result.pt
+    """
+    global STATS, SUBGRAPH_EXECUTOR
+    STATS['requests_total'] += 1
+    STATS['subgraph_requests'] += 1
+
+    start_time = datetime.now()
+
+    try:
+        logger.info(f"📥 Received subgraph execution request")
+
+        # Check if subgraph executor is available
+        if SUBGRAPH_EXECUTOR is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Subgraph execution not available. Server may be running without GPU support."
+            )
+
+        # Parse multipart form data
+        form = await request.form()
+
+        # Parse subgraph request
+        request_json = await form['request'].read()
+        subgraph_request = json.loads(request_json)
+        logger.info(f"   Subgraph: {len(subgraph_request['operations'])} operations, "
+                   f"{len(subgraph_request['input_tensors'])} inputs")
+
+        # Load input tensors
+        tensors_data = await form['tensors'].read()
+        input_tensors = torch.load(io.BytesIO(tensors_data))
+        logger.info(f"   Input tensors: {len(input_tensors)} tensors")
+
+        # Execute subgraph
+        result = SUBGRAPH_EXECUTOR.execute(subgraph_request, input_tensors)
+
+        # Serialize result
+        result_bytes = io.BytesIO()
+        torch.save(result, result_bytes)
+        result_bytes.seek(0)
+
+        # Statistics
+        elapsed = (datetime.now() - start_time).total_seconds()
+        STATS['requests_success'] += 1
+
+        logger.info(f"✅ Subgraph execution successful: {result.shape} in {elapsed:.3f}s")
+
+        return Response(
+            content=result_bytes.read(),
+            media_type="application/octet-stream"
+        )
+
+    except Exception as e:
+        STATS['requests_failed'] += 1
+        logger.error(f"❌ Subgraph execution failed: {e}")
+        logger.error(traceback.format_exc())
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Subgraph execution failed: {str(e)}"
         )
 
 

@@ -1,0 +1,53 @@
+{
+  "timestamp": 1761119564.8103237,
+  "workloads": {
+    "simple": {
+      "avg_time_ms": 1.4247894287109375,
+      "max_time_ms": 1.4247894287109375,
+      "min_time_ms": 1.4247894287109375,
+      "patterns_matched": 0,
+      "cache_hit_rate": 0.0,
+      "index_hit_rate": 0,
+      "nodes": 2,
+      "backend_type": "lazy_dag"
+    },
+    "llm": {
+      "avg_time_ms": 14.770269393920898,
+      "max_time_ms": 14.770269393920898,
+      "min_time_ms": 14.770269393920898,
+      "patterns_matched": 1,
+      "cache_hit_rate": 0.0,
+      "index_hit_rate": 0,
+      "nodes": 11,
+      "backend_type": "lazy_dag"
+    },
+    "vision": {
+      "avg_time_ms": 2.141714096069336,
+      "max_time_ms": 2.141714096069336,
+      "min_time_ms": 2.141714096069336,
+      "patterns_matched": 1,
+      "cache_hit_rate": 0.0,
+      "index_hit_rate": 0,
+      "nodes": 4,
+      "backend_type": "lazy_dag"
+    },
+    "complex": {
+      "avg_time_ms": 7.173776626586914,
+      "max_time_ms": 7.173776626586914,
+      "min_time_ms": 7.173776626586914,
+      "patterns_matched": 1,
+      "cache_hit_rate": 0.0,
+      "index_hit_rate": 0,
+      "nodes": 12,
+      "backend_type": "lazy_dag"
+    }
+  },
+  "overall_metrics": {
+    "total_tests": 4,
+    "avg_time_ms": 6.3776373863220215,
+    "total_patterns_matched": 3,
+    "cache_utilization": 0.0,
+    "index_utilization": 0.0
+  },
+  "regressions": []
+}

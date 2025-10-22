@@ -42,28 +42,30 @@ class TestPatternDetectionPositive:
         annotated = genie.annotate_graph(graph)
 
         # HARD ASSERTION: Pattern MUST be detected
-        has_attention = (
-            'attention' in annotated.patterns and
-            len(annotated.patterns['attention']) > 0
+        has_llm = (
+            'llm' in annotated.patterns and
+            len(annotated.patterns['llm']) > 0
         )
 
-        if not has_attention:
+        if not has_llm:
             logger.warning(
-                "Attention pattern not detected for textbook Q@K.T→softmax→@V structure. "
+                "LLM pattern not detected for textbook Q@K.T→softmax→@V structure. "
                 "This may indicate pattern matcher needs tuning."
             )
             # Soft failure for now - log warning but don't block
-            pytest.skip("Attention pattern not detected (pattern matcher may need tuning)")
+            pytest.skip("LLM pattern not detected (pattern matcher may need tuning)")
 
         # If detected, verify metadata is correct
-        pattern = annotated.patterns['attention'][0]
+        pattern = annotated.patterns['llm'][0]
         metadata = pattern.metadata
 
         # Check expected metadata fields
-        assert 'semantic_role' in metadata, \
-            "Detected attention pattern missing 'semantic_role' metadata"
+        assert 'confidence' in metadata, \
+            "Detected LLM pattern missing 'confidence' metadata"
+        assert metadata['confidence'] > 0.5, \
+            f"LLM pattern confidence too low: {metadata['confidence']}"
 
-        print(f"✅ Attention pattern detected")
+        print(f"✅ LLM pattern detected")
         print(f"   Metadata: {metadata}")
 
     def test_convolution_pattern_detected(self):
@@ -78,16 +80,16 @@ class TestPatternDetectionPositive:
         graph = genie.get_graph()
         annotated = genie.annotate_graph(graph)
 
-        has_conv = (
-            'convolution' in annotated.patterns and
-            len(annotated.patterns['convolution']) > 0
+        has_vision = (
+            'vision' in annotated.patterns and
+            len(annotated.patterns['vision']) > 0
         )
 
-        if not has_conv:
-            logger.warning("Convolution pattern not detected for explicit conv2d")
-            pytest.skip("Convolution pattern not detected (may need tuning)")
+        if not has_vision:
+            logger.warning("Vision pattern not detected for explicit conv2d")
+            pytest.skip("Vision pattern not detected (may need tuning)")
 
-        print(f"✅ Convolution pattern detected")
+        print(f"✅ Vision pattern detected")
 
     def test_kv_cache_pattern_detected_for_recurrent_concat(self):
         """Test KV cache IS detected for recurrent torch.cat pattern.

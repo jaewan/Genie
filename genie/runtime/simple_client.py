@@ -65,6 +65,86 @@ class RemoteExecutionClient:
             logger.error(f"Health check failed: {e}")
             raise
 
+    def execute_subgraph(self,
+                        subgraph_request: Dict[str, Any],
+                        input_data: Dict[str, torch.Tensor],
+                        timeout: float = 300.0) -> torch.Tensor:
+        """
+        Execute subgraph on remote server.
+
+        This implements the core optimization: send entire computation graph
+        in a single network request instead of executing operations one by one.
+
+        Protocol:
+        POST /execute_subgraph
+        Content-Type: multipart/form-data
+
+        Parts:
+        - 'request': JSON subgraph specification
+        - 'tensors': Serialized tensor data (torch.save format)
+
+        Response:
+        - Binary tensor data (torch.save format)
+        """
+        start_time = time.time()
+        self.stats['requests_total'] += 1
+
+        try:
+            # Log request
+            logger.info(f"Executing subgraph: {len(subgraph_request['operations'])} operations")
+
+            # Serialize subgraph specification
+            import json
+            import io
+            request_json = json.dumps(subgraph_request)
+
+            # Serialize input tensors
+            tensors_buffer = io.BytesIO()
+            torch.save(input_data, tensors_buffer)
+            tensors_buffer.seek(0)
+
+            # Track size
+            tensor_size = len(tensors_buffer.getvalue())
+            self.stats['total_bytes_sent'] += len(request_json.encode()) + tensor_size
+
+            # Send HTTP POST
+            response = self.session.post(
+                f"{self.server_url}/execute_subgraph",
+                files={
+                    'request': ('request.json', request_json, 'application/json'),
+                    'tensors': ('tensors.pt', tensors_buffer, 'application/octet-stream')
+                },
+                timeout=timeout
+            )
+
+            # Check for errors
+            response.raise_for_status()
+
+            # Track received size
+            self.stats['total_bytes_received'] += len(response.content)
+
+            # Deserialize result
+            result = torch.load(io.BytesIO(response.content))
+
+            # Track statistics
+            elapsed = time.time() - start_time
+            self.stats['requests_success'] += 1
+            self.stats['total_time_seconds'] += elapsed
+
+            logger.info(f"✅ Subgraph execution: {len(subgraph_request['operations'])} ops → "
+                       f"{result.shape} in {elapsed:.3f}s")
+
+            return result
+
+        except requests.RequestException as e:
+            self.stats['requests_failed'] += 1
+            logger.error(f"HTTP error during subgraph execution: {e}")
+            raise RuntimeError(f"Remote subgraph execution failed: {e}")
+        except Exception as e:
+            self.stats['requests_failed'] += 1
+            logger.error(f"Error during subgraph execution: {e}", exc_info=True)
+            raise RuntimeError(f"Remote subgraph execution failed: {e}")
+
     def execute(self,
                 operation: str,
                 tensor: torch.Tensor,

@@ -5,14 +5,15 @@ from __future__ import annotations
 from typing import List, Optional, Dict, Set
 import networkx as nx
 
-from genie.core.graph import ComputationGraph
+from genie.core.graph_interface import Graph
 from .base import PatternMatch, PatternPlugin
+from typing import Union
+import torch.fx as fx
 from genie.semantic.graph_utils import (
     graph_to_networkx, find_attention_pattern, find_conv_activation_pattern,
     find_mlp_pattern, find_embedding_pattern, analyze_graph_complexity,
     track_performance
 )
-from genie.core.graph import GraphBuilder
 from .fx_patterns import (
     find_attention_pattern_fx, find_conv_activation_pattern_fx, find_mlp_pattern_fx
 )
@@ -25,66 +26,78 @@ class AdvancedLLMPattern(PatternPlugin):
     def name(self) -> str:
         return "llm"
 
-    @track_performance
-    def match(self, graph: ComputationGraph) -> Optional[PatternMatch]:
-        """Detect LLM patterns using sophisticated graph analysis."""
-        # Prefer FX-based matching when available
-        fx_graph = GraphBuilder.current().get_fx_graph()
-        if fx_graph is not None:
-            fx_match = find_attention_pattern_fx(GraphBuilder.current()._fx_graph.module) if hasattr(GraphBuilder.current()._fx_graph, 'module') else None
-            fx_match = find_attention_pattern_fx(GraphBuilder.current()._fx_graph) if fx_match is None else fx_match
-            if fx_match is not None:
-                return PatternMatch(
-                    pattern_name=self.name,
-                    confidence=0.9,
-                    matched_nodes=[n.name for n in fx_match.nodes]
-                )
+    # Hierarchical index metadata - core operations for LLM patterns (no aten:: prefix)
+    expected_operations = frozenset({
+        "matmul", "softmax"
+    })
+    min_nodes = 5
+    max_nodes = 1000
+    allows_cycles = False
+    max_fanout = 50
 
+    @track_performance
+    def match(self, graph: Union[Graph, fx.GraphModule]) -> Optional[PatternMatch]:
+        """Detect LLM patterns using sophisticated graph analysis."""
+        # Convert to NetworkX for pattern analysis (handles all graph types)
         G = graph_to_networkx(graph)
-        
+
         # Find attention patterns
         attention_matches = find_attention_pattern(G)
-        
+
         # Find MLP patterns (common in transformers)
         mlp_matches = find_mlp_pattern(G)
-        
+
         # Analyze overall graph characteristics
         complexity = analyze_graph_complexity(G)
-        
+
         # Scoring based on pattern density and characteristics
         attention_score = min(len(attention_matches) * 0.6, 1.0)
         mlp_score = min(len(mlp_matches) * 0.2, 0.8)
         complexity_score = complexity["compute_intensity"] * 0.5
-        
+
         total_score = attention_score + mlp_score + complexity_score
-        
+
         if total_score > 0.8 or len(attention_matches) >= 1:
             confidence = min(total_score, 0.95)
             if len(attention_matches) >= 1 and confidence < 0.85:
                 confidence = 0.88
             matched_nodes = []
-            
+
             # Collect matched node IDs
             for match in attention_matches[:3]:  # Limit to top 3
                 matched_nodes.extend(match.values())
             for match in mlp_matches[:2]:  # Limit to top 2
                 matched_nodes.extend(match.values())
-            
+
             return PatternMatch(
                 pattern_name=self.name,
                 confidence=confidence,
-                matched_nodes=list(set(matched_nodes))  # Remove duplicates
+                matched_nodes=list(set(matched_nodes)),  # Remove duplicates
+                operation_sequence=["matmul", "softmax", "matmul"],  # Typical attention pattern
+                optimization_hints={
+                    "can_fuse_qkv_projection": len(attention_matches) >= 1,
+                    "can_use_flash_attention": len(attention_matches) >= 1,
+                    "supports_kv_cache": True,
+                    "mlp_fusion_opportunity": len(mlp_matches) >= 2
+                },
+                metadata={
+                    "attention_blocks": len(attention_matches),
+                    "mlp_blocks": len(mlp_matches),
+                    "compute_intensity": complexity.get("compute_intensity", 0),
+                    "semantic_role": "transformer_layer"
+                }
             )
-        
+
         # Fallback for simpler transformer patterns
         if attention_matches or (len(mlp_matches) >= 2):
             return PatternMatch(
                 pattern_name=self.name,
                 confidence=0.7,
-                matched_nodes=[list(match.values())[0] for match in attention_matches[:1]]
+                matched_nodes=[list(match.values())[0] for match in attention_matches[:1]],
+                operation_sequence=["matmul", "softmax"],
+                optimization_hints={"can_use_flash_attention": True},
+                metadata={"semantic_role": "attention_layer"}
             )
-        
-        return None
 
 
 class AdvancedVisionPattern(PatternPlugin):
@@ -94,12 +107,22 @@ class AdvancedVisionPattern(PatternPlugin):
     def name(self) -> str:
         return "vision"
 
+    # Hierarchical index metadata
+    expected_operations = frozenset({
+        "conv2d", "conv1d", "conv3d", "relu",
+        "max_pool2d", "avg_pool2d", "adaptive_avg_pool2d"
+    })
+    min_nodes = 3
+    max_nodes = 500
+    allows_cycles = False
+    max_fanout = 20
+
     @track_performance
-    def match(self, graph: ComputationGraph) -> Optional[PatternMatch]:
+    def match(self, graph: Union[Graph, fx.GraphModule]) -> Optional[PatternMatch]:
         """Detect vision patterns including CNNs and ViTs."""
-        fx_graph = GraphBuilder.current().get_fx_graph()
-        if fx_graph is not None:
-            fx_match = find_conv_activation_pattern_fx(fx_graph)
+        # Prefer FX-based matching when available
+        if isinstance(graph, fx.GraphModule):
+            fx_match = find_conv_activation_pattern_fx(graph)
             if fx_match is not None:
                 return PatternMatch(
                     pattern_name=self.name,
@@ -107,6 +130,7 @@ class AdvancedVisionPattern(PatternPlugin):
                     matched_nodes=[n.name for n in fx_match.nodes]
                 )
 
+        # Convert to NetworkX for pattern analysis (handles all graph types)
         G = graph_to_networkx(graph)
         
         # Find convolutional patterns
@@ -145,7 +169,21 @@ class AdvancedVisionPattern(PatternPlugin):
             return PatternMatch(
                 pattern_name=self.name,
                 confidence=confidence,
-                matched_nodes=list(set(matched_nodes))
+                matched_nodes=list(set(matched_nodes)),
+                operation_sequence=["conv2d", "relu", "pool"] if conv_matches else ["conv2d", "relu"],
+                optimization_hints={
+                    "can_use_cudnn": True,
+                    "supports_tensor_core": True,
+                    "can_fuse_conv_bn": True,
+                    "can_fuse_conv_activation": True,
+                    "vision_transformer": len(attention_matches) > 0
+                },
+                metadata={
+                    "conv_blocks": len(conv_matches),
+                    "attention_blocks": len(attention_matches),
+                    "vision_ops_ratio": vision_ratio,
+                    "semantic_role": "vision_encoder" if len(attention_matches) == 0 else "vit_encoder"
+                }
             )
         
         # Fallback for basic CNN patterns
@@ -153,7 +191,10 @@ class AdvancedVisionPattern(PatternPlugin):
             return PatternMatch(
                 pattern_name=self.name,
                 confidence=0.72,
-                matched_nodes=[list(match.values())[0] for match in conv_matches[:1]]
+                matched_nodes=[list(match.values())[0] for match in conv_matches[:1]],
+                operation_sequence=["conv2d", "relu"],
+                optimization_hints={"can_fuse_conv_activation": True},
+                metadata={"semantic_role": "vision_block"}
             )
         
         return None
@@ -166,12 +207,22 @@ class RecSysPattern(PatternPlugin):
     def name(self) -> str:
         return "recsys"
 
+    # Hierarchical index metadata
+    expected_operations = frozenset({
+        "embedding", "embedding_bag", "gather",
+        "index_select", "cat", "linear", "add"
+    })
+    min_nodes = 4
+    max_nodes = 200
+    allows_cycles = False
+    max_fanout = 30
+
     @track_performance
-    def match(self, graph: ComputationGraph) -> Optional[PatternMatch]:
+    def match(self, graph: Union[Graph, fx.GraphModule]) -> Optional[PatternMatch]:
         """Detect RecSys patterns: embeddings + MLPs."""
-        fx_graph = GraphBuilder.current().get_fx_graph()
-        if fx_graph is not None:
-            fx_match = find_mlp_pattern_fx(fx_graph)
+        # Prefer FX-based matching when available
+        if isinstance(graph, fx.GraphModule):
+            fx_match = find_mlp_pattern_fx(graph)
             if fx_match is not None:
                 return PatternMatch(
                     pattern_name=self.name,
@@ -179,6 +230,7 @@ class RecSysPattern(PatternPlugin):
                     matched_nodes=[n.name for n in fx_match.nodes]
                 )
 
+        # Convert to NetworkX for pattern analysis (handles all graph types)
         G = graph_to_networkx(graph)
         
         # Find embedding patterns
@@ -217,7 +269,19 @@ class RecSysPattern(PatternPlugin):
             return PatternMatch(
                 pattern_name=self.name,
                 confidence=confidence,
-                matched_nodes=list(set(matched_nodes))
+                matched_nodes=list(set(matched_nodes)),
+                operation_sequence=["embedding", "mlp_layer", "output"],
+                optimization_hints={
+                    "can_fuse_embedding_table_lookup": True,
+                    "supports_sparse_gradients": True,
+                    "can_parallelize_embedding_lookups": True
+                },
+                metadata={
+                    "embedding_blocks": len(embedding_matches),
+                    "mlp_blocks": len(mlp_matches),
+                    "recsys_ops_ratio": recsys_ratio,
+                    "semantic_role": "recommendation_model"
+                }
             )
         
         return None
@@ -230,22 +294,38 @@ class MultiModalPattern(PatternPlugin):
     def name(self) -> str:
         return "multimodal"
 
+    # Hierarchical index metadata
+    expected_operations = frozenset({
+        "conv2d", "matmul", "softmax", "linear",
+        "cat", "add", "embedding", "relu"
+    })
+    min_nodes = 8
+    max_nodes = 1000
+    allows_cycles = False
+    max_fanout = 50
+
     @track_performance
-    def match(self, graph: ComputationGraph) -> Optional[PatternMatch]:
+    def match(self, graph: Union[Graph, fx.GraphModule]) -> Optional[PatternMatch]:
         """Detect multi-modal patterns combining vision and language components."""
-        # Multi-modal uses both FX and NetworkX paths
-        fx_graph = GraphBuilder.current().get_fx_graph()
-        if fx_graph is not None:
-            attn_fx = find_attention_pattern_fx(fx_graph)
-            conv_fx = find_conv_activation_pattern_fx(fx_graph)
+        # Prefer FX-based matching when available
+        if isinstance(graph, fx.GraphModule):
+            attn_fx = find_attention_pattern_fx(graph)
+            conv_fx = find_conv_activation_pattern_fx(graph)
             if attn_fx is not None and conv_fx is not None:
                 matched_nodes = [n.name for n in (attn_fx.nodes + conv_fx.nodes)]
                 return PatternMatch(
                     pattern_name=self.name,
                     confidence=0.85,
-                    matched_nodes=list(set(matched_nodes))
+                    matched_nodes=list(set(matched_nodes)),
+                    operation_sequence=["conv2d", "matmul", "fusion"],
+                    optimization_hints={
+                        "can_pipeline_modalities": True,
+                        "supports_async_gpu_compute": True
+                    },
+                    metadata={"semantic_role": "multimodal_encoder"}
                 )
 
+        # Convert to NetworkX for pattern analysis (handles all graph types)
         G = graph_to_networkx(graph)
         
         # Find vision patterns
@@ -302,7 +382,19 @@ class MultiModalPattern(PatternPlugin):
                 return PatternMatch(
                     pattern_name=self.name,
                     confidence=confidence,
-                    matched_nodes=list(set(matched_nodes))
+                    matched_nodes=list(set(matched_nodes)),
+                    operation_sequence=["conv2d", "matmul", "fusion"],
+                    optimization_hints={
+                        "can_pipeline_modalities": True,
+                        "supports_async_gpu_compute": True,
+                        "fusion_opportunity": has_fusion
+                    },
+                    metadata={
+                        "vision_blocks": len(conv_matches),
+                        "language_blocks": len(attention_matches),
+                        "fusion_operations": fusion_count,
+                        "semantic_role": "multimodal_encoder"
+                    }
                 )
         
         return None
@@ -314,8 +406,17 @@ class ResidualBlockPattern(PatternPlugin):
     def name(self) -> str:
         return "residual_block"
 
+    # Hierarchical index metadata
+    expected_operations = frozenset({
+        "conv2d", "add", "relu"
+    })
+    min_nodes = 3
+    max_nodes = 20
+    allows_cycles = False
+    max_fanout = 10
+
     @track_performance
-    def match(self, graph: ComputationGraph) -> Optional[PatternMatch]:
+    def match(self, graph: Union[Graph, fx.GraphModule]) -> Optional[PatternMatch]:
         G = graph_to_networkx(graph)
         # Look for nodes with operation 'aten::add' having two parents, and parents include a conv path
         for node_id in G.nodes:
@@ -335,37 +436,17 @@ class ResidualBlockPattern(PatternPlugin):
                         return True
                 return False
             if any(has_conv_ancestor(p) for p in preds):
-                return PatternMatch(pattern_name=self.name, confidence=0.8, matched_nodes=[node_id])
-        return None
-
-# Simple residual block pattern: conv -> bn/norm? -> relu -> conv -> add
-class ResidualBlockPattern(PatternPlugin):
-    @property
-    def name(self) -> str:
-        return "residual_block"
-
-    @track_performance
-    def match(self, graph: ComputationGraph) -> Optional[PatternMatch]:
-        G = graph_to_networkx(graph)
-        # Look for nodes with operation 'aten::add' having two parents, and parents include a conv path
-        for node_id in G.nodes:
-            if G.nodes[node_id].get('operation') != 'aten::add':
-                continue
-            preds = list(G.predecessors(node_id))
-            if len(preds) < 2:
-                continue
-            # Heuristic: one predecessor should have a conv ancestor within 3 hops
-            def has_conv_ancestor(n, depth=3):
-                if depth == 0:
-                    return False
-                for p in G.predecessors(n):
-                    if G.nodes[p].get('operation') == 'aten::conv2d':
-                        return True
-                    if has_conv_ancestor(p, depth-1):
-                        return True
-                return False
-            if any(has_conv_ancestor(p) for p in preds):
-                return PatternMatch(pattern_name=self.name, confidence=0.8, matched_nodes=[node_id])
+                return PatternMatch(
+                    pattern_name=self.name,
+                    confidence=0.8,
+                    matched_nodes=[node_id],
+                    operation_sequence=["conv2d", "conv2d", "add"],
+                    optimization_hints={
+                        "can_fuse_residual_add": True,
+                        "supports_in_place_add": True
+                    },
+                    metadata={"semantic_role": "residual_block"}
+                )
         return None
 
 

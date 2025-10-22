@@ -45,6 +45,17 @@ _initialize()
 # Public API - Phase 1 (Core)
 from .core.lazy_tensor import LazyTensor
 from .core.capture import capture, get_graph, is_capturing
+from .core.subgraph_builder import SubgraphBuilder, RemoteSubgraph
+
+# Public API - Phase 2 (Smart Fragmentation)
+from .core.smart_subgraph_builder import (
+    SmartSubgraphBuilder,
+    FragmentationConfig,
+    SubgraphFragment,
+    CostEstimate,
+    MemoryEstimator,
+    CostCalculator
+)
 
 # Public API - Phase 2 (Semantic Analysis & Scheduling)
 from .semantic import (
@@ -119,6 +130,16 @@ __all__ = [
     'capture',
     'get_graph',
     'is_capturing',
+    'SubgraphBuilder',
+    'RemoteSubgraph',
+
+    # Phase 2 (Smart Fragmentation)
+    'SmartSubgraphBuilder',
+    'FragmentationConfig',
+    'SubgraphFragment',
+    'CostEstimate',
+    'MemoryEstimator',
+    'CostCalculator',
 
     # Phase 2 (Semantic Analysis & Scheduling)
     'SemanticAnalyzer',
