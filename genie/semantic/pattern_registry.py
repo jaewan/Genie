@@ -7,6 +7,7 @@ from enum import Enum
 import networkx as nx
 
 from genie.core.exceptions import Result, PatternMatchError
+from genie.core.types import MatchingMode  # Import from shared types
 from .graph_utils import graph_to_networkx
 import logging
 import os
@@ -19,13 +20,6 @@ except Exception:  # pragma: no cover
 from genie.semantic.workload import MatchedPattern
 from genie.patterns.base import PatternPlugin
 from .pattern_index import HierarchicalPatternIndex
-
-
-class MatchingMode(Enum):
-    """Pattern matching modes."""
-    EXHAUSTIVE = "exhaustive"  # Match all patterns (default, safe)
-    FAST = "fast"              # Early termination (opt-in)
-    REQUIRED_ONLY = "required" # Only match explicitly required patterns
 
 
 class MatchingMetrics:
@@ -87,6 +81,7 @@ class PatternRegistry:
 
 		# Initialize patterns
 		self.register_builtin_patterns()
+		self.register_lazy_dag_patterns()  # ✅ NEW: Register LazyDAG patterns
 		# Attempt to load external plugins via entry points and env var
 		self._load_external_plugins()
 
@@ -111,6 +106,23 @@ class PatternRegistry:
 		self.register_pattern(RecSysPattern())
 		self.register_pattern(MultiModalPattern())
 		self.register_pattern(ResidualBlockPattern())
+
+	def register_lazy_dag_patterns(self) -> None:
+		"""Register LazyDAG-specific pattern matchers."""
+		# Import here to avoid circular dependency
+		from genie.semantic.patterns.lazy_dag_patterns import (
+			LazyDAGAttentionMatcher,
+			LazyDAGKVCacheMatcher,
+			LazyDAGLinearMatcher,
+			LazyDAGConvolutionMatcher,
+			LazyDAGActivationMatcher
+		)
+		# Register LazyDAG patterns
+		self.register_pattern(LazyDAGAttentionMatcher())
+		self.register_pattern(LazyDAGKVCacheMatcher())
+		self.register_pattern(LazyDAGLinearMatcher())
+		self.register_pattern(LazyDAGConvolutionMatcher())
+		self.register_pattern(LazyDAGActivationMatcher())
 
 	def _load_external_plugins(self) -> None:
 		"""Load pattern plugins from entry points and environment variable.
@@ -295,6 +307,7 @@ class PatternRegistry:
 					MatchedPattern(
 						pattern_name=pattern.name,
 						confidence=match.confidence,
+						matched_nodes=getattr(match, "matched_nodes", []),
 						subgraph=None,
 						optimization_hints=getattr(pattern, "get_hints", lambda: {})(),
 						metadata=getattr(match, "metadata", None),

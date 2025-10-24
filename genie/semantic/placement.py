@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 import torch
 
-from ..core.semantic_metadata import ExecutionPhase, MemoryPattern
+from ..core.types import ExecutionPhase, MemoryPattern
 
 logger = logging.getLogger(__name__)
 

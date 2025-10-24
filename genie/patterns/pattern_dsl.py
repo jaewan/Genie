@@ -11,7 +11,8 @@ import torch.fx as fx
 from torch.fx import subgraph_rewriter
 from enum import Enum
 
-from ..core.semantic_metadata import ExecutionPhase, SemanticMetadata
+from ..core.types import ExecutionPhase
+from ..core.semantic_metadata import SemanticMetadata
 
 
 class PatternType(Enum):

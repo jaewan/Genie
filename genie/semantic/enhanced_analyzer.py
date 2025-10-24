@@ -13,7 +13,7 @@ from ..core.fx_graph_builder import FXGraphBuilder
 from ..patterns.dynamo_patterns import DynamoPatternMatcher, get_pattern_matcher
 from .workload import WorkloadProfile, WorkloadType, WorkloadClassifier
 from .analyzer import SemanticAnalyzer
-from ..core.semantic_metadata import ExecutionPhase
+from ..core.types import ExecutionPhase
 from .phase_detector import get_phase_detector, PhaseHistory
 
 logger = logging.getLogger(__name__)

@@ -1,0 +1,329 @@
+"""
+Centralized configuration system for Genie framework.
+
+Replaces hardcoded values throughout the codebase with a unified configuration system.
+Supports loading from YAML files, environment variables, and defaults.
+"""
+
+from dataclasses import dataclass, field
+from enum import Enum
+import os
+from typing import Optional, Dict, Any
+import yaml
+from .core.types import TransportType, ExecutionPhase
+
+
+class LogLevel(Enum):
+    """Log levels."""
+    DEBUG = "debug"
+    INFO = "info"
+    WARNING = "warning"
+    ERROR = "error"
+    CRITICAL = "critical"
+
+
+@dataclass
+class NetworkConfig:
+    """Network-related configuration."""
+    # Ports
+    control_port: int = 5555
+    data_port: int = 5556
+    metrics_port: int = 9095
+    result_port_offset: int = 2000  # Offset from data_port for result ports
+
+    # UDP (legacy)
+    default_udp_port: int = 5556
+
+    # Transport preferences
+    prefer_dpdk: bool = True
+    require_dpdk: bool = False
+    tcp_fallback: bool = True
+
+    # Connection settings
+    max_connections_per_target: int = 5
+    connection_timeout: float = 30.0
+    heartbeat_interval: float = 30.0
+    heartbeat_timeout: float = 90.0
+
+    # Buffer sizes
+    chunk_size: int = 1024 * 1024  # 1MB chunks
+    max_message_size: int = 1024 * 1024  # 1MB max message
+    max_payload_size: int = 1394  # Ethernet MTU - headers
+
+    # Retry logic
+    max_retry_attempts: int = 3
+    retry_backoff: float = 0.1
+
+    # Batching
+    batch_size_threshold: int = 5
+    batch_timeout: float = 0.01
+
+    @classmethod
+    def from_env(cls) -> 'NetworkConfig':
+        """Load network config from environment variables."""
+        return cls(
+            control_port=int(os.getenv('GENIE_CONTROL_PORT', 5555)),
+            data_port=int(os.getenv('GENIE_DATA_PORT', 5556)),
+            metrics_port=int(os.getenv('GENIE_METRICS_PORT', 9095)),
+            default_udp_port=int(os.getenv('GENIE_UDP_PORT', 5556)),
+            prefer_dpdk=os.getenv('GENIE_PREFER_DPDK', 'true').lower() == 'true',
+            require_dpdk=os.getenv('GENIE_REQUIRE_DPDK', 'false').lower() == 'true',
+            tcp_fallback=os.getenv('GENIE_TCP_FALLBACK', 'true').lower() == 'true',
+            max_connections_per_target=int(os.getenv('GENIE_MAX_CONNECTIONS', 5)),
+            connection_timeout=float(os.getenv('GENIE_CONNECTION_TIMEOUT', 30.0)),
+            heartbeat_interval=float(os.getenv('GENIE_HEARTBEAT_INTERVAL', 30.0)),
+            heartbeat_timeout=float(os.getenv('GENIE_HEARTBEAT_TIMEOUT', 90.0)),
+            chunk_size=int(os.getenv('GENIE_CHUNK_SIZE', 1024 * 1024)),
+            max_message_size=int(os.getenv('GENIE_MAX_MESSAGE_SIZE', 1024 * 1024)),
+            max_retry_attempts=int(os.getenv('GENIE_MAX_RETRIES', 3)),
+            retry_backoff=float(os.getenv('GENIE_RETRY_BACKOFF', 0.1)),
+            batch_size_threshold=int(os.getenv('GENIE_BATCH_THRESHOLD', 5)),
+            batch_timeout=float(os.getenv('GENIE_BATCH_TIMEOUT', 0.01))
+        )
+
+
+@dataclass
+class PerformanceConfig:
+    """Performance-related configuration."""
+    # Timeouts
+    operation_timeout: float = 300.0
+    transfer_timeout: float = 30.0
+    negotiation_timeout: float = 10.0
+
+    # Caching
+    pattern_cache_size: int = 1000
+    shape_cache_size: int = 10000
+    metadata_cache_size: int = 5000
+    cache_ttl_seconds: int = 3600  # 1 hour
+
+    # Memory management
+    max_memory_mb: int = 500
+    memory_pressure_threshold: float = 0.8  # 80% memory usage
+
+    # GPU settings
+    gpu_memory_fraction: float = 0.9  # Use 90% of GPU memory
+    gpu_id: int = 0  # Default GPU
+
+    # Profiling
+    enable_profiling: bool = False
+    profile_sample_rate: float = 0.1  # Sample 10% of operations
+
+    @classmethod
+    def from_env(cls) -> 'PerformanceConfig':
+        """Load performance config from environment variables."""
+        return cls(
+            operation_timeout=float(os.getenv('GENIE_OPERATION_TIMEOUT', 300.0)),
+            transfer_timeout=float(os.getenv('GENIE_TRANSFER_TIMEOUT', 30.0)),
+            negotiation_timeout=float(os.getenv('GENIE_NEGOTIATION_TIMEOUT', 10.0)),
+            pattern_cache_size=int(os.getenv('GENIE_PATTERN_CACHE_SIZE', 1000)),
+            shape_cache_size=int(os.getenv('GENIE_SHAPE_CACHE_SIZE', 10000)),
+            metadata_cache_size=int(os.getenv('GENIE_METADATA_CACHE_SIZE', 5000)),
+            cache_ttl_seconds=int(os.getenv('GENIE_CACHE_TTL', 3600)),
+            max_memory_mb=int(os.getenv('GENIE_MAX_MEMORY_MB', 500)),
+            memory_pressure_threshold=float(os.getenv('GENIE_MEMORY_THRESHOLD', 0.8)),
+            gpu_memory_fraction=float(os.getenv('GENIE_GPU_MEMORY_FRACTION', 0.9)),
+            gpu_id=int(os.getenv('GENIE_GPU_ID', 0)),
+            enable_profiling=os.getenv('GENIE_ENABLE_PROFILING', 'false').lower() == 'true',
+            profile_sample_rate=float(os.getenv('GENIE_PROFILE_SAMPLE_RATE', 0.1))
+        )
+
+
+@dataclass
+class ServerConfig:
+    """Server-specific configuration."""
+    node_id: str = "genie-server-0"
+    max_concurrent_transfers: int = 32
+    max_queue_size: int = 1000
+
+    # Resource management
+    enable_resource_discovery: bool = True
+    resource_check_interval: float = 60.0  # seconds
+
+    # Load balancing
+    enable_load_balancing: bool = True
+    load_balance_threshold: float = 0.7  # 70% utilization
+
+    @classmethod
+    def from_env(cls) -> 'ServerConfig':
+        """Load server config from environment variables."""
+        return cls(
+            node_id=os.getenv('GENIE_NODE_ID', 'genie-server-0'),
+            max_concurrent_transfers=int(os.getenv('GENIE_MAX_TRANSFERS', 32)),
+            max_queue_size=int(os.getenv('GENIE_MAX_QUEUE_SIZE', 1000)),
+            enable_resource_discovery=os.getenv('GENIE_RESOURCE_DISCOVERY', 'true').lower() == 'true',
+            resource_check_interval=float(os.getenv('GENIE_RESOURCE_CHECK_INTERVAL', 60.0)),
+            enable_load_balancing=os.getenv('GENIE_LOAD_BALANCING', 'true').lower() == 'true',
+            load_balance_threshold=float(os.getenv('GENIE_LOAD_THRESHOLD', 0.7))
+        )
+
+
+@dataclass
+class LoggingConfig:
+    """Logging configuration."""
+    level: LogLevel = LogLevel.INFO
+    format: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    file_path: Optional[str] = None
+    max_file_size_mb: int = 100
+    backup_count: int = 5
+
+    @classmethod
+    def from_env(cls) -> 'LoggingConfig':
+        """Load logging config from environment variables."""
+        return cls(
+            level=LogLevel(os.getenv('GENIE_LOG_LEVEL', 'info')),
+            format=os.getenv('GENIE_LOG_FORMAT', "%(asctime)s - %(name)s - %(levelname)s - %(message)s"),
+            file_path=os.getenv('GENIE_LOG_FILE'),
+            max_file_size_mb=int(os.getenv('GENIE_LOG_MAX_SIZE_MB', 100)),
+            backup_count=int(os.getenv('GENIE_LOG_BACKUP_COUNT', 5))
+        )
+
+
+@dataclass
+class GenieConfig:
+    """Main configuration class for Genie framework."""
+    network: NetworkConfig = field(default_factory=NetworkConfig)
+    performance: PerformanceConfig = field(default_factory=PerformanceConfig)
+    server: ServerConfig = field(default_factory=ServerConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
+
+    # Global settings
+    debug_mode: bool = False
+    config_file: Optional[str] = None
+
+    @classmethod
+    def load(cls, path: Optional[str] = None) -> 'GenieConfig':
+        """
+        Load configuration from YAML file and/or environment variables.
+
+        Args:
+            path: Path to YAML config file (optional)
+
+        Returns:
+            GenieConfig instance with loaded settings
+        """
+        config = cls()
+
+        # Load from YAML file if provided
+        if path and os.path.exists(path):
+            try:
+                with open(path, 'r') as f:
+                    yaml_data = yaml.safe_load(f)
+
+                # Update config with YAML data
+                if yaml_data:
+                    config = cls._from_dict(yaml_data)
+                    config.config_file = path
+
+            except Exception as e:
+                print(f"Warning: Failed to load config from {path}: {e}")
+                print("Using defaults and environment variables")
+
+        # Override with environment variables
+        config.network = NetworkConfig.from_env()
+        config.performance = PerformanceConfig.from_env()
+        config.server = ServerConfig.from_env()
+        config.logging = LoggingConfig.from_env()
+
+        # Global environment overrides
+        config.debug_mode = os.getenv('GENIE_DEBUG', 'false').lower() == 'true'
+
+        return config
+
+    @classmethod
+    def _from_dict(cls, data: Dict[str, Any]) -> 'GenieConfig':
+        """Create config from dictionary (YAML data)."""
+        network_data = data.get('network', {})
+        performance_data = data.get('performance', {})
+        server_data = data.get('server', {})
+        logging_data = data.get('logging', {})
+
+        return cls(
+            network=NetworkConfig(**network_data),
+            performance=PerformanceConfig(**performance_data),
+            server=ServerConfig(**server_data),
+            logging=LoggingConfig(**logging_data),
+            debug_mode=data.get('debug_mode', False)
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert config to dictionary for serialization."""
+        return {
+            'network': {
+                'control_port': self.network.control_port,
+                'data_port': self.network.data_port,
+                'metrics_port': self.network.metrics_port,
+                'prefer_dpdk': self.network.prefer_dpdk,
+                'require_dpdk': self.network.require_dpdk,
+                'tcp_fallback': self.network.tcp_fallback,
+                'max_connections_per_target': self.network.max_connections_per_target,
+                'connection_timeout': self.network.connection_timeout,
+                'heartbeat_interval': self.network.heartbeat_interval,
+                'heartbeat_timeout': self.network.heartbeat_timeout,
+                'chunk_size': self.network.chunk_size,
+                'max_message_size': self.network.max_message_size,
+                'max_retry_attempts': self.network.max_retry_attempts,
+                'retry_backoff': self.network.retry_backoff,
+                'batch_size_threshold': self.network.batch_size_threshold,
+                'batch_timeout': self.network.batch_timeout
+            },
+            'performance': {
+                'operation_timeout': self.performance.operation_timeout,
+                'transfer_timeout': self.performance.transfer_timeout,
+                'negotiation_timeout': self.performance.negotiation_timeout,
+                'pattern_cache_size': self.performance.pattern_cache_size,
+                'shape_cache_size': self.performance.shape_cache_size,
+                'metadata_cache_size': self.performance.metadata_cache_size,
+                'cache_ttl_seconds': self.performance.cache_ttl_seconds,
+                'max_memory_mb': self.performance.max_memory_mb,
+                'memory_pressure_threshold': self.performance.memory_pressure_threshold,
+                'gpu_memory_fraction': self.performance.gpu_memory_fraction,
+                'gpu_id': self.performance.gpu_id,
+                'enable_profiling': self.performance.enable_profiling,
+                'profile_sample_rate': self.performance.profile_sample_rate
+            },
+            'server': {
+                'node_id': self.server.node_id,
+                'max_concurrent_transfers': self.server.max_concurrent_transfers,
+                'max_queue_size': self.server.max_queue_size,
+                'enable_resource_discovery': self.server.enable_resource_discovery,
+                'resource_check_interval': self.server.resource_check_interval,
+                'enable_load_balancing': self.server.enable_load_balancing,
+                'load_balance_threshold': self.server.load_balance_threshold
+            },
+            'logging': {
+                'level': self.logging.level.value,
+                'format': self.logging.format,
+                'file_path': self.logging.file_path,
+                'max_file_size_mb': self.logging.max_file_size_mb,
+                'backup_count': self.logging.backup_count
+            },
+            'debug_mode': self.debug_mode
+        }
+
+    def save(self, path: str) -> None:
+        """Save configuration to YAML file."""
+        with open(path, 'w') as f:
+            yaml.dump(self.to_dict(), f, default_flow_style=False, sort_keys=False)
+
+
+# Global configuration instance
+_config: Optional[GenieConfig] = None
+
+
+def get_config() -> GenieConfig:
+    """Get the global configuration instance."""
+    global _config
+    if _config is None:
+        _config = GenieConfig.load()
+    return _config
+
+
+def set_config(config: GenieConfig) -> None:
+    """Set the global configuration instance."""
+    global _config
+    _config = config
+
+
+def load_config(path: Optional[str] = None) -> GenieConfig:
+    """Load configuration from file and/or environment."""
+    return GenieConfig.load(path)

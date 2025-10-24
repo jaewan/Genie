@@ -8,12 +8,13 @@ import logging
 import hashlib
 from typing import Optional, Dict, List
 from .pattern_registry import PatternRegistry
-from .phase_detector import PhaseDetector, PhaseAnnotator, ExecutionPhase
+from .phase_detector import PhaseDetector, PhaseAnnotator
 from .cost_estimator import GraphCostEstimator
 from .metadata_registry import (
     get_metadata_registry, NodeMetadata, MetadataRegistry
 )
 from .cache import SemanticAnnotatorCache
+from ..core.types import MatchingMode, ExecutionPhase
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +142,6 @@ class SemanticAnnotator:
         logger.info(f"Starting semantic analysis for {len(list(graph.nodes()))} nodes")
 
         # Pattern matching with hierarchical index and early termination
-        from .pattern_registry import MatchingMode
         pattern_result = self.pattern_registry.match_patterns(graph, mode=MatchingMode.EXHAUSTIVE)
         if not pattern_result.is_ok:
             logger.warning(f"Pattern matching failed: {pattern_result.error}")
@@ -150,7 +150,7 @@ class SemanticAnnotator:
         else:
             matches = pattern_result.unwrap()
             # Convert to old format expected by phase detector
-            patterns = self._convert_matches_to_patterns(matches)
+            patterns = self._convert_matches_to_patterns(matches, graph)
 
         logger.debug(f"Detected patterns: {list(patterns.keys())}")
 
@@ -161,36 +161,237 @@ class SemanticAnnotator:
         # Cost estimation and metadata
         return self._compute_costs(graph, patterns, phases)
 
-    def _convert_matches_to_patterns(self, matches):
-        """Convert new MatchedPattern format to old Pattern format."""
+    def _convert_matches_to_patterns(self, matches, graph):
+        """
+        Convert new PatternMatch format to old Pattern format.
+
+        CRITICAL FIX: Extract matched_nodes from PatternMatch objects.
+        These nodes are required by the scheduler for co-location decisions.
+        """
         from .patterns.base_matcher import Pattern
 
         patterns = {}
         for match in matches:
-            # Create a simple Pattern object from MatchedPattern
+            # Extract node IDs from PatternMatch
+            nodes = []
+            if hasattr(match, 'matched_nodes') and match.matched_nodes:
+                # matched_nodes contains node ID strings from NetworkX matching
+                # Convert to dict format expected by scheduler
+                nodes = [{'id': str(node_id)} for node_id in match.matched_nodes]
+            else:
+                # Fallback: If matched_nodes is empty, extract nodes by operation type
+                # This handles cases where NetworkX matching doesn't work properly
+                nodes = self._extract_nodes_by_operations(match, graph)
+
+            # Create Pattern with actual nodes
             pattern = Pattern(
                 name=match.pattern_name,
-                nodes=[],  # TODO: Extract nodes from match if available
+                nodes=nodes,  # ← FIXED: Now populated from match.matched_nodes or fallback
                 metadata={
                     'confidence': match.confidence,
-                    'optimization_hints': match.optimization_hints,
-                    'metadata': match.metadata
+                    'optimization_hints': match.optimization_hints or {},
+                    'metadata': match.metadata or {}
                 }
             )
-            patterns[match.pattern_name] = [pattern]
+
+            # Group patterns by name (multiple instances of same pattern)
+            patterns.setdefault(match.pattern_name, []).append(pattern)
 
         return patterns
+
+    def _extract_nodes_by_operations(self, match, graph):
+        """
+        Improved fallback method to extract nodes by operation type when NetworkX matching fails.
+
+        This method uses pattern-specific heuristics to avoid collecting unrelated nodes.
+        It considers module hierarchy, operation sequences, and connectivity patterns.
+        """
+        nodes = []
+        expected_ops = {
+            'llm': ['aten::matmul', 'aten::softmax', 'aten::add', 'aten::transpose'],
+            'vision': ['aten::conv2d', 'aten::conv1d', 'aten::conv3d', 'aten::max_pool2d', 'aten::avg_pool2d'],
+            'multimodal': ['aten::matmul', 'aten::conv2d', 'aten::softmax'],
+            'attention': ['aten::matmul', 'aten::softmax', 'aten::transpose'],
+            'recurrent': ['aten::add', 'aten::sigmoid', 'aten::tanh', 'aten::mul'],
+        }
+
+        # Get expected operations for this pattern
+        ops = expected_ops.get(match.pattern_name, [])
+
+        if not ops:
+            logger.warning(f"No expected operations defined for pattern {match.pattern_name}")
+            return nodes
+
+        # Pattern-specific extraction strategies
+        if match.pattern_name == 'llm':
+            nodes = self._extract_llm_nodes(graph, ops)
+        elif match.pattern_name == 'vision':
+            nodes = self._extract_vision_nodes(graph, ops)
+        elif match.pattern_name == 'multimodal':
+            nodes = self._extract_multimodal_nodes(graph, ops)
+        elif match.pattern_name == 'attention':
+            nodes = self._extract_attention_nodes(graph, ops)
+        elif match.pattern_name == 'recurrent':
+            nodes = self._extract_recurrent_nodes(graph, ops)
+        else:
+            # Generic fallback: use module hierarchy to group related operations
+            nodes = self._extract_by_module_hierarchy(graph, ops, match.pattern_name)
+
+        logger.info(f"Pattern {match.pattern_name} fallback: extracted {len(nodes)} nodes using improved heuristics")
+        return nodes
+
+    def _extract_llm_nodes(self, graph, ops):
+        """Extract LLM-related nodes using module hierarchy and operation patterns."""
+        nodes = []
+
+        # Group nodes by module hierarchy to find transformer blocks, attention layers, etc.
+        module_groups = {}
+        for node in graph.nodes():
+            if hasattr(node, 'operation') and node.operation in ops:
+                module_path = getattr(node, 'metadata', {}).get('module_path', 'unknown')
+                if module_path not in module_groups:
+                    module_groups[module_path] = []
+                module_groups[module_path].append(node)
+
+        # For LLM patterns, look for attention blocks or transformer layers
+        llm_indicators = ['attention', 'transformer', 'encoder', 'decoder', 'embedding']
+        for module_path, group_nodes in module_groups.items():
+            module_lower = module_path.lower()
+            if any(indicator in module_lower for indicator in llm_indicators):
+                nodes.extend([{'id': str(node.id)} for node in group_nodes])
+                logger.debug(f"LLM pattern: included module {module_path} with {len(group_nodes)} nodes")
+
+        return nodes
+
+    def _extract_vision_nodes(self, graph, ops):
+        """Extract vision-related nodes using module hierarchy."""
+        nodes = []
+
+        # Look for vision-specific modules
+        vision_indicators = ['conv', 'vision', 'image', 'backbone', 'resnet', 'vgg', 'vit']
+        module_groups = {}
+
+        for node in graph.nodes():
+            if hasattr(node, 'operation') and node.operation in ops:
+                module_path = getattr(node, 'metadata', {}).get('module_path', 'unknown')
+                if module_path not in module_groups:
+                    module_groups[module_path] = []
+                module_groups[module_path].append(node)
+
+        # Include modules that contain vision indicators
+        for module_path, group_nodes in module_groups.items():
+            module_lower = module_path.lower()
+            if any(indicator in module_lower for indicator in vision_indicators):
+                nodes.extend([{'id': str(node.id)} for node in group_nodes])
+                logger.debug(f"Vision pattern: included module {module_path} with {len(group_nodes)} nodes")
+
+        return nodes
+
+    def _extract_multimodal_nodes(self, graph, ops):
+        """Extract multimodal nodes by finding cross-modal operations."""
+        nodes = []
+
+        # Look for fusion modules or cross-attention patterns
+        fusion_indicators = ['fusion', 'cross', 'multimodal', 'merge', 'combine']
+
+        for node in graph.nodes():
+            if hasattr(node, 'operation') and node.operation in ops:
+                module_path = getattr(node, 'metadata', {}).get('module_path', 'unknown')
+                metadata = getattr(node, 'metadata', {})
+
+                # Check for fusion indicators or cross-modal metadata
+                module_lower = module_path.lower()
+                if (any(indicator in module_lower for indicator in fusion_indicators) or
+                    metadata.get('modality') == 'fusion' or
+                    metadata.get('attention_type') == 'cross_attention'):
+                    nodes.append({'id': str(node.id)})
+                    logger.debug(f"Multimodal pattern: included node {node.id} in {module_path}")
+
+        return nodes
+
+    def _extract_attention_nodes(self, graph, ops):
+        """Extract attention-related nodes."""
+        nodes = []
+
+        # Look for attention-specific modules
+        attention_indicators = ['attention', 'attn', 'multihead', 'self_attn']
+
+        for node in graph.nodes():
+            if hasattr(node, 'operation') and node.operation in ops:
+                module_path = getattr(node, 'metadata', {}).get('module_path', 'unknown')
+                metadata = getattr(node, 'metadata', {})
+                module_lower = module_path.lower()
+
+                if (any(indicator in module_lower for indicator in attention_indicators) or
+                    metadata.get('semantic_role') == 'attention' or
+                    'attention' in metadata.get('attention_type', '')):
+                    nodes.append({'id': str(node.id)})
+                    logger.debug(f"Attention pattern: included node {node.id} in {module_path}")
+
+        return nodes
+
+    def _extract_recurrent_nodes(self, graph, ops):
+        """Extract recurrent pattern nodes."""
+        nodes = []
+
+        # Look for recurrent modules
+        recurrent_indicators = ['lstm', 'gru', 'rnn', 'recurrent']
+
+        for node in graph.nodes():
+            if hasattr(node, 'operation') and node.operation in ops:
+                module_path = getattr(node, 'metadata', {}).get('module_path', 'unknown')
+                metadata = getattr(node, 'metadata', {})
+                module_lower = module_path.lower()
+
+                if (any(indicator in module_lower for indicator in recurrent_indicators) or
+                    metadata.get('semantic_role') == 'recurrent' or
+                    metadata.get('temporal_dependency')):
+                    nodes.append({'id': str(node.id)})
+                    logger.debug(f"Recurrent pattern: included node {node.id} in {module_path}")
+
+        return nodes
+
+    def _extract_by_module_hierarchy(self, graph, ops, pattern_name):
+        """Generic fallback using module hierarchy."""
+        nodes = []
+
+        # Group by module and include only the largest cohesive groups
+        module_groups = {}
+        for node in graph.nodes():
+            if hasattr(node, 'operation') and node.operation in ops:
+                module_path = getattr(node, 'metadata', {}).get('module_path', 'unknown')
+                if module_path not in module_groups:
+                    module_groups[module_path] = []
+                module_groups[module_path].append(node)
+
+        # Sort by group size and include only substantial groups (prevents including isolated nodes)
+        sorted_groups = sorted(module_groups.items(), key=lambda x: len(x[1]), reverse=True)
+
+        for module_path, group_nodes in sorted_groups[:3]:  # Top 3 largest groups
+            if len(group_nodes) > 1:  # Only include groups with multiple related nodes
+                nodes.extend([{'id': str(node.id)} for node in group_nodes])
+                logger.debug(f"Generic pattern {pattern_name}: included module {module_path} with {len(group_nodes)} nodes")
+
+        return nodes
 
     def _compute_topology(self, graph):
         """Compute topology-level analysis (structure only)."""
         logger.info(f"Computing topology analysis for {len(list(graph.nodes()))} nodes")
-        
-        patterns = self.pattern_registry.match_all(graph)
+
+        # Use new pattern registry API
+        pattern_result = self.pattern_registry.match_patterns(graph, mode=MatchingMode.EXHAUSTIVE)
+        if pattern_result.is_ok:
+            matches = pattern_result.unwrap()
+            patterns = self._convert_matches_to_patterns(matches, graph)
+        else:
+            logger.warning(f"Pattern matching failed: {pattern_result.error}")
+            patterns = {}
+
         logger.debug(f"Detected patterns: {list(patterns.keys())}")
 
-        phases = self.phase_detector.detect_phases(graph)
+        phases = self.phase_detector.detect_phases(graph, patterns)
         logger.debug(f"Phase distribution: {self._count_phases(phases)}")
-        
+
         return (patterns, phases)
     
     def _compute_costs(self, graph, patterns, phases):

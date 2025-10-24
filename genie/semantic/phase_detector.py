@@ -11,18 +11,9 @@ Identifies phases like:
 from enum import Enum
 from typing import Dict, List, Any
 import logging
+from ..core.types import ExecutionPhase, MatchingMode
 
 logger = logging.getLogger(__name__)
-
-
-class ExecutionPhase(Enum):
-    """Execution phase classification."""
-    LLM_PREFILL = "llm_prefill"
-    LLM_DECODE = "llm_decode"
-    FORWARD = "forward"
-    BACKWARD = "backward"
-    INIT = "initialization"
-    UNKNOWN = "unknown"
 
 
 class PhaseDetector:
@@ -50,7 +41,6 @@ class PhaseDetector:
 
         # If patterns not provided, get them using new API
         if patterns is None:
-            from .pattern_registry import MatchingMode
             pattern_result = self.pattern_registry.match_patterns(graph, mode=MatchingMode.EXHAUSTIVE)
             if pattern_result.is_ok:
                 matches = pattern_result.unwrap()
@@ -82,8 +72,15 @@ class PhaseDetector:
         phases = {}
         
         for pattern in kv_cache_patterns:
-            for node in pattern.nodes:
-                phases[node.id] = ExecutionPhase.LLM_DECODE
+            for node_dict in pattern.nodes:
+                # Handle both node objects and node dictionaries
+                if hasattr(node_dict, 'id'):
+                    node_id = node_dict.id
+                elif isinstance(node_dict, dict) and 'id' in node_dict:
+                    node_id = node_dict['id']
+                else:
+                    continue
+                phases[node_id] = ExecutionPhase.LLM_DECODE
                 
                 # Also mark attention nodes connected to KV cache as decode
                 # (they're part of the decode loop)
@@ -97,8 +94,15 @@ class PhaseDetector:
         for pattern in attention_patterns:
             # Check if this is parallel attention (prefill)
             if self._is_parallel_attention(pattern):
-                for node in pattern.nodes:
-                    phases[node.id] = ExecutionPhase.LLM_PREFILL
+                for node_dict in pattern.nodes:
+                    # Handle both node objects and node dictionaries
+                    if hasattr(node_dict, 'id'):
+                        node_id = node_dict.id
+                    elif isinstance(node_dict, dict) and 'id' in node_dict:
+                        node_id = node_dict['id']
+                    else:
+                        continue
+                    phases[node_id] = ExecutionPhase.LLM_PREFILL
         
         return phases
     
@@ -113,14 +117,20 @@ class PhaseDetector:
 
         patterns = {}
         for match in matches:
+            # Extract node IDs from MatchedPattern
+            nodes = []
+            if hasattr(match, 'matched_nodes') and match.matched_nodes:
+                # Convert to dict format expected by scheduler
+                nodes = [{'id': str(node_id)} for node_id in match.matched_nodes]
+
             # Create a simple Pattern object from MatchedPattern
             pattern = Pattern(
                 name=match.pattern_name,
-                nodes=[],  # TODO: Extract nodes from match if available
+                nodes=nodes,  # ✅ FIXED: Extract nodes from match
                 metadata={
                     'confidence': match.confidence,
-                    'optimization_hints': match.optimization_hints,
-                    'metadata': match.metadata
+                    'optimization_hints': match.optimization_hints or {},
+                    'metadata': match.metadata or {}
                 }
             )
             patterns[match.pattern_name] = [pattern]

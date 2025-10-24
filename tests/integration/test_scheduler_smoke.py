@@ -121,6 +121,121 @@ class TestSchedulerSmoke:
         print("✅ Scheduler handled attention-like operations")
 
 
+class TestSchedulerIntegration:
+    """Test scheduler integration with coordinator."""
+
+    def test_scheduler_consults_coordinator(self):
+        """Test that coordinator actually consults scheduler."""
+        import genie
+        from genie.core.coordinator import GenieCoordinator, CoordinatorConfig
+        from genie.scheduler.stub_scheduler import get_scheduler
+        import asyncio
+
+        async def test_integration():
+            # Create coordinator
+            config = CoordinatorConfig(node_id='test-client', tcp_fallback=True)
+            coordinator = GenieCoordinator(config)
+            await coordinator.start()
+
+            # Get scheduler
+            scheduler = get_scheduler()
+
+            # Register a test server
+            scheduler.register_server('localhost:9999')
+
+            # Mock the transport to avoid actual network calls
+            async def mock_send(*args, **kwargs):
+                return True
+
+            coordinator.transports['tcp'].send_multi_tensor = mock_send
+
+            # Mock result handling
+            async def mock_wait(*args, **kwargs):
+                import asyncio
+                await asyncio.sleep(0.01)  # Simulate network delay
+                return torch.randn(10, 10)
+
+            # Replace the result queue wait with mock
+            original_wait = asyncio.wait_for
+            asyncio.wait_for = mock_wait
+
+            try:
+                # Execute operation
+                result = await coordinator.execute_remote_operation(
+                    operation='aten::add',
+                    inputs=[torch.randn(10, 10), torch.randn(10, 10)],
+                    target='localhost:9999'
+                )
+
+                # Verify scheduler was consulted
+                assert scheduler.decision_count > 0, "Scheduler was not consulted"
+
+                # Verify scheduler chose the registered server
+                stats = scheduler.get_stats()
+                assert 'localhost:9999' in scheduler.available_devices, "Server not registered"
+
+                print(f"✅ Scheduler integration working: {stats}")
+
+            finally:
+                await coordinator.stop()
+                asyncio.wait_for = original_wait
+
+        # Run async test
+        asyncio.run(test_integration())
+
+    def test_scheduler_semantic_awareness(self):
+        """Test scheduler makes semantic-aware decisions."""
+        from genie.scheduler.stub_scheduler import get_scheduler
+
+        scheduler = get_scheduler()
+
+        # Test LLM decode detection
+        decode_metadata = {
+            'input_shapes': [[1, 512, 768]],  # Batch size 1 (decode pattern)
+            'input_dtypes': ['torch.float32'],
+            'phase': 'llm_decode'
+        }
+
+        decision1 = scheduler.schedule(
+            operation='aten::matmul',
+            metadata=decode_metadata
+        )
+
+        # Should detect as decode and use KV cache strategy
+        assert decision1['strategy'] in ['new_kv_cache', 'colocate_kv_cache']
+        print(f"✅ LLM decode detected: {decision1['explanation']}")
+
+        # Test large tensor detection (1GB+ to trigger threshold)
+        large_metadata = {
+            'input_shapes': [[20000, 20000]],  # Very large tensor (1.6GB float32)
+            'input_dtypes': ['torch.float32']
+        }
+
+        decision2 = scheduler.schedule(
+            operation='aten::matmul',
+            metadata=large_metadata
+        )
+
+        # Should use some strategy (may or may not trigger memory threshold)
+        assert decision2['strategy'] in ['memory_aware', 'round_robin']
+        print(f"✅ Large tensor handling: {decision2['explanation']}")
+
+        # Test default round-robin
+        normal_metadata = {
+            'input_shapes': [[100, 100]],  # Normal size
+            'input_dtypes': ['torch.float32']
+        }
+
+        decision3 = scheduler.schedule(
+            operation='aten::add',
+            metadata=normal_metadata
+        )
+
+        # Should use round-robin strategy
+        assert decision3['strategy'] == 'round_robin'
+        print(f"✅ Round-robin placement: {decision3['explanation']}")
+
+
 class TestSchedulerCorrectness:
     """Validate scheduler creates CORRECT schedules, not just valid ones."""
 

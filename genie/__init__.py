@@ -113,16 +113,17 @@ def schedule(graph=None, profile=None):
     if profile is None:
         profile = analyze(graph)
 
-    scheduler = Scheduler()
-    # For LazyDAG graphs, create a simple schedule
-    return ExecutionSchedule(
-        stages=[],
-        node_to_stage={},
-        node_to_group={},
-        total_stages=1,
-        strategy=SchedulingStrategy.SEQUENTIAL,
-        metadata={'graph_type': graph.backend_type}
+    # ✅ FIXED: Actually use the semantic scheduler
+    from .semantic.scheduling import Scheduler
+    from .semantic.cost_estimator import GraphCostEstimator, NetworkTopology
+
+    scheduler = Scheduler(
+        cost_estimator=GraphCostEstimator(),
+        network_topology=NetworkTopology()
     )
+
+    # Create actual schedule using semantic analysis
+    return scheduler.create_schedule(graph, profile)
 
 __all__ = [
     # Phase 1 (Core)

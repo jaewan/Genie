@@ -186,11 +186,18 @@ class FactoryInterceptor:
                     if lazy_factory is not None:
                         return lazy_factory(*args, **kwargs)
                     else:
-                        # Final fallback: generic LazyTensor creation
-                        return LazyTensor(
+                        # Final fallback: generic LazyTensor creation with metadata
+                        from genie.core.metadata_capture import get_metadata_capture
+                        metadata = get_metadata_capture().capture_metadata(
                             operation=f'aten::{func_name}',
                             inputs=list(args),
                             kwargs=kwargs
+                        )
+                        return LazyTensor(
+                            operation=f'aten::{func_name}',
+                            inputs=list(args),
+                            kwargs=kwargs,
+                            metadata=metadata  # ✅ NEW: Pass semantic metadata
                         )
                 finally:
                     # Always clear the flag

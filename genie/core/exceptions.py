@@ -86,6 +86,23 @@ class MaterializationError(ExecutionException):
     pass
 
 
+class NotApplicableError(ExecutionException):
+    """
+    Execution strategy cannot handle this tensor.
+    
+    Used in fallback chains where multiple strategies are tried.
+    When raised, the next strategy in the chain should be attempted.
+    
+    Example:
+        def strategy_A(tensor):
+            if not is_applicable(tensor):
+                raise NotApplicableError("This strategy doesn't apply")
+            # ... execute ...
+            return result
+    """
+    pass
+
+
 class DeviceError(ExecutionException):
     """Device operation failed."""
     pass

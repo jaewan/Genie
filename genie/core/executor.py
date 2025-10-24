@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 
 import torch
 
-from .errors import MaterializationError, UnsupportedOperationError
+from .exceptions import MaterializationError, NotApplicableError, ExecutionException
 
 # Global executor instance (singleton for performance)
 _executor: Optional['SimpleExecutor'] = None
@@ -56,6 +56,7 @@ class SimpleExecutor:
 			
 			# Linear algebra
 			"aten::matmul": self._execute_matmul,
+			"aten::linear": self._execute_linear,
 			"aten::t": self._execute_t,
 			# NOTE: Intentionally omit explicit handlers for mm/bmm to exercise unified fallback
 			
@@ -176,36 +177,139 @@ class SimpleExecutor:
 	def execute_subgraph(self, target_lazy_tensor) -> torch.Tensor:  # noqa: ANN001
 		"""Execute computation graph up to target tensor.
 
-		Supports both local and remote execution based on device type.
-		Also supports optimized subgraph execution and smart fragmentation (enabled by default).
-		"""
-		# Check if smart fragmentation is enabled (Phase 2)
-		use_smart_fragmentation = os.getenv('GENIE_SMART_FRAGMENTATION', '1') == '1'
+		Strategy: Prioritize efficient execution strategies over naive recursion.
+		1. Smart fragmentation (Phase 2) - Most efficient for complex graphs
+		2. Subgraph optimization (Phase 1) - Good for medium graphs
+		3. Naive recursion (fallback) - Only for simple/small graphs
 
-		if use_smart_fragmentation:
+		Args:
+			target_lazy_tensor: LazyTensor to materialize
+
+		Returns:
+			Concrete torch.Tensor with actual data
+
+		Raises:
+			ValueError: If input is None or not a LazyTensor
+			MaterializationError: If execution fails
+		"""
+		# ✅ PHASE 2.1 FIX: Input validation with clear error messages
+		self._validate_execute_input(target_lazy_tensor)
+
+		# Strategy 1: Try smart fragmentation (most efficient for complex graphs)
+		if self._should_use_smart_fragmentation(target_lazy_tensor):
 			try:
 				result = self._execute_with_smart_fragmentation(target_lazy_tensor)
 				if result is not None:
+					logger.info("✓ Smart fragmentation succeeded")
 					return result
-				logger.debug("Smart fragmentation not applicable, falling back to basic subgraph optimization")
 			except Exception as e:
-				logger.warning(f"Smart fragmentation failed, falling back to basic subgraph optimization: {e}")
+				logger.debug(f"Smart fragmentation failed: {e}")
 
-		# Check if basic subgraph optimization is enabled (Phase 1)
-		use_subgraph_optimization = os.getenv('GENIE_SUBGRAPH_OPT', '1') == '1'
+		# Strategy 2: Try subgraph optimization (good for medium graphs)
+		try:
+			subgraph = self._build_subgraph_for_optimization(target_lazy_tensor)
+			if subgraph and len(subgraph.operations) > 5:  # Worth batching
+				logger.info(f"✓ Subgraph optimization: {len(subgraph.operations)} operations")
+				return self._execute_subgraph_remote(subgraph)
+		except Exception as e:
+			logger.debug(f"Subgraph optimization failed: {e}")
 
-		if use_subgraph_optimization:
-			# Try the optimized subgraph execution path first
-			try:
-				result = self._execute_with_subgraph_optimization(target_lazy_tensor)
-				if result is not None:
-					return result
-				logger.debug("Subgraph optimization not applicable, falling back to recursive execution")
-			except Exception as e:
-				logger.warning(f"Subgraph optimization failed, falling back to recursive execution: {e}")
-
-		# Fallback to original execution path
+		# Strategy 3: Fallback to naive recursion (only for simple graphs)
+		logger.debug("Using naive recursion (simple/small graph)")
 		return self._execute_recursive(target_lazy_tensor)
+
+	def _should_use_smart_fragmentation(self, target_lazy_tensor) -> bool:
+		"""Check if smart fragmentation should be attempted."""
+		# Enable by default, but allow override
+		enabled = os.getenv('GENIE_SMART_FRAGMENTATION', '1') == '1'
+
+		# Only use for remote tensors (where fragmentation provides benefit)
+		if not (hasattr(target_lazy_tensor, 'device') and
+				str(target_lazy_tensor.device).startswith('remote_accelerator')):
+			return False
+
+		return enabled
+
+	def _build_subgraph_for_optimization(self, target_lazy_tensor):
+		"""Build subgraph for optimization attempts."""
+		from .subgraph_builder import SubgraphBuilder
+
+		try:
+			builder = SubgraphBuilder()
+			subgraph = builder.build_from_device_chain(target_lazy_tensor)
+			return subgraph
+		except Exception as e:
+			logger.debug(f"Subgraph building failed: {e}")
+			return None
+
+	def _build_operation_chain(self, visiting: set, current_lt) -> str:
+		"""Build a breadcrumb trail of operations for cycle debugging."""
+		# For now, return a simple chain representation
+		# In a full implementation, we'd traverse the visiting set to build
+		# a meaningful operation chain showing the cycle path
+		return f"[{len(visiting)} operations in visiting set]"
+
+	def _execute_subgraph_remote(self, subgraph):
+		"""Execute subgraph remotely."""
+		from ..runtime.simple_client import get_client
+
+		try:
+			# Materialize input tensors
+			input_data = {}
+			for tensor_id, tensor in subgraph.input_tensors.items():
+				if isinstance(tensor, LazyTensor):
+					input_data[str(tensor_id)] = self._execute_recursive(tensor)
+				else:
+					input_data[str(tensor_id)] = tensor
+
+			# Send to remote server
+			client = get_client()
+			result = client.execute_subgraph(subgraph.serialize(), input_data)
+
+			logger.info(f"✅ Subgraph execution complete: {result.shape}")
+			return result
+
+		except Exception as e:
+			logger.warning(f"Subgraph execution failed: {e}")
+			raise  # Re-raise to trigger fallback
+
+	def _validate_execute_input(self, target_lazy_tensor) -> None:
+		"""
+		Validate executor input with clear error messages.
+		
+		PHASE 2.1: Input validation to provide actionable errors.
+		
+		See: peer_review.md - Phase 2.1 Add Input Validation
+		
+		Raises:
+			ValueError: If input is invalid
+		"""
+		from .lazy_tensor import LazyTensor
+		
+		# Check for None
+		if target_lazy_tensor is None:
+			raise ValueError(
+				"target_lazy_tensor cannot be None. "
+				"Did you forget to capture operations? "
+				"Use 'with genie.capture(): ...' or create tensors with device='remote_accelerator:N'"
+			)
+		
+		# Check type
+		if not isinstance(target_lazy_tensor, LazyTensor):
+			raise TypeError(
+				f"Expected LazyTensor, got {type(target_lazy_tensor).__name__}. "
+				f"Call execute_subgraph() with LazyTensor instances from capture context or remote device. "
+				f"Example: x = torch.randn(10, 10, device='remote_accelerator:0')"
+			)
+		
+		# Warn if graph looks suspicious (has no inputs and is not a factory operation)
+		factory_ops = {'aten::randn', 'aten::zeros', 'aten::ones', 'aten::empty', 'aten::full'}
+		if not target_lazy_tensor.inputs and target_lazy_tensor.operation not in factory_ops:
+			logger.warning(
+				f"LazyTensor {target_lazy_tensor.operation} has no inputs. "
+				f"This may indicate incorrect graph construction. "
+				f"Tensor ID: {target_lazy_tensor.tensor_id}"
+			)
 
 	def _execute_with_subgraph_optimization(self, target_lazy_tensor) -> Optional[torch.Tensor]:
 		"""
@@ -431,52 +535,82 @@ class SimpleExecutor:
 			_compute_cache = {}
 
 			# Use function parameter for depth tracking (thread-safe, correct for nested calls)
-			def _compute_lazy(lt: _LT, depth: int = 0) -> torch.Tensor:
-				"""Recursively compute LazyTensor with depth tracking."""
+			def _compute_lazy(lt: _LT, depth: int = 0, visiting: Optional[set] = None) -> torch.Tensor:
+				"""
+				Recursively compute LazyTensor with cycle detection.
+				
+				PHASE 1.2 FIX: Add visiting set for immediate cycle detection.
+				
+				Args:
+					lt: LazyTensor to compute
+					depth: Current recursion depth (prevents pathological graphs >1000 levels)
+					visiting: Set of node IDs currently being visited (prevents cycles)
+				
+				See: peer_review.md - Phase 1.2 Improve Cycle Detection
+				"""
+				if visiting is None:
+					visiting = set()
+				
 				# Check cache first
 				lt_id = id(lt)
 				if lt_id in _compute_cache:
 					logger.debug(f"[Depth {depth}] Cache hit for {lt.operation}")
 					return _compute_cache[lt_id]
 
-				# Guard against infinite recursion
-				if depth > 1000:
-					raise RuntimeError(
-						f"Computation graph too deep (>1000 levels): {lt.operation}\n"
-						"This may indicate a cycle or extremely deep graph."
+				# ✅ PHASE 1.2 FIX: Cycle detection via visiting set
+				# This is FAST and catches cycles immediately (O(1) vs traversal)
+				if lt_id in visiting:
+					# Build breadcrumb trail for debugging
+					chain = self._build_operation_chain(visiting, lt)
+					raise MaterializationError(
+						"Cycle detected in computation graph:\n"
+						f"  {chain} → {lt.operation} (loops back)\n"
+						"  This usually indicates a recurrent connection without proper detachment.\n"
+						f"  Debug info: node_id={lt_id}, visiting_set_size={len(visiting)}"
 					)
 
-				# Materialize all inputs first
-				resolved_inputs = []
-				for arg in lt.inputs:
-					if isinstance(arg, _LT):
-						resolved_inputs.append(_compute_lazy(arg, depth + 1))  # ← Pass depth
-					else:
-						resolved_inputs.append(arg)
+				# Guard against infinite recursion (pathological graphs)
+				if depth > 1000:
+					raise MaterializationError(
+						f"Computation graph too deep (>1000 levels): {lt.operation} "
+						f"(depth: {depth}). This may indicate a cycle or extremely deep graph."
+					)
 
-				# Execute the operation using the resolved inputs
+				visiting.add(lt_id)
 				try:
-					op_func = self.operation_handlers.get(lt.operation)
-					logger.debug(f"[Depth {depth}] Computing {lt.operation} with {len(resolved_inputs)} inputs: {[getattr(inp, 'shape', 'scalar') for inp in resolved_inputs]}")
-					if op_func:
-						result = op_func(lt, resolved_inputs, lt.kwargs)
-						logger.debug(f"[Depth {depth}] {lt.operation} result shape: {result.shape if hasattr(result, 'shape') else 'N/A'}")
-						# Cache the result
-						_compute_cache[lt_id] = result
-						return result
-					else:
-						# Fallback for unhandled operations using executor's fallback mechanism
-						result = self._execute_fallback_eager(lt.operation, resolved_inputs, lt.kwargs)
-						# Cache the result
-						_compute_cache[lt_id] = result
-						return result
-				except Exception as e:
-					logger.error(f"Failed to execute operation {lt.operation}: {e}")
-					# Let UnsupportedOperationError propagate (it's actionable)
-					if isinstance(e, UnsupportedOperationError):
-						raise
-					# Wrap other errors as MaterializationError
-					raise MaterializationError(f"Execution failed for {lt.operation}") from e
+					# Materialize all inputs first
+					resolved_inputs = []
+					for arg in lt.inputs:
+						if isinstance(arg, _LT):
+							resolved_inputs.append(_compute_lazy(arg, depth + 1, visiting))  # ← Pass visiting set
+						else:
+							resolved_inputs.append(arg)
+
+					# Execute the operation using the resolved inputs
+					try:
+						op_func = self.operation_handlers.get(lt.operation)
+						logger.debug(f"[Depth {depth}] Computing {lt.operation} with {len(resolved_inputs)} inputs: {[getattr(inp, 'shape', 'scalar') for inp in resolved_inputs]}")
+						if op_func:
+							result = op_func(lt, resolved_inputs, lt.kwargs)
+							logger.debug(f"[Depth {depth}] {lt.operation} result shape: {result.shape if hasattr(result, 'shape') else 'N/A'}")
+							# Cache the result
+							_compute_cache[lt_id] = result
+							return result
+						else:
+							# Fallback for unhandled operations using executor's fallback mechanism
+							result = self._execute_fallback_eager(lt.operation, resolved_inputs, lt.kwargs)
+							# Cache the result
+							_compute_cache[lt_id] = result
+							return result
+					except Exception as e:
+						logger.error(f"Failed to execute operation {lt.operation}: {e}")
+						# Let NotApplicableError propagate (it's actionable)
+						if isinstance(e, NotApplicableError):
+							raise
+						# Wrap other errors as MaterializationError
+						raise MaterializationError(f"Execution failed for {lt.operation}") from e
+				finally:
+					visiting.discard(lt_id)  # Always clean up visiting set
 
 			return _compute_lazy(target_lazy_tensor, depth=0)
 		finally:
@@ -628,7 +762,7 @@ class SimpleExecutor:
 				self.stats['failures'].append((op_name, str(e_torch)))
 
 				# ✅ FAIL LOUD with actionable error
-				raise UnsupportedOperationError(
+				raise NotApplicableError(
 					f"Operation '{op_name}' failed to execute.\n"
 					f"  Inputs: {[type(i).__name__ for i in concrete_inputs]}\n"
 					f"  Tried: torch.ops.aten.{base_name}, torch.{base_name}\n"
@@ -678,6 +812,23 @@ class SimpleExecutor:
 		x = self._ensure_concrete(inputs[0])
 		y = self._ensure_concrete(inputs[1])
 		return torch.matmul(x, y)
+
+	def _execute_linear(self, lazy_tensor, inputs, kwargs) -> torch.Tensor:  # noqa: ANN001
+		"""Execute linear transformation (y = x @ weight.t() + bias)."""
+		if len(inputs) < 2:
+			return torch.tensor(0.0)
+
+		x = self._ensure_concrete(inputs[0])  # input tensor
+		weight = self._ensure_concrete(inputs[1])  # weight tensor
+
+		# Handle optional bias
+		if len(inputs) > 2:
+			bias = self._ensure_concrete(inputs[2])
+		else:
+			bias = None
+
+		# Use torch.nn.functional.linear for the actual computation
+		return torch.nn.functional.linear(x, weight, bias)
 
 	def _execute_t(self, lazy_tensor, inputs, kwargs) -> torch.Tensor:  # noqa: ANN001
 		"""Execute transpose operation."""

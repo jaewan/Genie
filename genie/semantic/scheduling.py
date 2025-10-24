@@ -11,8 +11,9 @@ from enum import Enum
 import torch.fx as fx
 from collections import defaultdict, deque
 
-from ..core.semantic_metadata import ExecutionPhase
+from ..core.types import ExecutionPhase
 from ..semantic.cost_estimator import NetworkTopology
+from ..core.graph_interface import Graph
 
 logger = logging.getLogger(__name__)
 
@@ -61,12 +62,12 @@ class Scheduler:
         self.devices = {}  # device_id -> Device info
         self._network_manager = None
     
-    def create_schedule(self, graph: fx.GraphModule,
+    def create_schedule(self, graph,
                         optimization_plan: Optional[Dict] = None) -> ExecutionSchedule:
         """Create execution schedule for a graph.
 
         Args:
-            graph: FX GraphModule to schedule
+            graph: Graph to schedule (FX GraphModule or unified Graph interface)
             optimization_plan: Optional optimization plan with placement hints
 
         Returns:
@@ -79,7 +80,7 @@ class Scheduler:
         # Use cost-aware scheduling
         return self._create_cost_aware_schedule(graph, optimization_plan)
 
-    def _create_basic_schedule(self, graph: fx.GraphModule,
+    def _create_basic_schedule(self, graph,
                               optimization_plan: Optional[Dict] = None) -> ExecutionSchedule:
         """Fallback basic scheduling when no cost estimator available."""
         # Analyze graph dependencies
@@ -115,7 +116,7 @@ class Scheduler:
 
         return schedule
 
-    def _create_cost_aware_schedule(self, graph: fx.GraphModule,
+    def _create_cost_aware_schedule(self, graph,
                                    optimization_plan: Optional[Dict] = None) -> ExecutionSchedule:
         """Cost-aware scheduling using semantic metadata and cost estimates."""
 
@@ -136,7 +137,7 @@ class Scheduler:
         # Fallback to cost-based scheduling
         return self._schedule_with_cost_optimization(graph, optimization_plan, costs)
 
-    def _schedule_with_optimizer_plan(self, graph: fx.GraphModule,
+    def _schedule_with_optimizer_plan(self, graph,
                                     optimizer_plan: 'OptimizationPlan',
                                     costs: Dict) -> ExecutionSchedule:
         """Schedule using optimization plan from semantic optimizer."""
@@ -261,7 +262,7 @@ class Scheduler:
 
         return schedule
 
-    def _schedule_with_cost_optimization(self, graph: fx.GraphModule,
+    def _schedule_with_cost_optimization(self, graph,
                                        optimization_plan: Optional[Dict],
                                        costs: Dict) -> ExecutionSchedule:
         """Schedule using cost-based optimization."""
@@ -296,8 +297,14 @@ class Scheduler:
         schedule.strategy = self._determine_cost_aware_strategy(groups, costs)
 
         # Add comprehensive metadata
+        # Handle both FX and unified Graph interfaces
+        if hasattr(graph, 'graph'):  # FX GraphModule
+            total_nodes = len(list(graph.graph.nodes))
+        else:  # Unified Graph interface
+            total_nodes = len(list(graph.nodes()))
+
         schedule.metadata.update({
-            'total_nodes': len(list(graph.graph.nodes)),
+            'total_nodes': total_nodes,
             'total_groups': len(groups),
             'total_compute_flops': costs['total_compute_flops'],
             'total_memory_bytes': costs['total_memory_bytes'],
@@ -312,32 +319,39 @@ class Scheduler:
 
         return schedule
     
-    def _analyze_dependencies(self, graph: fx.GraphModule) -> Dict[str, Set[str]]:
+    def _analyze_dependencies(self, graph) -> Dict[str, Set[str]]:
         """Analyze node dependencies in the graph.
-        
+
         Args:
-            graph: FX GraphModule
-            
+            graph: Graph (FX GraphModule or unified Graph interface)
+
         Returns:
             Dictionary mapping node names to their dependencies
         """
         dependencies = defaultdict(set)
-        
-        for node in graph.graph.nodes:
-            if node.op in ['call_function', 'call_method', 'call_module']:
-                for inp in node.all_input_nodes:
-                    dependencies[node.name].add(inp.name)
-        
+
+        # Handle both FX and unified Graph interfaces
+        if hasattr(graph, 'graph'):  # FX GraphModule
+            for node in graph.graph.nodes:
+                if node.op in ['call_function', 'call_method', 'call_module']:
+                    for inp in node.all_input_nodes:
+                        dependencies[node.name].add(inp.name)
+        else:  # Unified Graph interface
+            for node in graph.nodes():
+                node_id = node.id
+                for inp in node.inputs:
+                    dependencies[node_id].add(inp.id)
+
         return dependencies
     
-    def _identify_scheduling_groups(self, graph: fx.GraphModule, 
+    def _identify_scheduling_groups(self, graph,
                                    optimization_plan: Optional[Dict]) -> List[SchedulingGroup]:
         """Identify scheduling groups based on node metadata.
-        
+
         Args:
-            graph: FX GraphModule
+            graph: Graph (FX GraphModule or unified Graph interface)
             optimization_plan: Optional optimization plan
-            
+
         Returns:
             List of SchedulingGroups
         """
@@ -396,32 +410,46 @@ class Scheduler:
         # 2. Groups from node metadata
         parallel_groups = defaultdict(list)
         fusion_groups = defaultdict(list)
-        
-        for node in graph.graph.nodes:
-            if node.name in processed_nodes:
+
+        # Handle both FX and unified Graph interfaces
+        if hasattr(graph, 'graph'):  # FX GraphModule
+            nodes = graph.graph.nodes
+        else:  # Unified Graph interface
+            nodes = graph.nodes()
+
+        for node in nodes:
+            # Get node name and metadata for both graph types
+            if hasattr(graph, 'graph'):  # FX GraphModule
+                node_name = node.name
+                node_meta = node.meta
+            else:  # Unified Graph interface
+                node_name = node.id
+                node_meta = node.metadata
+
+            if node_name in processed_nodes:
                 continue
-            
+
             # Check for parallel group metadata
-            if 'parallel_group' in node.meta:
-                group_name = node.meta['parallel_group']
-                parallel_groups[group_name].append(node.name)
-            
+            if 'parallel_group' in node_meta:
+                group_name = node_meta['parallel_group']
+                parallel_groups[group_name].append(node_name)
+
             # Check for fusion group metadata
-            elif 'fusion_group' in node.meta:
-                group_name = node.meta['fusion_group']
-                fusion_groups[group_name].append(node.name)
-            
+            elif 'fusion_group' in node_meta:
+                group_name = node_meta['fusion_group']
+                fusion_groups[group_name].append(node_name)
+
             # Check for priority operations
-            elif node.meta.get('priority', 0) >= 8:
+            elif node_meta.get('priority', 0) >= 8:
                 # High priority operations get their own group
                 group = SchedulingGroup(
-                    group_id=f"priority_{node.name}",
-                    nodes=[node.name],
+                    group_id=f"priority_{node_name}",
+                    nodes=[node_name],
                     strategy=SchedulingStrategy.PRIORITY,
-                    priority=node.meta['priority']
+                    priority=node_meta['priority']
                 )
                 groups.append(group)
-                processed_nodes.add(node.name)
+                processed_nodes.add(node_name)
         
         # Create groups for parallel operations
         for group_name, nodes in parallel_groups.items():
@@ -448,17 +476,30 @@ class Scheduler:
                 processed_nodes.update(nodes)
         
         # 3. Default groups for remaining nodes
-        for node in graph.graph.nodes:
-            if node.op in ['call_function', 'call_method', 'call_module']:
-                if node.name not in processed_nodes:
-                    # Create individual group
-                    group = SchedulingGroup(
-                        group_id=f"default_{node.name}",
-                        nodes=[node.name],
-                        strategy=SchedulingStrategy.SEQUENTIAL,
-                        priority=0
-                    )
-                    groups.append(group)
+        # Handle both FX and unified Graph interfaces
+        if hasattr(graph, 'graph'):  # FX GraphModule
+            remaining_nodes = [node for node in graph.graph.nodes
+                             if node.op in ['call_function', 'call_method', 'call_module']
+                             and node.name not in processed_nodes]
+        else:  # Unified Graph interface
+            remaining_nodes = [node for node in graph.nodes()
+                             if node.id not in processed_nodes]
+
+        for node in remaining_nodes:
+            # Get node name for both graph types
+            if hasattr(graph, 'graph'):  # FX GraphModule
+                node_name = node.name
+            else:  # Unified Graph interface
+                node_name = node.id
+
+            # Create individual group
+            group = SchedulingGroup(
+                group_id=f"default_{node_name}",
+                nodes=[node_name],
+                strategy=SchedulingStrategy.SEQUENTIAL,
+                priority=0
+            )
+            groups.append(group)
         
         return groups
     
@@ -551,40 +592,70 @@ class Scheduler:
         # Return most common strategy
         return max(strategy_counts.items(), key=lambda x: x[1])[0]
 
-    def _identify_colocation_groups(self, graph: fx.GraphModule, optimization_plan: Optional[Dict]) -> Dict[str, List[str]]:
+    def _identify_colocation_groups(self, graph, optimization_plan: Optional[Dict]) -> Dict[str, List[str]]:
         """Identify nodes that should be co-located based on semantic metadata."""
         colocation_groups = {}
 
-        for node in graph.graph.nodes:
-            if node.op in ['call_function', 'call_method', 'call_module']:
+        # Handle both FX and unified Graph interfaces
+        if hasattr(graph, 'graph'):  # FX GraphModule
+            nodes = graph.graph.nodes
+        else:  # Unified Graph interface
+            nodes = graph.nodes()
+
+        for node in nodes:
+            # Get node name and metadata for both graph types
+            if hasattr(graph, 'graph'):  # FX GraphModule
+                node_name = node.name
+                node_meta = node.meta
+                is_operation = node.op in ['call_function', 'call_method', 'call_module']
+            else:  # Unified Graph interface
+                node_name = node.id
+                node_meta = node.metadata
+                is_operation = True  # Assume all nodes in unified graph are operations
+
+            if is_operation:
                 # Check for KV cache co-location (decode phase)
-                if node.meta.get('semantic_role') == 'kv_cache':
-                    kv_cache_id = node.meta.get('kv_cache_id', node.name)
+                if node_meta.get('semantic_role') == 'kv_cache':
+                    kv_cache_id = node_meta.get('kv_cache_id', node_name)
                     if kv_cache_id not in colocation_groups:
                         colocation_groups[kv_cache_id] = []
-                    colocation_groups[kv_cache_id].append(node.name)
+                    colocation_groups[kv_cache_id].append(node_name)
 
                 # Check for attention + KV cache co-location
-                if node.meta.get('semantic_role') == 'attention':
-                    kv_cache_id = node.meta.get('kv_cache_id')
+                if node_meta.get('semantic_role') == 'attention':
+                    kv_cache_id = node_meta.get('kv_cache_id')
                     if kv_cache_id and kv_cache_id in colocation_groups:
-                        colocation_groups[kv_cache_id].append(node.name)
+                        colocation_groups[kv_cache_id].append(node_name)
 
         return colocation_groups
 
-    def _create_placement_plan(self, graph: fx.GraphModule, costs: Dict, colocation_groups: Dict) -> Dict[str, str]:
+    def _create_placement_plan(self, graph, costs: Dict, colocation_groups: Dict) -> Dict[str, str]:
         """Create placement plan using cost-based optimization."""
         placement_plan = {}
 
         # Simple greedy placement: assign to device with lowest estimated cost
         available_devices = list(self.devices.keys()) if self.devices else ['local']
 
-        for node in graph.graph.nodes:
-            if node.op in ['call_function', 'call_method', 'call_module']:
+        # Handle both FX and unified Graph interfaces
+        if hasattr(graph, 'graph'):  # FX GraphModule
+            nodes = graph.graph.nodes
+        else:  # Unified Graph interface
+            nodes = graph.nodes()
+
+        for node in nodes:
+            # Get node name for both graph types
+            if hasattr(graph, 'graph'):  # FX GraphModule
+                node_name = node.name
+                is_operation = node.op in ['call_function', 'call_method', 'call_module']
+            else:  # Unified Graph interface
+                node_name = node.id
+                is_operation = True  # Assume all nodes in unified graph are operations
+
+            if is_operation:
                 # Check if node is in a co-location group
                 assigned_device = None
                 for group_id, group_nodes in colocation_groups.items():
-                    if node.name in group_nodes:
+                    if node_name in group_nodes:
                         # Use same device as other nodes in the group
                         for other_node in group_nodes:
                             if other_node in placement_plan:
@@ -594,7 +665,7 @@ class Scheduler:
 
                 if not assigned_device:
                     # Assign to device with lowest cost
-                    node_cost = costs['per_node'].get(node.name)
+                    node_cost = costs['per_node'].get(node_name)
                     if node_cost:
                         # Choose device based on compute vs transfer tradeoff
                         if node_cost.operational_intensity > 10:  # Compute-bound
@@ -606,11 +677,11 @@ class Scheduler:
                     else:
                         assigned_device = available_devices[0]
 
-                placement_plan[node.name] = assigned_device
+                placement_plan[node_name] = assigned_device
 
         return placement_plan
 
-    def _identify_scheduling_groups_with_placement(self, graph: fx.GraphModule,
+    def _identify_scheduling_groups_with_placement(self, graph,
                                                   optimization_plan: Optional[Dict],
                                                   placement_plan: Dict) -> List[SchedulingGroup]:
         """Create scheduling groups considering placement decisions."""
@@ -636,16 +707,29 @@ class Scheduler:
                 processed_nodes.update(node_names)
 
         # Handle any remaining nodes
-        for node in graph.graph.nodes:
-            if node.op in ['call_function', 'call_method', 'call_module']:
-                if node.name not in processed_nodes:
-                    group = SchedulingGroup(
-                        group_id=f"default_{node.name}",
-                        nodes=[node.name],
-                        strategy=SchedulingStrategy.SEQUENTIAL,
-                        priority=0
-                    )
-                    groups.append(group)
+        # Handle both FX and unified Graph interfaces
+        if hasattr(graph, 'graph'):  # FX GraphModule
+            remaining_nodes = [node for node in graph.graph.nodes
+                             if node.op in ['call_function', 'call_method', 'call_module']
+                             and node.name not in processed_nodes]
+        else:  # Unified Graph interface
+            remaining_nodes = [node for node in graph.nodes()
+                             if node.id not in processed_nodes]
+
+        for node in remaining_nodes:
+            # Get node name for both graph types
+            if hasattr(graph, 'graph'):  # FX GraphModule
+                node_name = node.name
+            else:  # Unified Graph interface
+                node_name = node.id
+
+            group = SchedulingGroup(
+                group_id=f"default_{node_name}",
+                nodes=[node_name],
+                strategy=SchedulingStrategy.SEQUENTIAL,
+                priority=0
+            )
+            groups.append(group)
 
         return groups
 

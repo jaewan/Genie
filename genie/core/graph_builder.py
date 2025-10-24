@@ -97,18 +97,45 @@ class HybridGraphBuilder:
             raise RuntimeError("No LazyTensor captured")
 
         # Try FX tracing on the captured computation
-        # We need to reconstruct the model from the LazyTensor DAG
+        # Strategy: FX first (better optimizations), LazyDAG fallback (dynamic control flow)
         try:
             logger.info("Attempting FX symbolic trace on captured computation...")
-            # For now, if we have a LazyDAG, we'll use it
-            # TODO: Implement FX reconstruction from LazyDAG for better semantic analysis
-            logger.info("Using LazyDAG (FX reconstruction not yet implemented)")
-            return LazyDAGAdapter(self.root_tensor)
+
+            # Try to reconstruct module from LazyTensor DAG
+            module = self._reconstruct_module_from_lazy_dag(self.root_tensor)
+            if module is not None:
+                # Use FX tracing for better optimization opportunities
+                traced = fx.symbolic_trace(module)
+                logger.info("✓ FX tracing successful - using FX graph")
+                return FXGraphAdapter(traced.graph)
+            else:
+                logger.info("Module reconstruction failed - using LazyDAG fallback")
+                return LazyDAGAdapter(self.root_tensor)
 
         except Exception as e:
-            logger.info(f"FX reconstruction failed: {e}")
-            logger.info("Using LazyTensor DAG fallback")
+            logger.info(f"FX tracing failed ({type(e).__name__}): {e}")
+            logger.info("Using LazyDAG fallback for dynamic control flow")
             return LazyDAGAdapter(self.root_tensor)
+
+    def _reconstruct_module_from_lazy_dag(self, root_tensor) -> Optional[torch.nn.Module]:
+        """Reconstruct a torch.nn.Module from LazyTensor DAG for FX tracing.
+
+        This is a simplified implementation. A full implementation would need to:
+        1. Analyze the LazyTensor DAG structure
+        2. Identify module boundaries and parameter bindings
+        3. Create a functional module that reproduces the computation
+
+        For now, return None to use LazyDAG (safe fallback).
+        """
+        # TODO: Implement proper module reconstruction
+        # This would involve:
+        # 1. Traverse LazyTensor DAG to identify module structure
+        # 2. Extract parameters and buffers from the DAG
+        # 3. Create a torch.nn.Module that reproduces the computation
+        # 4. Handle dynamic control flow (loops, conditionals)
+
+        logger.debug("Module reconstruction not yet implemented - using LazyDAG")
+        return None
 
     def add_operation(self, tensor: LazyTensor):
         """

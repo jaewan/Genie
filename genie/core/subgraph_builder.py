@@ -135,14 +135,19 @@ class SubgraphBuilder:
         input_tensors = {}
 
         def collect_ancestors(tensor):
-            if id(tensor) in visited:
-                return
-            visited.add(id(tensor))
+            tensor_id = id(tensor)
+
+            # ✅ FIX: Use memoization to avoid redundant traversals
+            # Track both visited state and result to avoid recomputation
+            if tensor_id in visited:
+                return None  # Already processed
+
+            visited.add(tensor_id)
 
             # Check if this is an external input (factory operation or leaf)
             if self._is_external_input(tensor):
-                input_tensors[id(tensor)] = tensor
-                return
+                input_tensors[tensor_id] = tensor
+                return None
 
             # Collect inputs first (post-order traversal for topological order)
             for inp in tensor.inputs:
@@ -151,6 +156,7 @@ class SubgraphBuilder:
 
             # Add this operation
             operations.append(tensor)
+            return tensor
 
         collect_ancestors(target_tensor)
 

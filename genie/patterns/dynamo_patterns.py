@@ -15,7 +15,7 @@ from .pattern_dsl import (
     PatternDescriptor, PatternBuilder, PatternTemplates,
     PatternType, SemanticOp, register_pattern
 )
-from ..core.semantic_metadata import ExecutionPhase, MemoryPattern
+from ..core.types import ExecutionPhase, MemoryPattern
 
 logger = logging.getLogger(__name__)
 

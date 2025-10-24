@@ -279,7 +279,12 @@ class LazyDAGNodeAdapter(GraphNode):
 
     @property
     def metadata(self) -> Dict[str, Any]:
-        # Metadata stored separately in registry with caching
+        # First try to get metadata from the tensor itself (new approach)
+        if hasattr(self.tensor, 'metadata'):
+            self._metadata_cache = self.tensor.metadata
+            return self._metadata_cache
+
+        # Fallback: metadata stored separately in registry with caching
         if self._metadata_cache is None:
             try:
                 from genie.semantic.metadata_registry import get_metadata_registry
