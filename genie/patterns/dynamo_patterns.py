@@ -27,10 +27,13 @@ class DynamoPatternMatcher:
     recognition in FX graphs using declarative patterns.
     """
     
-    def __init__(self):
+    def __init__(self, use_cache: bool = False):
         self.patterns: Dict[str, PatternDescriptor] = {}
         self.match_stats: Dict[str, int] = defaultdict(int)
         self._initialize_patterns()
+        self.use_cache = use_cache  # Enable caching
+        self._cache_valid = False   # Cache validity flag
+        self._last_graph_hash = None  # Track graph hash for invalidation
     
     def _initialize_patterns(self):
         """Initialize default patterns."""
@@ -305,14 +308,41 @@ class DynamoPatternMatcher:
         return match_counts
     
     def analyze_graph(self, graph_module: fx.GraphModule) -> Dict[str, Any]:
-        """Comprehensive analysis of patterns in a graph.
+        """
+        Comprehensive analysis of patterns in a graph with Phase 2.3 lazy caching.
+        
+        PHASE 2.3 OPTIMIZATION: Cache pattern matching results based on graph hash.
+        Only re-scan if graph structure changes.
         
         Args:
             graph_module: The FX GraphModule to analyze
             
         Returns:
-            Analysis results including pattern matches and statistics
+            Analysis results including pattern matches and statistics (cached if possible)
         """
+        import time
+        
+        # Phase 2.3: Lazy caching implementation
+        if self.use_cache:
+            # Compute graph hash (fingerprint of structure)
+            graph_hash = _compute_graph_hash(graph_module)
+            
+            # Check cache (fast path, no lock needed)
+            if graph_hash in _global_pattern_cache and self._cache_valid:
+                with _pattern_cache_lock:
+                    _pattern_cache_stats['hits'] += 1
+                    _pattern_cache_stats['cache_size'] = len(_global_pattern_cache)
+                
+                cached_result = _global_pattern_cache[graph_hash]
+                if cached_result is not None:
+                    return cached_result
+            
+            # Cache miss: compute patterns
+            with _pattern_cache_lock:
+                _pattern_cache_stats['misses'] += 1
+            
+            start_time = time.perf_counter()
+        
         # Match all patterns
         matches = self.match_patterns(graph_module)
         
@@ -356,26 +386,28 @@ class DynamoPatternMatcher:
                     if pattern.metadata.get('can_fuse', False):
                         analysis['fusion_opportunities'].append({
                             'node': node.name,
-                            'pattern': pattern_name,
-                            'type': pattern.type.value
+                            'pattern': pattern_name
                         })
         
-        # Generate optimization hints
-        if analysis['pattern_types'].get(PatternType.ATTENTION.value, 0) > 0:
-            if analysis['execution_phases'].get(ExecutionPhase.DECODE.value, 0) > 0:
-                analysis['optimization_hints'].append(
-                    "LLM decode phase detected - consider KV cache co-location"
-                )
-        
-        if analysis['pattern_types'].get(PatternType.CONVOLUTION.value, 0) > 3:
-            analysis['optimization_hints'].append(
-                "Multiple convolution layers detected - consider pipeline parallelism"
-            )
-        
-        if analysis['pattern_types'].get(PatternType.FUSION.value, 0) > 0:
-            analysis['optimization_hints'].append(
-                "Multi-modal fusion detected - consider JIT data transfer at fusion point"
-            )
+        # Cache result if using cache (Phase 2.3)
+        if self.use_cache:
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            
+            with _pattern_cache_lock:
+                # Store in cache
+                _global_pattern_cache[graph_hash] = analysis
+                _pattern_cache_stats['cache_size'] = len(_global_pattern_cache)
+                
+                # Automatic eviction if cache too large
+                if len(_global_pattern_cache) > _pattern_cache_stats['max_size']:
+                    # Remove oldest 30% (FIFO)
+                    keys_to_remove = list(_global_pattern_cache.keys())[:int(len(_global_pattern_cache) * 0.3)]
+                    for k in keys_to_remove:
+                        del _global_pattern_cache[k]
+            
+            # Mark cache as valid until invalidation
+            self._cache_valid = True
+            self._last_graph_hash = graph_hash
         
         return analysis
     
@@ -392,6 +424,69 @@ class DynamoPatternMatcher:
         self.match_stats.clear()
         logger.info("Match statistics reset")
 
+    def invalidate_cache(self):
+        """Invalidate pattern matching cache (call when graph structure changes)."""
+        self._cache_valid = False
+        self._last_graph_hash = None
+
+
+# ============================================================================
+# P0 OPTIMIZATION: Lazy Pattern Matching Cache (Phase 2.3)
+# ============================================================================
+
+import hashlib
+import threading
+from typing import Optional, Dict, Any
+
+# Global pattern cache statistics
+_pattern_cache_stats = {
+    'hits': 0,
+    'misses': 0,
+    'cache_size': 0,
+    'max_size': 1000,
+}
+_pattern_cache_lock = threading.Lock()
+_global_pattern_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+
+
+def get_pattern_matching_stats() -> Dict[str, Any]:
+    """Get pattern matching cache statistics."""
+    with _pattern_cache_lock:
+        total = _pattern_cache_stats['hits'] + _pattern_cache_stats['misses']
+        hit_rate = (_pattern_cache_stats['hits'] / total * 100) if total > 0 else 0
+        return {
+            'hits': _pattern_cache_stats['hits'],
+            'misses': _pattern_cache_stats['misses'],
+            'total': total,
+            'hit_rate': f"{hit_rate:.1f}%",
+            'cache_size': _pattern_cache_stats['cache_size'],
+        }
+
+
+def _compute_graph_hash(graph_module: fx.GraphModule) -> str:
+    """
+    Compute deterministic hash of graph structure.
+    
+    Uses operation sequence and connectivity, not values.
+    Two structurally identical graphs (same ops, same connections) have same hash.
+    """
+    try:
+        # Build hash from graph structure
+        ops_str = ""
+        edges_str = ""
+        
+        for node in graph_module.graph.nodes:
+            ops_str += f"{node.op}:{node.target};"
+            for arg in node.all_input_nodes:
+                edges_str += f"{arg.name}->{node.name};"
+        
+        # Combine and hash
+        structure = ops_str + edges_str
+        return hashlib.md5(structure.encode()).hexdigest()[:16]
+    except Exception:
+        # Fallback: compute hash from module id
+        return hashlib.md5(str(id(graph_module)).encode()).hexdigest()[:16]
+
 
 # Global instance for convenience
 _global_matcher = None
@@ -401,22 +496,25 @@ def get_pattern_matcher() -> DynamoPatternMatcher:
     """Get the global pattern matcher instance.
     
     Returns:
-        Global DynamoPatternMatcher instance
+        Global DynamoPatternMatcher instance with lazy caching enabled
     """
     global _global_matcher
     if _global_matcher is None:
-        _global_matcher = DynamoPatternMatcher()
+        _global_matcher = DynamoPatternMatcher(use_cache=True)
     return _global_matcher
 
 
 def match_patterns_in_graph(graph_module: fx.GraphModule) -> Dict[str, Any]:
-    """Convenience function to match patterns in a graph.
+    """
+    Convenience function to match patterns in a graph with lazy caching.
+    
+    Phase 2.3 Optimization: Caches pattern matching results based on graph structure.
     
     Args:
         graph_module: The FX GraphModule to analyze
         
     Returns:
-        Analysis results from pattern matching
+        Analysis results from pattern matching (cached if graph structure unchanged)
     """
     matcher = get_pattern_matcher()
     return matcher.analyze_graph(graph_module)

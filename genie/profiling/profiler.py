@@ -16,7 +16,8 @@ from contextlib import contextmanager
 from typing import Dict, List, Any, Optional
 import torch
 import numpy as np
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
@@ -467,3 +468,109 @@ class GenieProfiler:
         self.network_samples.clear()
         self.resource_snapshots.clear()
         logger.info("Profiling measurements reset")
+
+
+class DetailedComponentProfiler:
+    """
+    P0 FIX: Fine-grained profiling for each component.
+    
+    Tracks where the 140ms overhead goes:
+    - Graph construction
+    - Metadata annotation
+    - Pattern matching
+    - Serialization
+    - Network transfer
+    - Remote execution
+    - Deserialization
+    """
+    
+    def __init__(self):
+        self.component_timings: Dict[str, List[float]] = defaultdict(list)
+        self.active_components: Dict[threading.Thread, List[str]] = defaultdict(list)
+        self.lock = threading.Lock()
+    
+    @contextmanager
+    def profile_component(self, component_name: str):
+        """
+        Profile a single component.
+        
+        Usage:
+            profiler = DetailedComponentProfiler()
+            with profiler.profile_component("graph_construction"):
+                build_graph(model)
+            
+            stats = profiler.get_component_stats("graph_construction")
+            # stats = {"mean": 45.2, "std": 3.1, "min": 42, "max": 52, "count": 5}
+        """
+        start_time = time.perf_counter()
+        thread_id = threading.current_thread()
+        
+        with self.lock:
+            self.active_components[thread_id].append(component_name)
+        
+        try:
+            yield
+        finally:
+            end_time = time.perf_counter()
+            elapsed_ms = (end_time - start_time) * 1000
+            
+            with self.lock:
+                self.component_timings[component_name].append(elapsed_ms)
+                self.active_components[thread_id].pop()
+    
+    def get_component_stats(self, component_name: str) -> Dict[str, float]:
+        """Get statistics for a component."""
+        timings = self.component_timings.get(component_name, [])
+        if not timings:
+            return {"count": 0, "mean": 0, "std": 0, "min": 0, "max": 0}
+        
+        return {
+            "count": len(timings),
+            "mean": np.mean(timings),
+            "std": np.std(timings),
+            "min": np.min(timings),
+            "max": np.max(timings),
+            "sum": np.sum(timings),
+        }
+    
+    def print_summary(self):
+        """Print summary of all component timings."""
+        print("\n" + "="*80)
+        print("COMPONENT PROFILING SUMMARY (Identifies the 140ms overhead bottleneck)")
+        print("="*80)
+        
+        total_time = 0
+        components_sorted = sorted(
+            self.component_timings.items(),
+            key=lambda x: np.sum(x[1]),
+            reverse=True
+        )
+        
+        for component_name, timings in components_sorted:
+            stats = self.get_component_stats(component_name)
+            total_time += stats["sum"]
+            
+            print(f"\n{component_name}:")
+            print(f"  Count:  {stats['count']}")
+            print(f"  Mean:   {stats['mean']:.2f}ms")
+            print(f"  Std:    {stats['std']:.2f}ms")
+            print(f"  Range:  {stats['min']:.2f}ms - {stats['max']:.2f}ms")
+            print(f"  Total:  {stats['sum']:.2f}ms")
+        
+        print(f"\nTotal overhead across all components: {total_time:.2f}ms")
+        print("="*80 + "\n")
+    
+    def clear(self):
+        """Clear all recorded timings."""
+        with self.lock:
+            self.component_timings.clear()
+            self.active_components.clear()
+
+
+# Global instance for easy access
+_global_profiler = DetailedComponentProfiler()
+
+
+def get_detailed_profiler() -> DetailedComponentProfiler:
+    """Get the global detailed profiler instance."""
+    return _global_profiler

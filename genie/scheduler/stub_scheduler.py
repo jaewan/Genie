@@ -42,6 +42,16 @@ class StubScheduler:
         # Known servers (populated by coordinator)
         self.known_servers = []
 
+        # Feature toggles for ablation studies
+        self.enable_colocation = True
+        self.enable_pattern_detection = True
+        self.enable_phase_detection = True
+        self.enable_cost_model = True
+
+        # Network topology (for cost estimation)
+        self.network_bandwidth_gbps = 100.0
+        self.network_latency_ms = 1.0
+
         # Discover available devices
         self.available_devices = self._discover_devices()
         logger.info(f"StubScheduler initialized (Phase 1: semantic-aware, {len(self.available_devices)} devices)")
@@ -91,8 +101,8 @@ class StubScheduler:
         # Cache miss - make new decision
         self._cache_misses += 1
 
-        # Rule 1: LLM decode co-location
-        if self._is_llm_decode(operation, metadata):
+        # Rule 1: LLM decode co-location (only if semantic features enabled)
+        if self.enable_colocation and self.enable_phase_detection and self._is_llm_decode(operation, metadata):
             # Try to place on same device as previous decode ops
             cache_key = metadata.get('model_id', 'default')
             if cache_key in self.kv_cache_devices:
@@ -311,6 +321,20 @@ class StubScheduler:
         else:
             # Fallback to localhost discovery
             self.available_devices = self._discover_devices()
+
+    def register_server(self, server_address: str):
+        """Register a known server address."""
+        if server_address not in self.known_servers:
+            self.known_servers.append(server_address)
+            logger.info(f"Registered server: {server_address}")
+            # Update available devices if needed
+            self._update_available_devices()
+
+    def update_network_topology(self, bandwidth_gbps: float, latency_ms: float):
+        """Update network topology for cost estimation."""
+        self.network_bandwidth_gbps = bandwidth_gbps
+        self.network_latency_ms = latency_ms
+        logger.info(f"Updated network topology: {bandwidth_gbps}Gbps, {latency_ms}ms")
 
     def reset_stats(self):
         """Reset statistics counters."""

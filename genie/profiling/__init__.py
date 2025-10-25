@@ -9,12 +9,23 @@ Tracks:
 - Memory usage patterns
 """
 
-from .profiler import GenieProfiler, GPUMonitor, NetworkMonitor
+from .profiler import (
+    GenieProfiler,
+    DetailedComponentProfiler,
+    get_detailed_profiler,
+    OperationTiming,
+    ResourceSnapshot,
+    GPUMonitor,
+    NetworkMonitor,
+)
 from .performance_analyzer import PerformanceAnalyzer
 
 __all__ = [
-    'GenieProfiler',
-    'GPUMonitor',
-    'NetworkMonitor',
-    'PerformanceAnalyzer'
+    "GenieProfiler",
+    "DetailedComponentProfiler",
+    "get_detailed_profiler",
+    "OperationTiming",
+    "ResourceSnapshot",
+    "GPUMonitor",
+    "NetworkMonitor",
 ]

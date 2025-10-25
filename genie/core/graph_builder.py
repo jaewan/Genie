@@ -17,6 +17,19 @@ from .lazy_tensor import LazyTensor
 logger = logging.getLogger(__name__)
 
 
+# ============================================================================
+# P0 OPTIMIZATION: Component Profiling Instrumentation
+# ============================================================================
+
+def get_profiler():
+    """Get the detailed profiler (imports here to avoid circular deps)."""
+    try:
+        from genie.profiling import get_detailed_profiler
+        return get_detailed_profiler()
+    except ImportError:
+        return None
+
+
 class HybridGraphBuilder:
     """
     Thread-local graph builder.
@@ -29,6 +42,8 @@ class HybridGraphBuilder:
     2. If that fails, use LazyTensor DAG (always works)
 
     Both representations are exposed through unified Graph interface.
+    
+    OPTIMIZATION: Instrumented to identify bottlenecks in graph construction.
     """
 
     # Thread-local storage for per-thread builders
@@ -53,13 +68,25 @@ class HybridGraphBuilder:
         Returns:
             Unified Graph interface
         """
+        profiler = get_profiler()
+        
         # Try FX first
         try:
-            logger.info("Attempting FX symbolic trace...")
-            self.fx_module = fx.symbolic_trace(model)
+            if profiler:
+                with profiler.profile_component("fx_symbolic_trace"):
+                    logger.info("Attempting FX symbolic trace...")
+                    self.fx_module = fx.symbolic_trace(model)
+            else:
+                logger.info("Attempting FX symbolic trace...")
+                self.fx_module = fx.symbolic_trace(model)
+            
             self.fx_graph = self.fx_module.graph
             self.use_fx = True
             logger.info(f"✓ FX trace successful ({len(list(self.fx_graph.nodes))} nodes)")
+            
+            if profiler:
+                with profiler.profile_component("fx_graph_adapter"):
+                    return FXGraphAdapter(self.fx_graph)
             return FXGraphAdapter(self.fx_graph)
 
         except Exception as e:
@@ -70,7 +97,11 @@ class HybridGraphBuilder:
             self.use_fx = False
 
             # Capture using LazyTensor
-            output = model(*args)
+            if profiler:
+                with profiler.profile_component("lazy_tensor_capture"):
+                    output = model(*args)
+            else:
+                output = model(*args)
 
             if not isinstance(output, LazyTensor):
                 raise RuntimeError(
@@ -80,6 +111,10 @@ class HybridGraphBuilder:
 
             self.root_tensor = output
             logger.info(f"✓ LazyTensor DAG built successfully")
+            
+            if profiler:
+                with profiler.profile_component("lazy_dag_adapter"):
+                    return LazyDAGAdapter(self.root_tensor)
             return LazyDAGAdapter(self.root_tensor)
 
     def build_from_capture(self) -> Graph:

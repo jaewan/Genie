@@ -8,6 +8,7 @@ import pytest
 import torch
 import genie
 from genie.semantic.annotator import SemanticAnnotator
+from genie.core.graph import ComputationGraph
 
 
 def test_pattern_nodes_populated():
@@ -66,7 +67,7 @@ def test_pattern_nodes_populated():
 
 def test_pattern_nodes_multiple_instances():
     """Test that multiple pattern instances are tracked correctly."""
-    graph = ComputationGraph()
+    graph = ComputationGraph.empty()
     
     # Create two separate attention-like blocks
     # Block 1
@@ -104,7 +105,7 @@ def test_pattern_nodes_multiple_instances():
 
 def test_pattern_metadata_preserved():
     """Test that pattern metadata is properly preserved."""
-    graph = ComputationGraph()
+    graph = ComputationGraph.empty()
     
     # Create minimal pattern
     node1 = graph.add_node('aten::matmul', 'node1')

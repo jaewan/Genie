@@ -1,14 +1,14 @@
 {
   "llm_pattern_matching": {
     "test_name": "llm_pattern_matching",
-    "avg_time_ms": 17.890357971191406,
-    "max_time_ms": 18.779754638671875,
-    "min_time_ms": 17.583370208740234,
+    "avg_time_ms": 15.082359313964844,
+    "max_time_ms": 21.692276000976562,
+    "min_time_ms": 14.190435409545898,
     "patterns_matched": 1,
     "cache_hit_rate": 0.0,
     "index_hit_rate": 0,
-    "timestamp": 1761119564.523776,
-    "git_commit": "132bba7a",
+    "timestamp": 1761356311.4617083,
+    "git_commit": "17ecb9bc",
     "python_version": "3.12",
     "torch_version": "2.9.0+cu128"
   },

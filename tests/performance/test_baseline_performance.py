@@ -177,9 +177,9 @@ class TestBaselinePerformance:
                 'bytes_per_ms': (sum(t.numel() * t.element_size() for t in inputs) / np.mean(latencies)) if latencies else 0
             }
 
-            logger.info(f"  ✅ {operation}: p50={results[operation]['p50']"6.2f"}ms  "
-                       f"p95={results[operation]['p95']"6.2f"}ms  "
-                       f"p99={results[operation]['p99']"6.2f"}ms  "
+            logger.info(f"  ✅ {operation}: p50={results[operation]['p50']:.2f}ms  "
+                       f"p95={results[operation]['p95']:.2f}ms  "
+                       f"p99={results[operation]['p99']:.2f}ms  "
                        f"({successful_runs}/100 successful)")
 
         # Generate comprehensive report
@@ -193,8 +193,8 @@ class TestBaselinePerformance:
 
         # Assertions for CI
         for operation, stats in results.items():
-            assert stats['success_rate'] > 0.8, f"{operation} success rate too low: {stats['success_rate']".1%"}"
-            assert stats['p95'] < 1000, f"{operation} p95 latency too high: {stats['p95']".2f"}ms"
+            assert stats['success_rate'] > 0.8, f"{operation} success rate too low: {stats['success_rate']:.1%}"
+            assert stats['p95'] < 1000, f"{operation} p95 latency too high: {stats['p95']:.2f}ms"
 
         return results
 
@@ -218,8 +218,8 @@ class TestBaselinePerformance:
             report.append("-" * 50)
 
             for op, stats in operations:
-                report.append(f"{op"20s"}: p50={stats['p50']"6.2f"}ms  p95={stats['p95']"6.2f"}ms  "
-                           f"p99={stats['p99']"6.2f"}ms  ({stats['success_rate']".0%"})")
+                report.append(f"{op:20s}: p50={stats['p50']:6.2f}ms  p95={stats['p95']:6.2f}ms  "
+                           f"p99={stats['p99']:6.2f}ms  ({stats['success_rate']:.0%})")
 
         report.append("\n" + "="*80)
 
@@ -272,8 +272,8 @@ class TestBaselinePerformance:
                 if operation_count % 50 == 0:
                     rate = operation_count / elapsed
                     success_rate = successful_operations / operation_count
-                    logger.info(f"  Progress: {operation_count} ops in {elapsed".1f"}s "
-                              f"({rate".1f"} ops/sec, {success_rate".1%"} success)")
+                    logger.info(f"  Progress: {operation_count} ops in {elapsed:.1f}s "
+                              f"({rate:.1f} ops/sec, {success_rate:.1%} success)")
 
             except Exception as e:
                 logger.warning(f"Batch failed: {e}")
@@ -293,19 +293,19 @@ class TestBaselinePerformance:
         }
 
         logger.info(f"\nThroughput Results:")
-        logger.info(f"  Duration: {total_elapsed".2f"}s")
+        logger.info(f"  Duration: {total_elapsed:.2f}s")
         logger.info(f"  Operations: {operation_count} total, {successful_operations} successful")
-        logger.info(f"  Throughput: {throughput".1f"} ops/sec")
-        logger.info(f"  Success rate: {success_rate".1%"}")
-        logger.info(f"  Avg latency: {throughput_results['avg_latency_ms']".2f"}ms per operation")
+        logger.info(f"  Throughput: {throughput:.1f} ops/sec")
+        logger.info(f"  Success rate: {success_rate:.1%}")
+        logger.info(f"  Avg latency: {throughput_results['avg_latency_ms']:.2f}ms per operation")
 
         # Save results
         with open('results/tcp_baseline_throughput.json', 'w') as f:
             json.dump(throughput_results, f, indent=2)
 
         # Assertions
-        assert throughput > 10, f"Throughput too low: {throughput".1f"} ops/sec"
-        assert success_rate > 0.9, f"Success rate too low: {success_rate".1%"}"
+        assert throughput > 10, f"Throughput too low: {throughput:.1f} ops/sec"
+        assert success_rate > 0.9, f"Success rate too low: {success_rate:.1%}"
 
         logger.info("✅ Sustained throughput measurement complete")
         return throughput_results
@@ -345,13 +345,12 @@ class TestBaselinePerformance:
 
         # Analyze bottlenecks
         bottleneck_analysis = profiled_coordinator.profiler.get_bottleneck_analysis()
-        logger.info("
-Bottleneck Analysis:")
+        logger.info("Bottleneck Analysis:")
         for component, data in bottleneck_analysis['component_bottlenecks'].items():
             if data['is_bottleneck']:
-                logger.info(f"  🚨 BOTTLENECK: {component} ({data['percentage']".1f"}% of time)")
+                logger.info(f"  🚨 BOTTLENECK: {component} ({data['percentage']:.1f}% of time)")
             else:
-                logger.info(f"  ✅ OK: {component} ({data['percentage']".1f"}% of time)")
+                logger.info(f"  ✅ OK: {component} ({data['percentage']:.1f}% of time)")
 
         # Save bottleneck analysis
         with open('results/tcp_bottleneck_analysis.json', 'w') as f:
@@ -423,10 +422,10 @@ Bottleneck Analysis:")
                 'avg_operation_time': np.mean([t for t in operation_times if t is not None]) if operation_times else 0
             }
 
-            logger.info(f"  Memory: {memory_before".1f"}MB → {memory_after".1f"}MB "
-                       f"(Δ{memory_delta"+.1f"}MB)")
+            logger.info(f"  Memory: {memory_before:.1f}MB → {memory_after:.1f}MB "
+                       f"(Δ{memory_delta:+.1f}MB)")
             logger.info(f"  Operations: {memory_results[f'{size}x{size}']['operations_successful']}/2 successful")
-            logger.info(f"  Avg time: {memory_results[f'{size}x{size}']['avg_operation_time']*1000".2f"}ms")
+            logger.info(f"  Avg time: {memory_results[f'{size}x{size}']['avg_operation_time']*1000:.2f}ms")
 
         # Save memory analysis
         with open('results/tcp_memory_usage_patterns.json', 'w') as f:
@@ -453,13 +452,13 @@ Bottleneck Analysis:")
 
         for size, delta in zip(sizes, memory_deltas):
             tensor_mb = memory_results[f"{size}x{size}"]['tensor_bytes'] / 1024 / 1024
-            report.append(f"{size"4d"}x{size"4d"} ({tensor_mb"6.1f"}MB) → Δ{memory_deltas"6.1f"}MB")
+            report.append(f"{size:4d}x{size:4d} ({tensor_mb:6.1f}MB) → Δ{delta:6.1f}MB")
 
         # Calculate scaling factor
         if len(sizes) >= 2:
             scaling_factor = memory_deltas[-1] / memory_deltas[0] if memory_deltas[0] != 0 else 0
             expected_linear = sizes[-1] / sizes[0]
-            report.append(f"\nScaling factor: {scaling_factor".2f"}x (expected linear: {expected_linear".2f"}x)")
+            report.append(f"\nScaling factor: {scaling_factor:.2f}x (expected linear: {expected_linear:.2f}x)")
 
             if scaling_factor > expected_linear * 1.2:
                 report.append("⚠️  Memory usage scales super-linearly - potential memory leak")
@@ -528,9 +527,9 @@ Bottleneck Analysis:")
                     'bytes_per_operation': total_bytes / config['count']
                 }
 
-                logger.info(f"  Bandwidth: {bandwidth_mbps".1f"} Mbps")
-                logger.info(f"  Avg latency: {avg_latency_ms".2f"} ms")
-                logger.info(f"  Bytes per op: {total_bytes / config['count'] / 1024".1f"} KB")
+                logger.info(f"  Bandwidth: {bandwidth_mbps:.1f} Mbps")
+                logger.info(f"  Avg latency: {avg_latency_ms:.2f} ms")
+                logger.info(f"  Bytes per op: {total_bytes / config['count'] / 1024:.1f} KB")
 
         # Generate bandwidth report
         self._generate_bandwidth_report(bandwidth_results)
@@ -553,18 +552,18 @@ Bottleneck Analysis:")
         report.append("-" * 50)
 
         for config_name, results in bandwidth_results.items():
-            report.append(f"{config_name"15s"}: {results['bandwidth_mbps']"6.1f"} Mbps "
-                         f"({results['avg_latency_ms']"5.1f"}ms avg)")
+            report.append(f"{config_name:15s}: {results['bandwidth_mbps']:6.1f} Mbps "
+                         f"({results['avg_latency_ms']:5.1f}ms avg)")
 
         # Calculate average bandwidth
         if bandwidth_results:
             avg_bandwidth = np.mean([r['bandwidth_mbps'] for r in bandwidth_results.values()])
-            report.append(f"\nAverage bandwidth: {avg_bandwidth".1f"} Mbps")
+            report.append(f"\nAverage bandwidth: {avg_bandwidth:.1f} Mbps")
 
             # Estimate theoretical maximum (assuming 1 Gbps network)
             theoretical_max = 1000  # 1 Gbps
             efficiency = (avg_bandwidth / theoretical_max) * 100
-            report.append(f"Network efficiency: {efficiency".1f"}% of theoretical maximum")
+            report.append(f"Network efficiency: {efficiency:.1f}% of theoretical maximum")
 
             if efficiency < 50:
                 report.append("⚠️  Network efficiency is low - potential protocol overhead")
@@ -641,9 +640,9 @@ Bottleneck Analysis:")
                 'pool_stats': pool_stats
             }
 
-            logger.info(f"  Concurrency {concurrency}: {throughput".1f"} ops/sec, "
-                       f"{success_rate".1%"} success")
-            logger.info(f"  Pool: {pool_stats['hit_rate']".1%"} hit rate, "
+            logger.info(f"  Concurrency {concurrency}: {throughput:.1f} ops/sec, "
+                       f"{success_rate:.1%} success")
+            logger.info(f"  Pool: {pool_stats['hit_rate']:.1%} hit rate, "
                        f"{pool_stats['created']} created, {pool_stats['reused']} reused")
 
         # Generate pool efficiency report
@@ -669,8 +668,8 @@ Bottleneck Analysis:")
         for concurrency, results in sorted(pool_results.items()):
             throughput = results['throughput']
             hit_rate = results['pool_stats']['hit_rate']
-            report.append(f"{concurrency"3d"} concurrent: {throughput"6.1f"} ops/sec "
-                         f"(hit rate: {hit_rate".1%"})")
+            report.append(f"{concurrency:3d} concurrent: {throughput:6.1f} ops/sec "
+                         f"(hit rate: {hit_rate:.1%})")
 
         # Analyze scaling
         concurrencies = sorted(pool_results.keys())
@@ -681,9 +680,9 @@ Bottleneck Analysis:")
             ideal_scaling = concurrencies[-1] / concurrencies[0]
             scaling_ratio = scaling_efficiency / ideal_scaling
 
-            report.append(f"\nScaling efficiency: {scaling_efficiency".2f"}x "
-                         f"(ideal: {ideal_scaling".2f"}x)")
-            report.append(f"Scaling ratio: {scaling_ratio".2f"}")
+            report.append(f"\nScaling efficiency: {scaling_efficiency:.2f}x "
+                         f"(ideal: {ideal_scaling:.2f}x)")
+            report.append(f"Scaling ratio: {scaling_ratio:.2f}")
 
             if scaling_ratio > 0.8:
                 report.append("✅ Excellent scaling - system handles concurrency well")
@@ -697,7 +696,7 @@ Bottleneck Analysis:")
         final_stats = pool_results[final_concurrency]['pool_stats']
 
         report.append(f"\nFinal pool stats at {final_concurrency} concurrency:")
-        report.append(f"  Hit rate: {final_stats['hit_rate']".1%"}")
+        report.append(f"  Hit rate: {final_stats['hit_rate']:.1%}")
         report.append(f"  Connections created: {final_stats['created']}")
         report.append(f"  Connections reused: {final_stats['reused']}")
         report.append(f"  Total errors: {final_stats['errors']}")

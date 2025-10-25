@@ -113,3 +113,17 @@ def reset_random_seeds():
     torch.manual_seed(42)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(42)
+
+
+def get_free_port():
+    """Get free port for testing.
+
+    Returns:
+        int: Available port number
+    """
+    import socket
+    sock = socket.socket()
+    sock.bind(('', 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    return port

@@ -402,19 +402,15 @@ class GenieServer:
         else:
             client_ip = '127.0.0.1'  # localhost
 
-        # For localhost connections, always use port 5558 (client's data port)
-        if client_ip == '127.0.0.1':
-            source_node = '127.0.0.1:5558'
-            logger.info(f"OPERATION REQUEST: Using localhost client port 5558, original source_node: {metadata.get('source_node')}")
+        # Use client_port from metadata if available (preferred method)
+        client_port = metadata.get('client_port')
+        if client_port:
+            source_node = f"{client_ip}:{client_port}"
+            logger.info(f"OPERATION REQUEST: Using client_port {client_port} from metadata")
         else:
-            # For non-localhost, try to use client_port from metadata
-            client_port = metadata.get('client_port')
-            if client_port:
-                source_node = f"{client_ip}:{client_port}"
-                logger.info(f"OPERATION REQUEST: Updated source_node to {source_node} using client_port {client_port}")
-            else:
-                logger.warning(f"OPERATION REQUEST: No client_port in metadata, using source_node: {source_node}")
-                logger.warning(f"OPERATION REQUEST: Available metadata keys: {list(metadata.keys())}")
+            # Fallback: use the same port as the server for localhost
+            source_node = f"{client_ip}:{self.data_port}"
+            logger.info(f"OPERATION REQUEST: No client_port in metadata, using server data port {self.data_port}")
 
         if not all([operation, result_id]):
             logger.warning(f"Missing critical metadata for {transfer_id}: op={operation}, result_id={result_id}")
@@ -441,11 +437,25 @@ class GenieServer:
                 result=result
             ).to_dict()
 
+            # ✅ FIX: Use client's listening port from metadata (not source_node)
+            client_port = metadata.get('client_port')
+            if client_port:
+                # Get client IP from source_node or use localhost
+                if ':' in source_node:
+                    client_ip = source_node.split(':')[0]
+                else:
+                    client_ip = '127.0.0.1'  # localhost
+                result_target = f"{client_ip}:{client_port}"
+                logger.info(f"📤 Sending result {result.shape} to {result_target}")
+            else:
+                logger.error(f"Missing client_port in metadata for {transfer_id}")
+                result_target = source_node
+                logger.info(f"📤 Sending result {result.shape} to {result_target} (fallback)")
+
             # Send result back to client using the result transport
-            logger.info(f"📤 Sending result {result.shape} to {source_node}")
             success = await self.result_transport.send(
                 result,
-                target=source_node,
+                target=result_target,  # ✅ Use correct target with client port
                 transfer_id=result_id,
                 metadata=result_metadata
             )
@@ -470,9 +480,20 @@ class GenieServer:
             error_tensor = torch.zeros(0)
 
             try:
+                # ✅ FIX: Use same client port routing for error responses
+                client_port = metadata.get('client_port')
+                if client_port:
+                    if ':' in source_node:
+                        client_ip = source_node.split(':')[0]
+                    else:
+                        client_ip = '127.0.0.1'
+                    error_target = f"{client_ip}:{client_port}"
+                else:
+                    error_target = source_node
+
                 await self.result_transport.send(
                     error_tensor,
-                    target=source_node,
+                    target=error_target,  # ✅ Use correct target for errors too
                     transfer_id=result_id,
                     metadata=error_metadata
                 )

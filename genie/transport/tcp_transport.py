@@ -35,7 +35,22 @@ class TCPTransport(Transport):
         from ..config import get_config
         self._central_config = get_config()
 
-        self.data_port = getattr(config, 'data_port', self._central_config.network.data_port)
+        # ✅ FIX: Properly extract data_port from config
+        if hasattr(config, 'get_network_config'):
+            # CoordinatorConfig style - use explicit config values
+            network_config = config.get_network_config()
+            self.data_port = network_config['data_port']
+            logger.debug(f"TCP Transport using network_config data_port: {self.data_port}")
+            logger.debug(f"Network config: {network_config}")
+        else:
+            # Direct config style - check if it's a simple config object
+            self.data_port = getattr(config, 'data_port', self._central_config.network.data_port)
+            logger.debug(f"TCP Transport using direct config data_port: {self.data_port}")
+            logger.debug(f"Direct config attributes: {dir(config)}")
+
+        logger.info(f"TCP Transport will listen on port {self.data_port}")
+        logger.debug(f"TCP Transport config object: {config}")
+        logger.debug(f"TCP Transport config type: {type(config)}")
         self.server = None
 
         # Receive handlers
@@ -451,14 +466,20 @@ class TCPTransport(Transport):
                         )
                         if self._result_callback:
                             await self._result_callback(result_id, Exception(error_meta.error_message))
+                            logger.debug(f"Error result routed to callback: {result_id}")
                         else:
                             logger.warning(f"Error result received but no callback: {result_id}")
+                        # Don't process as operation request
+                        return
                     else:
                         # This is a successful result
                         if self._result_callback:
                             await self._result_callback(result_id, tensors[0])
+                            logger.debug(f"Success result routed to callback: {result_id}")
                         else:
                             logger.warning(f"Result received but no callback: {result_id}")
+                        # Don't process as operation request
+                        return
                 
                 elif metadata.get('operation'):
                     # This is an operation request - call server callback with multiple tensors
@@ -524,7 +545,9 @@ class TCPTransport(Transport):
                     # Pass exception to callback
                     if self._result_callback:
                         await self._result_callback(result_id, exception)
-                    logger.info(f"Error response processed: {result_id}")
+                        logger.debug(f"Error response routed to callback: {result_id}")
+                    else:
+                        logger.warning(f"Error response received but no callback: {result_id}")
                     return  # Don't process as normal result
 
                 # ✅ CHECK: Is this a result?
@@ -549,8 +572,11 @@ class TCPTransport(Transport):
                         # This is a successful result
                         if self._result_callback:
                             await self._result_callback(result_id, tensor)
+                            logger.debug(f"Success result routed to callback: {result_id}")
                         else:
                             logger.warning(f"Result received but no callback: {result_id}")
+                        # Don't process as operation request
+                        return
                 # ✅ CHECK: Is this an operation request?
                 elif metadata.get('operation'):
                     # This needs execution - call server callback

@@ -95,5 +95,3 @@ class SemanticMetadata:
 			"priority": self.priority,
 			"metadata_version": self.metadata_version
 		}
-
-

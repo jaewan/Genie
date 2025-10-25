@@ -10,6 +10,7 @@ Design principles:
 
 import threading
 import logging
+import time
 from dataclasses import dataclass
 from typing import Optional, Dict, Callable, Any, List
 import asyncio
@@ -72,13 +73,18 @@ class CoordinatorConfig:
         from ..config import get_config
         config = get_config()
 
-        return {
+        # ✅ FIX: Always prefer explicit config values over defaults
+        network_config = {
             'control_port': self.control_port or config.network.control_port,
             'data_port': self.data_port or config.network.data_port,
             'prefer_dpdk': self.prefer_dpdk if self.prefer_dpdk is not None else config.network.prefer_dpdk,
             'require_dpdk': self.require_dpdk if self.require_dpdk is not None else config.network.require_dpdk,
             'tcp_fallback': self.tcp_fallback if self.tcp_fallback is not None else config.network.tcp_fallback,
         }
+
+        logger.debug(f"CoordinatorConfig network config: control_port={self.control_port}, data_port={self.data_port}")
+        logger.debug(f"Final network config: {network_config}")
+        return network_config
 
     def get_performance_config(self):
         """Get performance configuration."""
@@ -149,6 +155,7 @@ class GenieCoordinator:
         # 1. Initialize control plane (TCP, always available)
         from ..runtime.control_plane import ControlPlane
         network_config = self.config.get_network_config()
+        logger.debug(f"Coordinator network config: {network_config}")
         self.control_plane = ControlPlane(
             self.node_id,
             network_config['control_port']
@@ -182,14 +189,21 @@ class GenieCoordinator:
             # Servers will use their own TCP server
             is_server_coordinator = (hasattr(self.config, 'is_server') and self.config.is_server)
             if not is_server_coordinator:
-                # Client coordinators need to initialize TCP to receive results from servers
-                await self.transports['tcp'].initialize()
-                logger.info("✓ TCP fallback available")
+                # ✅ FIX: Register callback BEFORE initialize() to avoid race condition
+                self.transports['tcp']._result_callback = self._handle_result_received
+                logger.info("✓ Result callback registered")
 
-        # ✅ ADD: Register result handler with TCP transport (for clients only)
-        if 'tcp' in self.transports and not is_server_coordinator:
-            self.transports['tcp']._result_callback = self._handle_result_received
-            logger.info("✓ TCP transport with result callback")
+                # Client coordinators need to initialize TCP to receive results from servers
+                success = await self.transports['tcp'].initialize()
+                if success:
+                    logger.info("✓ TCP fallback available")
+                    # ✅ FIX: Add operation callback to handle incoming operation requests
+                    # (Client might also act as server in some scenarios)
+                    self.transports['tcp']._operation_callback = self._handle_operation_request
+                    logger.info("✓ Operation callback registered")
+                else:
+                    logger.warning("✗ TCP transport initialization failed, removing transport")
+                    del self.transports['tcp']
         
         if not self.transports:
             raise RuntimeError("No transports available!")
@@ -306,10 +320,13 @@ class GenieCoordinator:
         result_id = f"{transfer_id}_result"
 
         # Prepare metadata for send + execute
+        # ✅ FIX: Use the transport's actual listening port
+        client_port = self.transports['tcp'].data_port if 'tcp' in self.transports else self._central_config.network.data_port
         operation_metadata = create_operation_metadata(
             operation=operation,
             result_id=result_id,
-            inputs=[tensor]
+            inputs=[tensor],
+            client_port=client_port  # ✅ Actual listening port
         )
         send_metadata = self._extract_metadata(tensor, operation_metadata.to_dict())
 
@@ -342,6 +359,99 @@ class GenieCoordinator:
 
         logger.info(f"✅ Remote execution complete: {result.shape}")
         return result
+
+    async def execute_remote_operation_async(
+        self,
+        operation: str,
+        inputs: list,
+        target: str,
+        timeout: Optional[float] = None
+    ) -> asyncio.Future:
+        """
+        Execute operation remotely asynchronously (non-blocking).
+
+        Returns a Future that resolves to the result tensor.
+
+        This enables parallel execution of independent operations.
+        """
+        # Use centralized timeout configuration
+        if timeout is None:
+            timeout = self._central_config.performance.operation_timeout
+
+        # Generate IDs
+        transfer_id = str(uuid.uuid4())
+        result_id = f"{transfer_id}_result"
+
+        logger.info(f"🚀 Async remote execution: {operation} with {len(inputs)} inputs → {target}")
+
+        # Create result queue BEFORE sending
+        result_queue = self._create_result_queue(result_id)
+
+        try:
+            # Prepare metadata
+            primary_tensor = inputs[0]
+            client_port = self.transports['tcp'].data_port if 'tcp' in self.transports else self._central_config.network.data_port
+            operation_metadata = create_operation_metadata(
+                operation=operation,
+                result_id=result_id,
+                inputs=inputs,
+                client_port=client_port
+            )
+            metadata = self._extract_metadata(primary_tensor, operation_metadata.to_dict())
+
+            # Register target server with scheduler
+            if hasattr(self.scheduler, 'register_server'):
+                self.scheduler.register_server(target)
+
+            # Consult scheduler
+            scheduling_decision = self.scheduler.schedule(
+                operation=operation,
+                inputs=inputs,
+                metadata=metadata
+            )
+
+            # Use scheduler's device choice
+            scheduled_target = scheduling_decision['device']
+            logger.info(f"Scheduler placed {operation} on {scheduled_target}")
+
+            # Select transport
+            transport = self._select_transport(primary_tensor, metadata)
+
+            # Send tensors using scheduler's target
+            success = await transport.send_multi_tensor(
+                inputs, scheduled_target, transfer_id, metadata
+            )
+
+            if not success:
+                raise RuntimeError(f"Failed to send tensors for {operation}")
+
+            # Return future that will resolve when result arrives
+            async def wait_for_result():
+                try:
+                    result = await asyncio.wait_for(
+                        result_queue.get(),
+                        timeout=timeout
+                    )
+
+                    if isinstance(result, Exception):
+                        raise result
+
+                    return result
+
+                except asyncio.TimeoutError:
+                    raise RuntimeError(f"Async operation timeout after {timeout}s")
+
+            return asyncio.create_task(wait_for_result())
+
+        except Exception as e:
+            logger.error(f"Async remote execution failed: {e}")
+            # Return a future that raises the exception
+            async def failing_future():
+                raise e
+            return asyncio.create_task(failing_future())
+        finally:
+            # Cleanup queue
+            self._result_queues.pop(result_id, None)
 
     async def execute_remote_operation(
         self,
@@ -390,11 +500,14 @@ class GenieCoordinator:
                 # Time scheduler decision
                 t0 = time.perf_counter()
                 primary_tensor = inputs[0]
+                # ✅ FIX: Use the transport's actual listening port, not the config default
+                client_port = self.transports['tcp'].data_port if 'tcp' in self.transports else self._central_config.network.data_port
+                logger.debug(f"Using client port for operation: {client_port}")
                 operation_metadata = create_operation_metadata(
                     operation=operation,
                     result_id=result_id,
                     inputs=inputs,
-                    client_port=self._central_config.network.data_port
+                    client_port=client_port  # ✅ Actual listening port
                 )
                 metadata = self._extract_metadata(primary_tensor, operation_metadata.to_dict())
                 measurement['timings']['scheduler_time'] = time.perf_counter() - t0
@@ -482,11 +595,13 @@ class GenieCoordinator:
         try:
             # Step 2: Prepare metadata (WITHOUT tensor data - tensors sent separately)
             primary_tensor = inputs[0]
+            # ✅ FIX: Use the transport's actual listening port
+            client_port = self.transports['tcp'].data_port if 'tcp' in self.transports else self._central_config.network.data_port
             operation_metadata = create_operation_metadata(
                 operation=operation,
                 result_id=result_id,
                 inputs=inputs,
-                client_port=self._central_config.network.data_port  # Tell server where to send result
+                client_port=client_port  # ✅ Actual listening port
             )
             metadata = self._extract_metadata(primary_tensor, operation_metadata.to_dict())
             logger.debug(f"Sending operation metadata: {metadata}")
@@ -616,6 +731,49 @@ class GenieCoordinator:
         else:
             logger.warning(f"No queue for result {result_id}")
             logger.warning(f"Available queue keys: {list(self._result_queues.keys())}")
+
+    async def _handle_operation_request(self, transfer_id: str, tensor_or_tensors, metadata: Dict):
+        """
+        Handle incoming operation request (for client acting as server).
+
+        This allows the client coordinator to also act as a server in peer-to-peer scenarios.
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+
+        operation = metadata.get('operation')
+        if not operation:
+            logger.warning(f"Operation request missing operation field: {transfer_id}")
+            return
+
+        logger.info(f"Received operation request: {operation} for {transfer_id}")
+
+        # For now, delegate to a simple execution (could be enhanced)
+        try:
+            # This is a basic implementation - in practice, might want to use the executor
+            if isinstance(tensor_or_tensors, list):
+                inputs = tensor_or_tensors
+            else:
+                inputs = [tensor_or_tensors]
+
+            # Execute using the shared operation registry
+            from .operation_registry import get_operation_registry
+            registry = get_operation_registry()
+            result = registry.execute(operation, inputs)
+
+            # Send result back (using the metadata's client_port if available)
+            result_id = metadata.get('result_id', f"{transfer_id}_result")
+            client_port = metadata.get('client_port')
+
+            if client_port:
+                # This is a simplified response - in practice would need proper transport setup
+                logger.info(f"Would send result back to client on port {client_port}")
+            else:
+                logger.warning(f"No client_port in operation metadata for {transfer_id}")
+
+        except Exception as e:
+            logger.error(f"Failed to execute operation {operation}: {e}")
+            # In practice, would send error response back
 
     def _select_transport(self, tensor, metadata):
         """

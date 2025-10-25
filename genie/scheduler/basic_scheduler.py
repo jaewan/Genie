@@ -43,6 +43,16 @@ class BasicScheduler:
     def __init__(self, devices: List[Device]):
         self.devices = {dev.id: dev for dev in devices}
 
+        # Feature toggles for ablation studies
+        self.enable_colocation = True
+        self.enable_pattern_detection = True
+        self.enable_phase_detection = True
+        self.enable_cost_model = True
+
+        # Network topology (for cost estimation)
+        self.network_bandwidth_gbps = 100.0
+        self.network_latency_ms = 1.0
+
     def schedule(self, annotated_graph) -> Dict[str, SchedulingDecision]:
         """
         Create placement schedule for graph.
@@ -53,9 +63,13 @@ class BasicScheduler:
         decisions = {}
         device_loads = {dev_id: 0.0 for dev_id in self.devices}
 
-        # Step 1: Identify co-location groups
-        colocation_groups = self._find_colocation_groups(annotated_graph)
-        logger.info(f"Found {len(colocation_groups)} co-location groups")
+        # Step 1: Identify co-location groups (only if enabled)
+        colocation_groups = []
+        if self.enable_colocation and self.enable_pattern_detection:
+            colocation_groups = self._find_colocation_groups(annotated_graph)
+            logger.info(f"Found {len(colocation_groups)} co-location groups")
+        else:
+            logger.info("Co-location disabled - using simple placement")
 
         # Step 2: Place co-location groups
         for group in colocation_groups:
@@ -91,6 +105,23 @@ class BasicScheduler:
 
         return decisions
 
+    def register_server(self, server_id: str):
+        """Register a server with the scheduler."""
+        if server_id not in self.devices:
+            # Add new device for this server
+            self.devices[server_id] = Device(
+                id=server_id,
+                memory_gb=16.0,  # Default
+                location=f"server_{len(self.devices)}"
+            )
+            logger.info(f"Registered new server: {server_id}")
+
+    def update_network_topology(self, bandwidth_gbps: float, latency_ms: float):
+        """Update network topology for cost estimation."""
+        self.network_bandwidth_gbps = bandwidth_gbps
+        self.network_latency_ms = latency_ms
+        logger.info(f"Updated network topology: {bandwidth_gbps}Gbps, {latency_ms}ms")
+
     def _find_colocation_groups(self, annotated_graph) -> List[Dict]:
         """
         Identify nodes that should be co-located.
@@ -101,6 +132,9 @@ class BasicScheduler:
         3. Consecutive conv layers (fusion opportunity)
         """
         groups = []
+
+        if not self.enable_pattern_detection or not self.enable_phase_detection:
+            return groups  # No semantic analysis if features disabled
 
         # Rule 1: KV cache co-location (LLM decode phase)
         kv_cache_nodes = []

@@ -510,7 +510,3 @@ class PatternRegistry:
 			}
 
 		return report
-
-
-
-
