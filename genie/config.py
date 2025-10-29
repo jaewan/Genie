@@ -25,6 +25,9 @@ class LogLevel(Enum):
 @dataclass
 class NetworkConfig:
     """Network-related configuration."""
+    # Remote server configuration
+    remote_server_address: Optional[str] = None  # e.g., 'localhost:5556'
+    
     # Ports
     control_port: int = 5555
     data_port: int = 5556
@@ -62,6 +65,7 @@ class NetworkConfig:
     def from_env(cls) -> 'NetworkConfig':
         """Load network config from environment variables."""
         return cls(
+            remote_server_address=os.getenv('GENIE_SERVER_ADDRESS', None),
             control_port=int(os.getenv('GENIE_CONTROL_PORT', 5555)),
             data_port=int(os.getenv('GENIE_DATA_PORT', 5556)),
             metrics_port=int(os.getenv('GENIE_METRICS_PORT', 9095)),
@@ -129,6 +133,30 @@ class PerformanceConfig:
 
 
 @dataclass
+class RuntimeConfig:
+    """Runtime initialization configuration."""
+    # Thread pool settings
+    thread_pool_size: int = 4
+    auto_connect: bool = True
+    auto_init: bool = True
+    
+    # Profiling
+    enable_profiling: bool = False
+    profile_sample_rate: float = 0.1
+    
+    @classmethod
+    def from_env(cls) -> 'RuntimeConfig':
+        """Load runtime config from environment variables."""
+        return cls(
+            thread_pool_size=int(os.getenv('GENIE_THREAD_POOL_SIZE', 4)),
+            auto_connect=os.getenv('GENIE_AUTO_CONNECT', 'true').lower() == 'true',
+            auto_init=os.getenv('GENIE_AUTO_INIT', 'true').lower() == 'true',
+            enable_profiling=os.getenv('GENIE_ENABLE_PROFILING', 'false').lower() == 'true',
+            profile_sample_rate=float(os.getenv('GENIE_PROFILE_SAMPLE_RATE', 0.1))
+        )
+
+
+@dataclass
 class ServerConfig:
     """Server-specific configuration."""
     node_id: str = "genie-server-0"
@@ -183,6 +211,7 @@ class GenieConfig:
     """Main configuration class for Genie framework."""
     network: NetworkConfig = field(default_factory=NetworkConfig)
     performance: PerformanceConfig = field(default_factory=PerformanceConfig)
+    runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
@@ -221,6 +250,7 @@ class GenieConfig:
         # Override with environment variables
         config.network = NetworkConfig.from_env()
         config.performance = PerformanceConfig.from_env()
+        config.runtime = RuntimeConfig.from_env()
         config.server = ServerConfig.from_env()
         config.logging = LoggingConfig.from_env()
 
@@ -234,12 +264,14 @@ class GenieConfig:
         """Create config from dictionary (YAML data)."""
         network_data = data.get('network', {})
         performance_data = data.get('performance', {})
+        runtime_data = data.get('runtime', {})
         server_data = data.get('server', {})
         logging_data = data.get('logging', {})
 
         return cls(
             network=NetworkConfig(**network_data),
             performance=PerformanceConfig(**performance_data),
+            runtime=RuntimeConfig(**runtime_data),
             server=ServerConfig(**server_data),
             logging=LoggingConfig(**logging_data),
             debug_mode=data.get('debug_mode', False)
@@ -280,6 +312,13 @@ class GenieConfig:
                 'gpu_id': self.performance.gpu_id,
                 'enable_profiling': self.performance.enable_profiling,
                 'profile_sample_rate': self.performance.profile_sample_rate
+            },
+            'runtime': {
+                'thread_pool_size': self.runtime.thread_pool_size,
+                'auto_connect': self.runtime.auto_connect,
+                'auto_init': self.runtime.auto_init,
+                'enable_profiling': self.runtime.enable_profiling,
+                'profile_sample_rate': self.runtime.profile_sample_rate
             },
             'server': {
                 'node_id': self.server.node_id,

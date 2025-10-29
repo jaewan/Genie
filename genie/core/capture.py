@@ -74,6 +74,11 @@ class CaptureContext:
         self.captured_root = None  # Store the captured root on exit
 
     def __enter__(self):
+        # ✅ TRIGGER ASYNC INIT: First Genie capture call
+        # Initialize runtime when user enters capture context
+        from ..runtime.initialization import _ensure_async_init
+        _ensure_async_init()
+        
         # Signal to factory interceptor that we're in capture mode
         self.prev_active = getattr(_capture_context, 'active', False)
         _capture_context.active = True

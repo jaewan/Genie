@@ -414,6 +414,11 @@ class LazyTensor(torch.Tensor):
         is a LazyTensor. We should ALWAYS intercept unless explicitly disabled.
         """
         kwargs = kwargs or {}
+        
+        # ✅ TRIGGER ASYNC INIT: First Genie operation call
+        # This is called on ANY operation on a LazyTensor
+        from ..runtime.initialization import _ensure_async_init
+        _ensure_async_init()
 
         # ✅ ONLY check for disabled contexts (construction, materialization)
         from .interception_control import get_current_context, InterceptionContext
@@ -1052,9 +1057,90 @@ class LazyTensor(torch.Tensor):
         Returns:
             Concrete torch.Tensor with actual data
         """
+        # ✅ NEW: Ensure runtime is initialized (triggers auto-init if needed)
+        from ..runtime.initialization import ensure_initialized, get_runtime_state
+        ensure_initialized()
+        
+        # ✅ NEW: Check if remote execution should be used
+        runtime_state = get_runtime_state()
+        if runtime_state.coordinator and runtime_state.server_address:
+            # Remote execution path
+            logger.debug(f"Routing materialization to remote server: {runtime_state.server_address}")
+            return self._materialize_remote()
+        else:
+            # Local execution path (fallback)
+            logger.debug("Local execution (remote not configured)")
+            return self._materialize_local()
+
+    def _materialize_local(self) -> torch.Tensor:
+        """
+        Materialize locally using the graph builder.
+        
+        This is the default execution path when remote is not available.
+        """
         from .graph_builder import get_global_builder
         builder = get_global_builder()
         return builder.materialize(self)
+
+    def _materialize_remote(self) -> torch.Tensor:
+        """
+        Materialize remotely by sending to server.
+        
+        This uses a synchronous wrapper around async operations.
+        Handles:
+        1. Remote coordinator instance
+        2. Server connection
+        3. Tensor serialization/deserialization
+        """
+        from ..runtime.initialization import get_runtime_state
+        import asyncio
+        
+        state = get_runtime_state()
+        coordinator = state.coordinator
+        
+        if not coordinator:
+            logger.warning("No coordinator available, falling back to local execution")
+            return self._materialize_local()
+        
+        try:
+            # Extract operation and inputs from this tensor's DAG
+            operation = self.operation
+            inputs = self.inputs
+            
+            logger.debug(f"Remote execute: {operation}")
+            
+            # Create async function to execute remotely
+            async def execute_remote_async():
+                result = await coordinator.execute_remote_operation(
+                    operation=operation,
+                    inputs=inputs,
+                    target=state.server_address,
+                    timeout=30
+                )
+                return result
+            
+            # Run async operation in sync context
+            try:
+                # Try to get running event loop (we're in a thread or nested context)
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # No running loop, create new one
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    result = loop.run_until_complete(execute_remote_async())
+                    return result
+                finally:
+                    loop.close()
+            else:
+                # There's already a running loop, we can't use run_until_complete
+                # This shouldn't happen in normal usage, but handle it gracefully
+                logger.warning("Nested event loop detected, falling back to local execution")
+                return self._materialize_local()
+        
+        except Exception as e:
+            logger.warning(f"Remote execution failed: {e}", exc_info=True)
+            return self._materialize_local()
 
 
     # Operations that force materialization

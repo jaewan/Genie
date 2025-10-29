@@ -177,6 +177,12 @@ class FactoryInterceptor:
             from .capture import is_capturing
             if self._is_remote_device(device) or is_capturing():
                 from .lazy_tensor import LazyTensor
+                
+                # ✅ TRIGGER ASYNC INIT: First Genie API call
+                # This is one of the earliest points where Genie code is invoked
+                # Initialize runtime on first remote tensor creation or capture
+                from ..runtime.initialization import _ensure_async_init
+                _ensure_async_init()
 
                 # Set flag to prevent recursion
                 _in_lazy_factory.active = True

@@ -48,15 +48,23 @@ class RealisticLLMDecodeWorkload:
 
                 print(f"Loading {self.model_name}...")
                 self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+                
+                # CRITICAL FIX: Use explicit device placement, not device_map="auto"
+                # device_map="auto" can place on cuda:1 or other devices
                 self.model = AutoModelForCausalLM.from_pretrained(
                     self.model_name,
                     torch_dtype=torch.float16,  # Use FP16 for memory efficiency
-                    device_map="auto"           # Auto-place on GPU if available
+                    device_map=None              # No auto-mapping - explicit control
                 )
                 self.model.eval()
 
                 if self.tokenizer.pad_token is None:
                     self.tokenizer.pad_token = self.tokenizer.eos_token
+
+                # CRITICAL FIX: Ensure model is on cuda:0
+                if torch.cuda.is_available():
+                    device = torch.device('cuda:0')
+                    self.model.to(device)
 
                 print(f"✓ Loaded {self.model_name}")
                 return True
@@ -68,6 +76,11 @@ class RealisticLLMDecodeWorkload:
         # Fallback to mock model
         self.model = self._create_mock_model()
         self.tokenizer = self._create_mock_tokenizer()
+        
+        # CRITICAL FIX: Ensure mock model is also on cuda:0
+        if torch.cuda.is_available():
+            self.model.to(torch.device('cuda:0'))
+        
         return False
 
     def _create_mock_model(self) -> nn.Module:
@@ -191,37 +204,36 @@ class RealisticLLMDecodeWorkload:
         return MockTokenizer()
 
     def get_sample_inputs(self) -> List[torch.Tensor]:
-        """Get batch of sample prompts - returns just the input_ids tensor."""
+        """Get batch of prompt tokens - returns list with single tensor."""
         if self.tokenizer is None:
             self.load_model()
 
+        # Create batch of prompt texts
         prompts = [
-            "Once upon a time in a land far away",
-            "The quick brown fox jumps over",
-            "Machine learning is the future of",
-            "In the beginning there was",
-            "Artificial intelligence will revolutionize",
-            "The world is changing rapidly",
-            "Technology advancement accelerates",
-            "Digital transformation enables"
-        ]
+            "The future of artificial intelligence is",
+            "Machine learning enables computers to",
+            "Deep neural networks can process",
+            "Natural language processing helps us",
+            "Computer vision analyzes images to",
+            "Reinforcement learning teaches agents to",
+            "Transfer learning reuses pre-trained models",
+            "Transformers revolutionized language modeling",
+        ][:self.batch_size]
 
-        # Return first batch_size prompts
-        prompts = prompts[:self.batch_size]
-
-        batch_encodings = self.tokenizer(
+        # Tokenize all prompts
+        encodings = self.tokenizer(
             prompts,
             return_tensors='pt',
             padding=True,
             truncation=True,
-            max_length=100
+            max_length=32
         )
 
-        # Return input_ids as a tensor (dict['input_ids'] extracts the tensor)
-        if isinstance(batch_encodings, dict):
-            return [batch_encodings['input_ids']]
-        # If tokenizer returns a proper object with input_ids attribute
-        return [batch_encodings.input_ids]
+        # CRITICAL FIX: Ensure input is on the correct device
+        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        input_ids = encodings['input_ids'].to(device)
+        
+        return [input_ids]
 
     def run_reference(self) -> torch.Tensor:
         """

@@ -41,8 +41,15 @@ class MultimodalVQAWorkload:
 
             print(f"Loading {self.model_name}...")
             self.processor = CLIPProcessor.from_pretrained(self.model_name)
+            
+            # CRITICAL FIX: Load without device_map, use explicit placement
             self.model = CLIPModel.from_pretrained(self.model_name)
             self.model.eval()
+
+            # CRITICAL FIX: Ensure model is on cuda:0
+            if torch.cuda.is_available():
+                device = torch.device('cuda:0')
+                self.model.to(device)
 
             print(f"✓ Loaded {self.model_name}")
             return True
@@ -51,6 +58,11 @@ class MultimodalVQAWorkload:
             print("❌ transformers not available - using mock model")
             self.model = self._create_mock_clip()
             self.processor = self._create_mock_processor()
+            
+            # CRITICAL FIX: Ensure mock model is also on cuda:0
+            if torch.cuda.is_available():
+                self.model.to(torch.device('cuda:0'))
+            
             return False
 
     def _create_mock_clip(self):
@@ -158,7 +170,12 @@ class MultimodalVQAWorkload:
 
         inputs = self.processor(text=texts, images=mock_images, return_tensors='pt')
 
-        return [inputs['input_ids'], inputs['pixel_values']]
+        # CRITICAL FIX: Ensure inputs are on the correct device
+        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        input_ids = inputs['input_ids'].to(device)
+        pixel_values = inputs['pixel_values'].to(device)
+
+        return [input_ids, pixel_values]
 
     def run(self, baseline_config: Dict) -> Dict[str, Any]:
         """
@@ -171,6 +188,10 @@ class MultimodalVQAWorkload:
         """
         if self.model is None:
             self.load_model()
+
+        # CRITICAL FIX: Move model to correct device
+        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        self.model.to(device)
 
         # Get inputs
         inputs = self.get_sample_inputs()
@@ -186,11 +207,21 @@ class MultimodalVQAWorkload:
 
         end_time = time.perf_counter()
 
+        # CRITICAL FIX: Handle CLIP output which returns CLIPOutput namedtuple
+        # Extract the tensor from the output
+        try:
+            if hasattr(outputs, 'logits_per_image'):
+                logits_shape = outputs.logits_per_image.shape
+            else:
+                logits_shape = None
+        except:
+            logits_shape = None
+
         return {
             'batch_size': input_ids.shape[0],
             'text_length': input_ids.shape[1],
             'vision_shape': list(pixel_values.shape),
-            'similarity_matrix_shape': outputs.logits_per_image.shape if hasattr(outputs, 'logits_per_image') else None,
+            'similarity_matrix_shape': logits_shape,
             'total_latency_ms': (end_time - start_time) * 1000,
             'throughput_samples_per_sec': input_ids.shape[0] / (end_time - start_time),
             'baseline': baseline_config.get('baseline', 'unknown'),

@@ -13,11 +13,26 @@ once the basic integration is working.
 
 import logging
 from typing import Dict, Any, List, Optional
+from genie.core.graph_interface import GenieGraph
+from genie.core.types import WorkloadType
 
 logger = logging.getLogger(__name__)
 
 
-class StubScheduler:
+# ============================================================================
+# BASE SCHEDULER INTERFACE (For consistency with semantic_scheduler.py)
+# ============================================================================
+
+class BaseScheduler:
+    """Abstract base for schedulers (for compatibility)."""
+    def schedule(self, graph: GenieGraph, workload_type: WorkloadType = WorkloadType.GENERIC):
+        raise NotImplementedError
+    
+    def get_stats(self) -> Dict[str, Any]:
+        raise NotImplementedError
+
+
+class StubScheduler(BaseScheduler):
     """
     Phase 1 scheduler: Always use remote GPU 0.
     
@@ -56,16 +71,47 @@ class StubScheduler:
         self.available_devices = self._discover_devices()
         logger.info(f"StubScheduler initialized (Phase 1: semantic-aware, {len(self.available_devices)} devices)")
     
-    def schedule(
+    # ========================================================================
+    # NEW API (BaseScheduler interface)
+    # ========================================================================
+    
+    def schedule_graph(self, graph: GenieGraph, 
+                      workload_type: WorkloadType = WorkloadType.GENERIC) -> 'Ok[ExecutionPlan]':
+        """✅ NEW: Unified interface compatible with SemanticScheduler."""
+        try:
+            from genie.core.exceptions import Ok
+            from genie.scheduler.semantic_scheduler import ExecutionPlan
+            
+            # Convert graph to placement decisions
+            placements = {}
+            for node in graph.nodes():
+                # Use legacy scheduling logic
+                decision = self.schedule_operation(
+                    operation=node.operation,
+                    metadata=node.metadata or {}
+                )
+                placements[node.id] = decision['device']
+            
+            plan = ExecutionPlan(placements=placements)
+            return Ok(plan)
+        except Exception as e:
+            from genie.core.exceptions import Err, SchedulingError
+            return Err(SchedulingError(f"Scheduling failed: {e}"))
+    
+    # ========================================================================
+    # LEGACY API (operation-based interface)
+    # ========================================================================
+    
+    def schedule_operation(
         self,
         operation: str,
         inputs: List = None,
         metadata: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
-        Schedule operation with caching and basic semantic awareness.
+        ⚠️ LEGACY: Schedule operation (old API).
 
-        Phase 1: Enhanced with caching and basic semantic rules:
+        Phase 1: Enhanced with caching and basic semantic awareness:
         1. LLM decode → co-locate with KV cache
         2. Large tensors → prefer device with most free memory
         3. Default → round-robin
@@ -161,6 +207,19 @@ class StubScheduler:
 
         logger.debug(f"New decision for {operation} → {decision['device']} (cache: {self._cache_hits}/{self._cache_hits + self._cache_misses})")
         return decision
+    
+    # ✅ BACKWARD COMPAT: Old method name
+    def schedule(self, operation_or_graph=None, inputs: List = None,
+                metadata: Optional[Dict[str, Any]] = None, workload_type: WorkloadType = None):
+        """Backward compatible schedule method that routes to correct implementation."""
+        if isinstance(operation_or_graph, str):
+            # Old API: schedule(operation, inputs, metadata)
+            return self.schedule_operation(operation_or_graph, inputs, metadata)
+        elif hasattr(operation_or_graph, 'nodes'):
+            # New API: schedule(graph, workload_type)
+            return self.schedule_graph(operation_or_graph, workload_type or WorkloadType.GENERIC)
+        else:
+            raise TypeError("schedule() requires either operation str or GenieGraph")
     
     def get_stats(self) -> Dict[str, Any]:
         """Get scheduler statistics including cache performance."""
@@ -321,14 +380,6 @@ class StubScheduler:
         else:
             # Fallback to localhost discovery
             self.available_devices = self._discover_devices()
-
-    def register_server(self, server_address: str):
-        """Register a known server address."""
-        if server_address not in self.known_servers:
-            self.known_servers.append(server_address)
-            logger.info(f"Registered server: {server_address}")
-            # Update available devices if needed
-            self._update_available_devices()
 
     def update_network_topology(self, bandwidth_gbps: float, latency_ms: float):
         """Update network topology for cost estimation."""

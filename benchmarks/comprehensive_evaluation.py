@@ -52,13 +52,37 @@ from benchmarks.workloads_detailed import (
     MicrobenchmarkWorkload
 )
 
+# Import realistic workloads
+try:
+    from benchmarks.workloads_detailed import (
+        RealisticLLMDecodeWorkload,
+        RealisticLLMPrefillWorkload,
+        RealisticVisionCNNWorkload,
+    )
+    _REALISTIC_WORKLOADS_AVAILABLE = True
+except ImportError:
+    _REALISTIC_WORKLOADS_AVAILABLE = False
+
 
 class ComprehensiveEvaluation:
-    """Runs all experiments for OSDI submission with corrected measurement framework."""
+    """Runs all experiments"""
 
-    def __init__(self, output_dir: str = "paper_results"):
+    def __init__(self, output_dir: str = "paper_results", use_real_models: bool = False, spawn_server: bool = False):
+        """
+        Initialize comprehensive evaluation.
+        
+        Args:
+            output_dir: Output directory for results
+            use_real_models: If True, use RealisticLLMDecodeWorkload etc. (real HF models)
+                           If False, use LLMDecodeWorkload etc. (mock models, default)
+            spawn_server: If True, spawn remote server for network execution
+                        If False, use device API (default)
+        """
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
+        self.use_real_models = use_real_models
+        self.spawn_server = spawn_server
+        self.server_manager = None
 
         self.baselines = {
             '1_local_pytorch': LocalPyTorchBaseline(),
@@ -70,18 +94,43 @@ class ComprehensiveEvaluation:
             '7_ray': RayBaseline(),
         }
 
-        self.workloads = {
-            'llm_decode': LLMDecodeWorkload(),
-            'llm_prefill': LLMPrefillWorkload(),
-            'vision_cnn': VisionCNNWorkload(),
-            'multimodal_vqa': MultimodalVQAWorkload(),
-            'microbenchmark': MicrobenchmarkWorkload(),
-        }
+        # Load workloads based on configuration
+        self._load_workloads()
 
         self.results = []
         self.successful_runs = 0
         self.failed_runs = 0
         self.measurement_errors = []
+
+    def _load_workloads(self):
+        """Load workloads based on configuration (real vs mock models)."""
+        if self.use_real_models and _REALISTIC_WORKLOADS_AVAILABLE:
+            print("📚 Using REAL HuggingFace models")
+            self.workloads = {
+                'llm_decode': RealisticLLMDecodeWorkload(use_real_model=True),
+                'llm_prefill': RealisticLLMPrefillWorkload(use_real_model=True),
+                'vision_cnn': RealisticVisionCNNWorkload(),
+                'multimodal_vqa': MultimodalVQAWorkload(),  # Falls back gracefully
+                'microbenchmark': MicrobenchmarkWorkload(),
+            }
+        elif self.use_real_models:
+            print("⚠️  Real models requested but not available, falling back to mock models")
+            self.workloads = {
+                'llm_decode': LLMDecodeWorkload(),
+                'llm_prefill': LLMPrefillWorkload(),
+                'vision_cnn': VisionCNNWorkload(),
+                'multimodal_vqa': MultimodalVQAWorkload(),
+                'microbenchmark': MicrobenchmarkWorkload(),
+            }
+        else:
+            print("📦 Using mock models (default)")
+            self.workloads = {
+                'llm_decode': LLMDecodeWorkload(),
+                'llm_prefill': LLMPrefillWorkload(),
+                'vision_cnn': VisionCNNWorkload(),
+                'multimodal_vqa': MultimodalVQAWorkload(),
+                'microbenchmark': MicrobenchmarkWorkload(),
+            }
 
     async def run_all(self, num_runs: int = 5, num_warmup: int = 2):
         """Run all baseline × workload combinations with proper measurement."""
@@ -91,90 +140,145 @@ class ComprehensiveEvaluation:
         total_experiments = num_baselines * num_workloads * num_runs
         completed_experiments = 0
 
-        print(f"🔬 Starting comprehensive evaluation (CORRECTED)...")
-        print(f"📊 Total experiments: {total_experiments}")
+        # Print configuration
+        mode = "REAL MODELS" if self.use_real_models else "MOCK MODELS"
+        network = "REAL NETWORK" if self.spawn_server else "DEVICE API"
+        print(f"🔬 Starting comprehensive evaluation...")
+        print(f"📊 Configuration:")
+        print(f"   Models: {mode}")
+        print(f"   Network: {network}")
+        print(f"   Total experiments: {total_experiments}")
         print(f"🔥 Warm-up runs per configuration: {num_warmup}")
         print(f"📁 Output directory: {self.output_dir}")
         print(f"{'='*80}")
 
-        for baseline_name, baseline in self.baselines.items():
-            for workload_name, workload in self.workloads.items():
-                print(f"\n🎯 Testing: {baseline_name} × {workload_name}")
+        # ✅ EXPLICIT INIT: Initialize Genie runtime BEFORE benchmarks
+        # This ensures:
+        # 1. Initialization cost is measured separately
+        # 2. Thread pool is ready before workloads
+        # 3. Server connection is established
+        # 4. GPU capabilities are known
+        print("\n🔧 Initializing Genie Runtime...")
+        try:
+            import genie
+            server_addr = 'localhost:5556' if self.spawn_server else None
+            init_result = genie.init(
+                server_address=server_addr,
+                auto_connect=self.spawn_server,
+                thread_pool_size=4,
+                profiling=False
+            )
+            if init_result.get('status') == 'success':
+                init_time = init_result.get('duration_ms', 'N/A')
+                print(f"✅ Genie initialized successfully in {init_time}ms")
+            else:
+                print(f"⚠️  Genie init failed: {init_result.get('error')}")
+        except Exception as e:
+            print(f"⚠️  Failed to initialize Genie: {e}")
 
-                # Load model if needed
-                if hasattr(workload, 'load_model') and getattr(workload, 'model', None) != 'microbenchmark':
-                    workload.load_model()
+        # Start server if needed
+        if self.spawn_server:
+            try:
+                from benchmarks.utils.server_spawner import RemoteServerManager
+                self.server_manager = RemoteServerManager()
+                self.server_manager.start()
+                print("🖥️  Remote server started on localhost:5556")
+            except Exception as e:
+                print(f"⚠️  Failed to start server: {e}")
+                print("    Falling back to device API execution")
+                self.spawn_server = False
 
-                # === WARM-UP PHASE ===
-                print(f"  ⏥ Warming up ({num_warmup} runs)...")
-                for warmup_run in range(num_warmup):
-                    try:
-                        _ = await self._run_single_experiment(
-                            baseline_name, baseline,
-                            workload_name, workload,
-                            -1,  # Mark as warmup
-                            is_warmup=True
-                        )
-                    except Exception as e:
-                        print(f"    ⚠️  Warm-up {warmup_run + 1} failed: {e}")
+        try:
+            # Configure baselines for network if needed
+            for baseline in self.baselines.values():
+                if hasattr(baseline, 'use_real_network'):
+                    baseline.use_real_network = self.spawn_server
 
-                # Clear GPU memory after warm-up
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    torch.cuda.synchronize()
+            for baseline_name, baseline in self.baselines.items():
+                for workload_name, workload in self.workloads.items():
+                    print(f"\n🎯 Testing: {baseline_name} × {workload_name}")
 
-                # === MEASUREMENT PHASE ===
-                print(f"  📊 Measuring ({num_runs} runs)...")
-                for run in range(num_runs):
-                    try:
-                        result = await self._run_single_experiment(
-                            baseline_name, baseline,
-                            workload_name, workload,
-                            run,
-                            is_warmup=False
-                        )
+                    # Load model if needed
+                    if hasattr(workload, 'load_model') and getattr(workload, 'model', None) != 'microbenchmark':
+                        workload.load_model()
 
-                        self.results.append(result)
-                        self.successful_runs += 1
-                        completed_experiments += 1
+                    # === WARM-UP PHASE ===
+                    print(f"  ⏥ Warming up ({num_warmup} runs)...")
+                    for warmup_run in range(num_warmup):
+                        try:
+                            _ = await self._run_single_experiment(
+                                baseline_name, baseline,
+                                workload_name, workload,
+                                -1,  # Mark as warmup
+                                is_warmup=True
+                            )
+                        except Exception as e:
+                            print(f"    ⚠️  Warm-up {warmup_run + 1} failed: {e}")
 
-                        latency = result.get('latency_ms', 'N/A')
-                        print(f"  ✅ Run {run + 1}/{num_runs} complete ({latency:.1f}ms)")
+                    # Clear GPU memory after warm-up
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        torch.cuda.synchronize()
 
-                    except Exception as e:
-                        print(f"  ❌ Run {run + 1}/{num_runs} failed: {e}")
-                        self.failed_runs += 1
-                        self.measurement_errors.append({
-                            'baseline': baseline_name,
-                            'workload': workload_name,
-                            'run': run,
-                            'error': str(e)
-                        })
+                    # === MEASUREMENT PHASE ===
+                    print(f"  📊 Measuring ({num_runs} runs)...")
+                    for run in range(num_runs):
+                        try:
+                            result = await self._run_single_experiment(
+                                baseline_name, baseline,
+                                workload_name, workload,
+                                run,
+                                is_warmup=False
+                            )
 
-                # Progress update
-                progress = (completed_experiments / total_experiments) * 100
-                print(f"  📈 Progress: {progress:.1f}% ({completed_experiments}/{total_experiments})")
+                            self.results.append(result)
+                            self.successful_runs += 1
+                            completed_experiments += 1
 
-        # Save results immediately
-        self._save_intermediate_results()
+                            latency = result.get('latency_ms', 'N/A')
+                            print(f"  ✅ Run {run + 1}/{num_runs} complete ({latency:.1f}ms)")
 
-        # Analyze and generate outputs
-        await self._analyze_results()
-        self._generate_paper_figures()
-        self._export_latex_tables()
+                        except Exception as e:
+                            print(f"  ❌ Run {run + 1}/{num_runs} failed: {e}")
+                            self.failed_runs += 1
+                            self.measurement_errors.append({
+                                'baseline': baseline_name,
+                                'workload': workload_name,
+                                'run': run,
+                                'error': str(e)
+                            })
 
-        # Print measurement error summary
-        if self.measurement_errors:
-            print(f"\n⚠️  MEASUREMENT ERRORS DETECTED ({len(self.measurement_errors)} total):")
-            for error in self.measurement_errors[:5]:  # Show first 5
-                print(f"  - {error['baseline']} × {error['workload']}: {error['error']}")
+                    # Progress update
+                    progress = (completed_experiments / total_experiments) * 100
+                    print(f"  📈 Progress: {progress:.1f}% ({completed_experiments}/{total_experiments})")
 
-        print(f"\n{'='*80}")
-        print("🎉 Evaluation complete!")
-        print(f"✅ Successful runs: {self.successful_runs}")
-        print(f"❌ Failed runs: {self.failed_runs}")
-        print(f"📁 Results saved to: {self.output_dir}/")
-        print(f"{'='*80}")
+            # Save results immediately
+            self._save_intermediate_results()
+
+            # Analyze and generate outputs
+            await self._analyze_results()
+            self._generate_paper_figures()
+            self._export_latex_tables()
+
+            # Print measurement error summary
+            if self.measurement_errors:
+                print(f"\n⚠️  MEASUREMENT ERRORS DETECTED ({len(self.measurement_errors)} total):")
+                for error in self.measurement_errors[:5]:  # Show first 5
+                    print(f"  - {error['baseline']} × {error['workload']}: {error['error']}")
+
+            print(f"\n{'='*80}")
+            print("🎉 Evaluation complete!")
+            print(f"✅ Successful runs: {self.successful_runs}")
+            print(f"❌ Failed runs: {self.failed_runs}")
+            print(f"📁 Results saved to: {self.output_dir}/")
+            print(f"{'='*80}")
+
+        finally:
+            # Clean up server if it was started
+            if self.server_manager:
+                print("\n🛑 Stopping remote server...")
+                self.server_manager.stop()
+                print("✓ Server stopped")
 
     async def _run_single_experiment(self, baseline_name: str, baseline,
                                       workload_name: str, workload, run: int,

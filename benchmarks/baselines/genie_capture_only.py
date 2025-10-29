@@ -12,6 +12,31 @@ from typing import Any, Dict, List
 from contextlib import contextmanager
 
 
+class ModelWrapper(nn.Module):
+    """Wrapper to extract tensor from complex outputs like CLIPOutput."""
+    
+    def __init__(self, model: nn.Module):
+        super().__init__()
+        self.model = model
+        
+    def forward(self, *args, **kwargs):
+        output = self.model(*args, **kwargs)
+        
+        # Extract tensor from CLIPOutput or similar namedtuples
+        if hasattr(output, 'logits_per_image'):
+            # CLIP model - return image logits
+            return output.logits_per_image
+        elif hasattr(output, 'logits'):
+            # Standard HuggingFace model with logits
+            return output.logits
+        elif hasattr(output, 'last_hidden_state'):
+            # BERT/encoder models
+            return output.last_hidden_state
+        else:
+            # Already a tensor or unknown type
+            return output
+
+
 class GenieCaptureOnlyBaseline:
     """
     Measure LazyTensor capture overhead.
@@ -45,12 +70,17 @@ class GenieCaptureOnlyBaseline:
             # For synthetic workloads, just return a mock output
             return torch.randn(1, 1000)  # Mock output
 
-        # Move model to remote device (triggers LazyTensor capture)
-        model = model.to(self.device)
+        # CRITICAL FIX: Wrap model to extract tensors from complex outputs
+        # This handles CLIPOutput, CausalLMOutput, etc.
+        wrapped_model = ModelWrapper(model)
+        
+        # Move wrapped model to remote device (triggers LazyTensor capture)
+        wrapped_model = wrapped_model.to(self.device)
         device_inputs = [inp.to(self.device) for inp in inputs]
 
         # This captures the computation graph
-        output = model(*device_inputs)
+        # The wrapper ensures we get a tensor output, not CLIPOutput
+        output = wrapped_model(*device_inputs)
 
         # Force local execution (no network transfer)
         if hasattr(output, '_materialize'):

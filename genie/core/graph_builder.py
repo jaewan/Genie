@@ -213,7 +213,30 @@ class HybridGraphBuilder:
             - Error handling and reporting
         """
         from .executor import execute_subgraph
-        return execute_subgraph(target_tensor)
+        
+        # Execute the graph
+        result = execute_subgraph(target_tensor)
+        
+        # ✅ AUTOMATIC COMPACTION AFTER MATERIALIZATION
+        # This prevents memory leaks in long-running workloads (e.g., LLM generation)
+        try:
+            from genie.memory import get_graph_compactor, MemoryPressure, get_memory_monitor
+            
+            monitor = get_memory_monitor()
+            stats = monitor.get_stats()
+            
+            # Trigger compaction if memory pressure is high or operation count threshold reached
+            if stats.pressure in (MemoryPressure.HIGH, MemoryPressure.CRITICAL):
+                compactor = get_graph_compactor()
+                if compactor:
+                    removed = compactor.compact()
+                    logger.info(f"Auto-compacted graph: removed {removed} materialized nodes")
+        
+        except Exception as e:
+            # Graceful degradation: don't fail execution if compaction has issues
+            logger.debug(f"Graph compaction skipped: {e}")
+        
+        return result
 
 
 def get_global_builder() -> HybridGraphBuilder:

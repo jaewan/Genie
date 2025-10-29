@@ -49,12 +49,20 @@ class RealisticLLMPrefillWorkload:
 
                 print(f"Loading {self.model_name}...")
                 self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+                
+                # CRITICAL FIX: Use explicit device placement, not device_map="auto"
+                # device_map="auto" can place on cuda:1 or other devices
                 self.model = AutoModel.from_pretrained(
                     self.model_name,
                     torch_dtype=torch.float16,
-                    device_map="auto"
+                    device_map=None              # No auto-mapping - explicit control
                 )
                 self.model.eval()
+
+                # CRITICAL FIX: Ensure model is on cuda:0
+                if torch.cuda.is_available():
+                    device = torch.device('cuda:0')
+                    self.model.to(device)
 
                 print(f"✓ Loaded {self.model_name}")
                 return True
@@ -66,6 +74,11 @@ class RealisticLLMPrefillWorkload:
         # Fallback to mock model
         self.model = self._create_mock_model()
         self.tokenizer = self._create_mock_tokenizer()
+        
+        # CRITICAL FIX: Ensure mock model is also on cuda:0
+        if torch.cuda.is_available():
+            self.model.to(torch.device('cuda:0'))
+        
         return False
 
     def _create_mock_model(self) -> nn.Module:
@@ -157,27 +170,33 @@ class RealisticLLMPrefillWorkload:
                 max_length: Optional[int] = None,
                 **kwargs
             ):
-                max_len = max_length or 512
+                # CRITICAL FIX: Use the provided max_length, don't default to 512
+                max_len = max_length if max_length is not None else 512
                 batch = []
+                attention_masks = []
                 
                 for text in texts:
                     # [CLS] + tokens + [SEP]
                     tokens = [101] + [103] * min(len(text.split()), max_len - 2) + [102]
-                    batch.append(tokens[:max_len])
+                    # Truncate to max_len if needed
+                    tokens = tokens[:max_len]
+                    batch.append(tokens)
+                    # Create attention mask (1 for real tokens, 0 for padding)
+                    attention_masks.append([1] * len(tokens))
                 
                 # Pad to same length
                 if padding and batch:
                     max_batch_len = max(len(b) for b in batch)
                     batch = [b + [0] * (max_batch_len - len(b)) for b in batch]
-                    attention_mask = [
-                        [1] * len(b) + [0] * (max_batch_len - len(b))
-                        for b in batch
+                    attention_masks = [
+                        m + [0] * (max_batch_len - len(m))
+                        for m in attention_masks
                     ]
 
                 # Return a simple dictionary that supports subscript access
                 return {
                     'input_ids': torch.tensor(batch),
-                    'attention_mask': torch.tensor(attention_mask),
+                    'attention_mask': torch.tensor(attention_masks),
                     'token_type_ids': torch.zeros_like(torch.tensor(batch))
                 }
 
@@ -227,11 +246,15 @@ class RealisticLLMPrefillWorkload:
             max_length=self.max_length
         )
 
+        # CRITICAL FIX: Ensure input is on the correct device
+        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        input_ids = batch_encodings['input_ids'].to(device)
+        
         # Return input_ids as a tensor (dict['input_ids'] extracts the tensor)
         if isinstance(batch_encodings, dict):
-            return [batch_encodings['input_ids']]
+            return [input_ids]
         # If tokenizer returns a proper object with input_ids attribute
-        return [batch_encodings.input_ids]
+        return [input_ids]
 
     def run_reference(self) -> torch.Tensor:
         """Reference implementation - GROUND TRUTH."""
