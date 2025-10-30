@@ -25,6 +25,34 @@ from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
+# ============================================================================
+# OPTIMIZATION: Module-level profiler caching to reduce per-call overhead
+# ============================================================================
+_profiler = None
+_profiler_lock = threading.Lock()
+
+def _get_profiler_cached():
+    """Get cached profiler instance (only import once per module load)."""
+    global _profiler, _profiler_lock
+    
+    # Fast path: profiler already cached
+    if _profiler is not None:
+        return _profiler
+    
+    # Slow path: first call - import and cache
+    with _profiler_lock:
+        if _profiler is not None:
+            return _profiler
+        
+        try:
+            from genie.profiling import get_detailed_profiler
+            _profiler = get_detailed_profiler() or False  # False = inactive profiler
+        except (ImportError, Exception):
+            _profiler = False  # Mark as no profiler available
+        
+        return _profiler if _profiler is not False else None
+
+
 # Thread-local storage to track when we're inside a LazyTensor factory method
 # This prevents infinite recursion when factory interceptor calls LazyTensor methods
 _in_lazy_factory = threading.local()
@@ -132,84 +160,101 @@ class FactoryInterceptor:
 
         @functools.wraps(original_func)
         def wrapper(*args, **kwargs):
-            device = kwargs.get('device')
+            # TODO(Jae) Delete profiling hooks later
+            # OPTIMIZATION: Cache profiler at module level to reduce import overhead
+            profiler = _get_profiler_cached()
+            profiler_active = profiler is not None
+            
+            if profiler_active:
+                component_name = f"factory_{func_name}"
+                profiler_context = profiler.profile_component(component_name)
+                profiler_context.__enter__()
+            else:
+                profiler_context = None
+            
+            try:
+                device = kwargs.get('device')
 
-            # CRITICAL FIX: Don't intercept meta or cpu devices
-            # These are used internally by PyTorch and LazyTensor for shape inference
-            if (device is not None and
-                (device == 'meta' or device == 'cpu' or
-                 (isinstance(device, torch.device) and device.type in ('meta', 'cpu')))):
-                # Convert torch.device to string for original function
-                if isinstance(device, torch.device):
-                    fixed_kwargs = kwargs.copy()
-                    fixed_kwargs['device'] = device.type
-                    return original_func(*args, **fixed_kwargs)
-                else:
-                    return original_func(*args, **kwargs)
-
-            # Check if we're inside executor materialization (skip interception in that case)
-            if _executor_module:
-                executor_active = getattr(_executor_module._in_executor, 'active', False)
-                if executor_active:
-                    # Inside executor - don't return LazyTensor, create concrete tensor
-                    # For remote devices, create on CPU instead
-                    if self._is_remote_device(device):
-                        # Create the tensor on CPU instead of remote device
-                        materialized_kwargs = kwargs.copy()
-                        materialized_kwargs['device'] = 'cpu'
-                        return original_func(*args, **materialized_kwargs)
+                # CRITICAL FIX: Don't intercept meta or cpu devices
+                # These are used internally by PyTorch and LazyTensor for shape inference
+                if (device is not None and
+                    (device == 'meta' or device == 'cpu' or
+                     (isinstance(device, torch.device) and device.type in ('meta', 'cpu')))):
+                    # Convert torch.device to string for original function
+                    if isinstance(device, torch.device):
+                        fixed_kwargs = kwargs.copy()
+                        fixed_kwargs['device'] = device.type
+                        return original_func(*args, **fixed_kwargs)
                     else:
-                        # For other devices, call original function
                         return original_func(*args, **kwargs)
 
-            # Check if we're already inside a LazyTensor factory method (prevent recursion)
-            if getattr(_in_lazy_factory, 'active', False):
-                # For remote devices, we need to handle them specially to avoid torch errors
-                if device is not None and ('remote_accelerator' in str(device) or 'privateuseone' in str(device)):
-                    # Return a placeholder - the LazyTensor constructor will handle this properly
-                    return torch.empty(1, device='meta')  # This will be replaced
-                # For meta devices during LazyTensor creation, don't intercept
-                if device == 'meta' or (isinstance(device, torch.device) and device.type == 'meta'):
+                # Check if we're inside executor materialization (skip interception in that case)
+                if _executor_module:
+                    executor_active = getattr(_executor_module._in_executor, 'active', False)
+                    if executor_active:
+                        # Inside executor - don't return LazyTensor, create concrete tensor
+                        # For remote devices, create on CPU instead
+                        if self._is_remote_device(device):
+                            # Create the tensor on CPU instead of remote device
+                            materialized_kwargs = kwargs.copy()
+                            materialized_kwargs['device'] = 'cpu'
+                            return original_func(*args, **materialized_kwargs)
+                        else:
+                            # For other devices, call original function
+                            return original_func(*args, **kwargs)
+
+                # Check if we're already inside a LazyTensor factory method (prevent recursion)
+                if getattr(_in_lazy_factory, 'active', False):
+                    # For remote devices, we need to handle them specially to avoid torch errors
+                    if device is not None and ('remote_accelerator' in str(device) or 'privateuseone' in str(device)):
+                        # Return a placeholder - the LazyTensor constructor will handle this properly
+                        return torch.empty(1, device='meta')  # This will be replaced
+                    # For meta devices during LazyTensor creation, don't intercept
+                    if device == 'meta' or (isinstance(device, torch.device) and device.type == 'meta'):
+                        return original_func(*args, **kwargs)
                     return original_func(*args, **kwargs)
+
+                # Check if should return LazyTensor
+                from .capture import is_capturing
+                if self._is_remote_device(device) or is_capturing():
+                    from .lazy_tensor import LazyTensor
+                    
+                    # ✅ TRIGGER ASYNC INIT: First Genie API call
+                    # This is one of the earliest points where Genie code is invoked
+                    # Initialize runtime on first remote tensor creation or capture
+                    from ..runtime.initialization import _ensure_async_init
+                    _ensure_async_init()
+
+                    # Set flag to prevent recursion
+                    _in_lazy_factory.active = True
+                    try:
+                        # Call LazyTensor factory method (FIX: Simplified - factory methods now handle size conversion)
+                        lazy_factory = getattr(LazyTensor, func_name, None)
+                        if lazy_factory is not None:
+                            return lazy_factory(*args, **kwargs)
+                        else:
+                            # Final fallback: generic LazyTensor creation with metadata
+                            from genie.core.metadata_capture import get_metadata_capture
+                            metadata = get_metadata_capture().capture_metadata(
+                                operation=f'aten::{func_name}',
+                                inputs=list(args),
+                                kwargs=kwargs
+                            )
+                            return LazyTensor(
+                                operation=f'aten::{func_name}',
+                                inputs=list(args),
+                                kwargs=kwargs,
+                                metadata=metadata  # ✅ NEW: Pass semantic metadata
+                            )
+                    finally:
+                        # Always clear the flag
+                        _in_lazy_factory.active = False
+                # ✅ Only reached if NOT capturing AND NOT remote device
                 return original_func(*args, **kwargs)
-
-            # Check if should return LazyTensor
-            from .capture import is_capturing
-            if self._is_remote_device(device) or is_capturing():
-                from .lazy_tensor import LazyTensor
-                
-                # ✅ TRIGGER ASYNC INIT: First Genie API call
-                # This is one of the earliest points where Genie code is invoked
-                # Initialize runtime on first remote tensor creation or capture
-                from ..runtime.initialization import _ensure_async_init
-                _ensure_async_init()
-
-                # Set flag to prevent recursion
-                _in_lazy_factory.active = True
-                try:
-                    # Call LazyTensor factory method (FIX: Simplified - factory methods now handle size conversion)
-                    lazy_factory = getattr(LazyTensor, func_name, None)
-                    if lazy_factory is not None:
-                        return lazy_factory(*args, **kwargs)
-                    else:
-                        # Final fallback: generic LazyTensor creation with metadata
-                        from genie.core.metadata_capture import get_metadata_capture
-                        metadata = get_metadata_capture().capture_metadata(
-                            operation=f'aten::{func_name}',
-                            inputs=list(args),
-                            kwargs=kwargs
-                        )
-                        return LazyTensor(
-                            operation=f'aten::{func_name}',
-                            inputs=list(args),
-                            kwargs=kwargs,
-                            metadata=metadata  # ✅ NEW: Pass semantic metadata
-                        )
-                finally:
-                    # Always clear the flag
-                    _in_lazy_factory.active = False
-            # ✅ Only reached if NOT capturing AND NOT remote device
-            return original_func(*args, **kwargs)
+            finally:
+                # TODO(Jae) Delete profiling hooks later
+                if profiler_context is not None:
+                    profiler_context.__exit__(None, None, None)
 
         return wrapper
 

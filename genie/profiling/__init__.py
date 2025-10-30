@@ -1,12 +1,10 @@
 """
-Comprehensive profiling framework for Genie operations.
+Genie profiling module for measuring component overhead.
 
-Tracks:
-- End-to-end latency breakdown
-- Per-component timing (serialize, transfer, execute, deserialize)
-- Resource utilization (GPU %, network bandwidth, CPU %)
-- Queue depths and contention
-- Memory usage patterns
+Exports:
+- GenieProfiler: End-to-end operation profiling
+- DetailedComponentProfiler: Fine-grained component timing
+- PerformanceAnalyzer: Bottleneck identification and recommendations
 """
 
 from .profiler import (
@@ -28,4 +26,5 @@ __all__ = [
     "ResourceSnapshot",
     "GPUMonitor",
     "NetworkMonitor",
+    "PerformanceAnalyzer",
 ]
