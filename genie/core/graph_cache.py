@@ -173,11 +173,15 @@ class GraphCache:
         start = time.perf_counter()
         
         # Capture graph using existing mechanism
-        import genie
-        with genie.capture():
-            _ = model(sample_input)
+        from .capture import capture, get_graph
+        with capture():
+            # Handle both single tensor and list of tensors
+            if isinstance(sample_input, (list, tuple)):
+                _ = model(*sample_input)
+            else:
+                _ = model(sample_input)
         
-        graph = genie.get_graph()
+        graph = get_graph()
         capture_time = (time.perf_counter() - start) * 1000
         
         op_count = len(graph.nodes) if hasattr(graph, 'nodes') else 0

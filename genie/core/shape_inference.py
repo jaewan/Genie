@@ -112,9 +112,19 @@ class ShapeInferenceV2:
         for inp in inputs:
             if hasattr(inp, 'shape') and hasattr(inp, 'dtype'):
                 # LazyTensor or regular tensor
+                # ✅ FIX: Access _shape directly to avoid recursion
+                if type(inp).__name__ == 'LazyTensor':
+                    # For LazyTensor, access _shape directly to avoid recursion
+                    shape = object.__getattribute__(inp, '_shape')
+                    dtype = object.__getattribute__(inp, '_dtype')
+                else:
+                    # For regular tensors, use properties
+                    shape = inp.shape
+                    dtype = inp.dtype
+                
                 meta_tensor = torch.empty(
-                    inp.shape,
-                    dtype=inp.dtype,
+                    shape,
+                    dtype=dtype,
                     device='meta'
                 )
                 meta_inputs.append(meta_tensor)
@@ -314,15 +324,20 @@ def _infer_softmax_shape(inputs: List[Any], kwargs: Dict[str, Any]) -> torch.Siz
     
     ✅ FIX: Softmax was failing with meta tensors due to device mismatch.
     """
+    logger.debug(f"🔍 _infer_softmax_shape called with {len(inputs)} inputs")
+    
     if len(inputs) < 1:
         raise ShapeInferenceError("Softmax needs at least 1 input")
     
     input_shape = inputs[0].shape if hasattr(inputs[0], 'shape') else torch.Size([])
     
+    logger.debug(f"🔍 Softmax input shape: {input_shape}")
+    
     if not input_shape:
         raise ShapeInferenceError(f"Invalid shape for softmax: {input_shape}")
     
     # Softmax preserves input shape
+    logger.debug(f"🔍 Softmax returning shape: {input_shape}")
     return input_shape
 
 

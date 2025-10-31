@@ -106,21 +106,22 @@ class SemanticAnnotator:
         # Hash structure (edges by node relationships)
         node_inputs = []
         for node in graph.nodes():
-            input_ids = sorted([getattr(inp, 'id', str(id(inp))) for inp in node.inputs])
-            node_inputs.append((getattr(node, 'id', str(id(node))), node.operation, tuple(input_ids)))
+            # ✅ FIX: Convert all IDs to strings to avoid type comparison errors
+            input_ids = sorted([str(getattr(inp, 'id', id(inp))) for inp in node.inputs])
+            node_inputs.append((str(getattr(node, 'id', id(node))), node.operation, tuple(input_ids)))
         node_inputs.sort()
         hasher.update(str(node_inputs).encode())
 
         # Hash operations sequence
         ops = sorted([
-            (getattr(node, 'id', str(id(node))), getattr(node, 'operation', 'unknown'))
+            (str(getattr(node, 'id', id(node))), getattr(node, 'operation', 'unknown'))
             for node in graph.nodes()
         ])
         hasher.update(str(ops).encode())
 
         # Hash shapes (if available)
         shapes = sorted([
-            (getattr(node, 'id', str(id(node))), str(getattr(node, 'shape', None)))
+            (str(getattr(node, 'id', id(node))), str(getattr(node, 'shape', None)))
             for node in graph.nodes()
         ])
         hasher.update(str(shapes).encode())
@@ -402,15 +403,16 @@ class SemanticAnnotator:
             phase_obj = phases.get(node.id)
             phase_value = phase_obj.value if hasattr(phase_obj, 'value') else str(phase_obj) if phase_obj else None
 
+            # ✅ FIX: Use getattr() instead of .get() to support both dict and MetadataPlaceholder
+            node_meta = getattr(node, 'metadata', {})
             metadata = NodeMetadata(
                 node_id=node.id,
                 phase=phase_value,
-                semantic_role=getattr(node, 'metadata', {}).get('semantic_role'),
-                modality=getattr(node, 'metadata', {}).get('modality'),
+                semantic_role=getattr(node_meta, 'semantic_role', None),
+                modality=getattr(node_meta, 'modality', None),
             )
 
-            node_meta = getattr(node, 'metadata', {})
-            metadata.optimization_hints = node_meta.get('optimization_hints', {})
+            metadata.optimization_hints = getattr(node_meta, 'optimization_hints', {})
 
             self.metadata_registry.register_metadata(node.id, metadata)
 
@@ -457,15 +459,16 @@ class SemanticAnnotator:
             phase_obj = phases.get(node.id)
             phase_value = phase_obj.value if hasattr(phase_obj, 'value') else str(phase_obj) if phase_obj else None
 
+            # ✅ FIX: Use getattr() instead of .get() to support both dict and MetadataPlaceholder
+            node_meta = getattr(node, 'metadata', {})
             metadata = NodeMetadata(
                 node_id=node.id,
                 phase=phase_value,
-                semantic_role=getattr(node, 'metadata', {}).get('semantic_role'),
-                modality=getattr(node, 'metadata', {}).get('modality'),
+                semantic_role=getattr(node_meta, 'semantic_role', None),
+                modality=getattr(node_meta, 'modality', None),
             )
 
-            node_meta = getattr(node, 'metadata', {})
-            metadata.optimization_hints = node_meta.get('optimization_hints', {})
+            metadata.optimization_hints = getattr(node_meta, 'optimization_hints', {})
 
             self.metadata_registry.register_metadata(node.id, metadata)
 

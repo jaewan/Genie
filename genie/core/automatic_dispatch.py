@@ -50,6 +50,11 @@ class AutomaticDispatch:
         'aten::print',
         'aten::save',
         'aten::load',
+        
+        # ✅ FIX: Operations that fail with meta tensors
+        # softmax returns empty shape when called with meta tensors
+        'aten::softmax',
+        'aten::_softmax',
     }
     
     @classmethod
@@ -140,6 +145,15 @@ class AutomaticDispatch:
                 shape = x.shape if hasattr(x, 'shape') else torch.Size([])
                 dtype = x.dtype if hasattr(x, 'dtype') else torch.float32
                 
+                # ✅ FIX: If shape is empty, this LazyTensor hasn't been inferred yet
+                # We can't create a valid meta tensor, so return None to signal failure
+                if not shape or len(shape) == 0:
+                    # Check if this is a scalar operation (which legitimately has empty shape)
+                    operation = object.__getattribute__(x, '_operation') if hasattr(x, '_operation') else ''
+                    if operation not in ('aten::tensor', 'aten::scalar'):
+                        logger.debug(f"Cannot convert LazyTensor to meta: empty shape for {operation}")
+                        raise ValueError(f"LazyTensor has uninitialized shape for operation {operation}")
+                
                 # Create meta tensor with same metadata
                 # Disable interception to avoid detach() issues
                 from .interception_control import disable_interception, InterceptionContext
@@ -203,6 +217,10 @@ class AutomaticDispatch:
                 # Get metadata from meta tensor
                 shape = meta_obj.shape
                 dtype = meta_obj.dtype
+                
+                # ✅ DEBUG: Log shape for softmax
+                if 'softmax' in op_name:
+                    logger.info(f"🔍 Automatic dispatch for {op_name}: meta_obj.shape = {shape}")
                 
                 # Create LazyTensor with inferred metadata
                 from .metadata_capture import get_metadata_capture

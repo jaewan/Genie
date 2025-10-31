@@ -102,8 +102,9 @@ class CostEstimator:
         tensor = getattr(node, 'tensor', node)
 
         # Dispatch to operation-specific estimator
+        # ✅ FIX: Pass node (not tensor) to matmul estimator so it has access to inputs
         if 'matmul' in op or 'mm' in op or 'linear' in op:
-            return self._estimate_matmul(tensor)
+            return self._estimate_matmul(node)
         elif 'conv' in op:
             return self._estimate_conv(tensor)
         elif 'softmax' in op and self._is_attention_context(node):
@@ -167,10 +168,15 @@ class CostEstimator:
         # Fallback to manual calculation
         inputs = getattr(tensor, 'inputs', [])
         if len(inputs) < 2:
+            logger.debug(f"Matmul node has {len(inputs)} inputs, falling back to generic estimate")
             return self._estimate_generic(tensor)
 
         shape_a = getattr(inputs[0], 'shape', None)
         shape_b = getattr(inputs[1], 'shape', None)
+
+        if not shape_a or not shape_b:
+            logger.debug(f"Matmul inputs missing shapes: shape_a={shape_a}, shape_b={shape_b}, falling back to generic")
+            return self._estimate_generic(tensor)
 
         if shape_a and shape_b:
             # Handle linear operations (A @ B where B is weight matrix)

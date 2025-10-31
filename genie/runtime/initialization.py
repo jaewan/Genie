@@ -133,7 +133,15 @@ def init(
         # Get or create event loop
         try:
             loop = asyncio.get_running_loop()
-        except RuntimeError:
+            # If we're in an async context, caller should use init_async() directly
+            raise RuntimeError(
+                "Cannot call genie.init() from within an async context. "
+                "Use 'await genie.runtime.initialization.init_async()' instead."
+            )
+        except RuntimeError as e:
+            if "Cannot call genie.init()" in str(e):
+                raise
+            # No running loop, create one
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
         

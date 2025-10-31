@@ -133,6 +133,10 @@ class ConcreteGraphImpl(GenieGraph):
             self._compute_topological_order()
         return self._topological_order
     
+    def topological_sort(self) -> List[ConcreteNode]:
+        """Get nodes in execution order (alias for backward compatibility)."""
+        return self.topological_order()
+    
     def _compute_topological_order(self) -> None:
         """Compute topological order using Kahn's algorithm."""
         # Build in-degree map
@@ -215,6 +219,10 @@ class FXGraphAdapter(GenieGraph):
         if self._topological_order_cache is None:
             self._topological_order_cache = list(self.nodes())
         return self._topological_order_cache
+    
+    def topological_sort(self) -> List[NodeProtocol]:
+        """Get nodes in execution order (alias for backward compatibility)."""
+        return self.topological_order()
 
     @property
     def num_nodes(self) -> int:
@@ -260,6 +268,10 @@ class DictGraphAdapter(GenieGraph):
     def topological_order(self) -> List[DictNodeAdapter]:
         """Get nodes in order (assuming dict preserves order)."""
         return list(self.nodes())
+    
+    def topological_sort(self) -> List[DictNodeAdapter]:
+        """Get nodes in order (alias for backward compatibility)."""
+        return self.topological_order()
 
     @property
     def num_nodes(self) -> int:
@@ -347,6 +359,10 @@ class _SubgraphAdapter(GenieGraph):
         """Get subgraph nodes in topological order."""
         return [n for n in self._parent.topological_order() if n.id in self._node_ids]
     
+    def topological_sort(self) -> List[NodeProtocol]:
+        """Get subgraph nodes in topological order (alias for backward compatibility)."""
+        return self.topological_order()
+    
     @property
     def num_nodes(self) -> int:
         return len(self._node_ids)
@@ -401,6 +417,7 @@ class LazyDAGAdapter(GenieGraph):
         """Initialize with root LazyTensor."""
         self.root_tensor = root_tensor
         self._nodes_list = []
+        self.backend_type = 'lazy_dag'  # ✅ FIX: Add backend_type for test compatibility
         if root_tensor is not None:
             self._collect_nodes()
     
@@ -444,8 +461,13 @@ class LazyDAGAdapter(GenieGraph):
     
     def topological_order(self) -> List:
         """Get nodes in topological order."""
-        # Already collected in reverse topological order
-        return list(reversed(self._nodes_list))
+        # ✅ FIX: _collect_nodes uses post-order traversal (inputs first, then node)
+        # This already gives correct topological order, no need to reverse
+        return list(self._nodes_list)
+    
+    def topological_sort(self) -> List:
+        """Get nodes in topological order (alias for backward compatibility)."""
+        return self.topological_order()
 
     @property
     def num_nodes(self) -> int:

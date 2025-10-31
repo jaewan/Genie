@@ -313,7 +313,10 @@ def _create_shape_cache_key(op: Any, inputs: tuple) -> str:
         for inp in inputs:
             if isinstance(inp, LazyTensor):
                 # Lazy tensor: use shape and dtype
-                input_sigs.append(f"L{tuple(inp.shape)}:{inp.dtype}")
+                # ✅ FIX: Access _shape directly to avoid recursion
+                shape = object.__getattribute__(inp, '_shape')
+                dtype = object.__getattribute__(inp, '_dtype')
+                input_sigs.append(f"L{tuple(shape) if shape else ()}:{dtype}")
             elif isinstance(inp, torch.Tensor):
                 # Concrete tensor: use shape and dtype
                 input_sigs.append(f"T{tuple(inp.shape)}:{inp.dtype}")
@@ -381,10 +384,13 @@ def _cached_shape_inference(op: Any, inputs: tuple,
         if hasattr(op, '__name__') and op.__name__ in ('relu', 'sigmoid', 'tanh', 'abs', 'neg', 'exp', 'log'):
             if inputs and isinstance(inputs[0], LazyTensor):
                 # Shape preserved from first input
-                _shape_cache_hits += 1
-                if profiler_active:
-                    profiler.profile_component("shape_inference_fast_path").__enter__().__exit__(None, None, None)
-                return inputs[0].shape
+                # ✅ FIX: Access _shape directly to avoid recursion
+                input_shape = object.__getattribute__(inputs[0], '_shape')
+                if input_shape is not None:
+                    _shape_cache_hits += 1
+                    if profiler_active:
+                        profiler.profile_component("shape_inference_fast_path").__enter__().__exit__(None, None, None)
+                        return input_shape
         
         # Fast-path 2: Reduction operations
         if hasattr(op, '__name__') and op.__name__ in ('sum', 'mean', 'max', 'min'):
@@ -571,6 +577,17 @@ class LazyTensor(torch.Tensor):
             # Default to CPU if no device specified
             if logical_device is None:
                 logical_device = torch.device('cpu')
+            
+            # ✅ FIX: Map remote_accelerator to actual device before torch.device()
+            # PyTorch doesn't recognize remote_accelerator, so we map it to cuda/cpu
+            if isinstance(logical_device, str) and 'remote_accelerator' in logical_device:
+                # Map remote_accelerator:X to cuda:X
+                if ':' in logical_device:
+                    device_id = logical_device.split(':')[1]
+                    logical_device = f'cuda:{device_id}'
+                else:
+                    logical_device = 'cuda:0'  # Default to cuda:0
+                logger.debug(f"Mapped remote_accelerator to {logical_device}")
             
             # Normalize to torch.device
             if isinstance(logical_device, str):
@@ -1233,7 +1250,10 @@ class LazyTensor(torch.Tensor):
             
             try:
                 inferred_shape = ShapeInference.infer_shape(op_name, list(args), kwargs)
-            except Exception:
+                if op_name == 'aten::softmax':
+                    logger.info(f"🔍 Softmax shape inference result: {inferred_shape}")
+            except Exception as e:
+                logger.warning(f"Shape inference failed for {op_name}: {e}", exc_info=True)
                 inferred_shape = torch.Size([])
             
             # Infer dtype using ShapeInference
@@ -1253,6 +1273,9 @@ class LazyTensor(torch.Tensor):
             except Exception:
                 inferred_device = torch.device('cpu')
 
+            if op_name == 'aten::softmax':
+                logger.info(f"🔍 Creating LazyTensor for softmax with shape: {inferred_shape}")
+            
             result = cls(
                 operation=op_name,
                 inputs=list(args),
@@ -1262,6 +1285,10 @@ class LazyTensor(torch.Tensor):
                 device=inferred_device,
                 metadata=metadata  # ✅ NEW: Pass semantic metadata
             )
+            
+            if op_name == 'aten::softmax':
+                logger.info(f"🔍 Created LazyTensor for softmax, result.shape: {result.shape}")
+            
             return result
         finally:
             _interception_context.context = prev_context
@@ -1346,7 +1373,14 @@ class LazyTensor(torch.Tensor):
             require_grad=False  # Disable autograd for now (Phase 2 addition)
         )
 
-        # Store original device on wrapper (same pattern as __new__)
+        # ✅ FIX: Set logical device abstraction (same as __new__)
+        # Store the logical device (what PyTorch expects)
+        logical_device = original_device if original_device else torch.device('cpu')
+        if isinstance(logical_device, str):
+            logical_device = torch.device(logical_device) if 'remote_accelerator' not in logical_device else torch.device('cpu')
+        
+        object.__setattr__(wrapper, '_logical_device', logical_device)
+        object.__setattr__(wrapper, '_physical_device', torch.device('meta'))
         object.__setattr__(wrapper, '_original_device', original_device)
 
         # Replace the original device in kwargs with the processed device for __init__
@@ -1422,7 +1456,14 @@ class LazyTensor(torch.Tensor):
             require_grad=False  # Disable autograd for now (Phase 2 addition)
         )
 
-        # Store original device on wrapper (same pattern as __new__)
+        # ✅ FIX: Set logical device abstraction (same as __new__)
+        # Store the logical device (what PyTorch expects)
+        logical_device = original_device if original_device else torch.device('cpu')
+        if isinstance(logical_device, str):
+            logical_device = torch.device(logical_device) if 'remote_accelerator' not in logical_device else torch.device('cpu')
+        
+        object.__setattr__(wrapper, '_logical_device', logical_device)
+        object.__setattr__(wrapper, '_physical_device', torch.device('meta'))
         object.__setattr__(wrapper, '_original_device', original_device)
 
         # Replace the original device in kwargs with the processed device for __init__

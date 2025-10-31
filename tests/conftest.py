@@ -115,6 +115,34 @@ def reset_random_seeds():
         torch.cuda.manual_seed_all(42)
 
 
+@pytest.fixture(autouse=True)
+def reset_genie_state():
+    """Reset genie state before each test to prevent state accumulation."""
+    # Clear any cached state
+    import genie
+    from genie.core import lazy_tensor
+    
+    # Reset shape inference cache
+    if hasattr(lazy_tensor, '_shape_inference_cache'):
+        lazy_tensor._shape_inference_cache.clear()
+    
+    # Reset shape cache statistics
+    if hasattr(lazy_tensor, '_shape_cache_hits'):
+        lazy_tensor._shape_cache_hits = 0
+    if hasattr(lazy_tensor, '_shape_cache_misses'):
+        lazy_tensor._shape_cache_misses = 0
+    
+    # Reset circuit breaker
+    if hasattr(lazy_tensor, '_shape_inference_circuit_breaker'):
+        lazy_tensor._shape_inference_circuit_breaker['failures'] = 0
+    
+    yield
+    
+    # Cleanup after test
+    if hasattr(lazy_tensor, '_shape_inference_cache'):
+        lazy_tensor._shape_inference_cache.clear()
+
+
 def get_free_port():
     """Get free port for testing.
 

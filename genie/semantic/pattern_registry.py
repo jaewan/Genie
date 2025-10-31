@@ -234,15 +234,17 @@ class PatternRegistry:
 		patterns_tried = 0
 
 		# Extract graph properties for hierarchical indexing
+		# ✅ FIX: Convert iterator to list to avoid "iterator has no len()" error
+		nodes_list = list(graph.nodes())
 		graph_ops = frozenset(
 			node.operation.replace('aten::', '')
-			for node in graph.nodes()
+			for node in nodes_list
 		)
-		graph_size = len(graph.nodes())
+		graph_size = len(nodes_list)
 		# Skip cycle detection and max fanout for now (complex to compute with unified API)
 		has_cycles = False  # Conservative assumption
 		max_fanout = 10    # Conservative assumption
-		graph_hash = str(hash(frozenset((node.id for node in graph.nodes()))))  # Stable hash
+		graph_hash = str(hash(frozenset((node.id for node in nodes_list))))  # Stable hash
 
 		# Get candidates from hierarchical index (reduces from O(n) to O(log n))
 		with self._lock:  # Read lock for thread safety

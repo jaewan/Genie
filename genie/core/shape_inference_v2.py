@@ -112,9 +112,19 @@ class ShapeInferenceV2:
         for inp in inputs:
             if hasattr(inp, 'shape') and hasattr(inp, 'dtype'):
                 # LazyTensor or regular tensor
+                # ✅ FIX: Access _shape directly to avoid recursion
+                if type(inp).__name__ == 'LazyTensor':
+                    # For LazyTensor, access _shape directly to avoid recursion
+                    shape = object.__getattribute__(inp, '_shape')
+                    dtype = object.__getattribute__(inp, '_dtype')
+                else:
+                    # For regular tensors, use properties
+                    shape = inp.shape
+                    dtype = inp.dtype
+                
                 meta_tensor = torch.empty(
-                    inp.shape,
-                    dtype=inp.dtype,
+                    shape,
+                    dtype=dtype,
                     device='meta'
                 )
                 meta_inputs.append(meta_tensor)

@@ -347,7 +347,10 @@ def execute_model(model, inputs, use_cache=True, use_blocks=True, **kwargs):
         return executor.execute_graph(graph, inputs)
     except Exception:
         # Fallback: Direct model call (works without full Genie setup)
-        return model(inputs)
+        if isinstance(inputs, (list, tuple)):
+            return model(*inputs)
+        else:
+            return model(inputs)
 
 
 def invalidate_model_cache(model):

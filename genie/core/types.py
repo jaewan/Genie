@@ -21,6 +21,7 @@ import torch
 class ExecutionPhase(str, Enum):
     """Semantic execution phases for operation classification."""
     UNKNOWN = "unknown"
+    FORWARD = "forward"  # General forward pass (not specialized)
     LLM_PREFILL = "llm_prefill"  # Parallel attention over input sequence
     LLM_DECODE = "llm_decode"    # Sequential token generation with KV cache
     VISION_ENCODING = "vision_encoding"  # Image feature extraction

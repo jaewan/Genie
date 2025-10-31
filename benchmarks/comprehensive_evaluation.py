@@ -142,17 +142,35 @@ class ComprehensiveEvaluation:
         print(f"📁 Output directory: {self.output_dir}")
         print(f"{'='*80}")
 
-        # ✅ EXPLICIT INIT: Initialize Genie runtime BEFORE benchmarks
+        # Start server FIRST if needed (before init tries to connect)
+        if self.spawn_server:
+            try:
+                from benchmarks.utils.server_spawner import RemoteServerManager
+                self.server_manager = RemoteServerManager()
+                print("\n🖥️  Starting remote server on localhost:5556...")
+                if self.server_manager.start():
+                    print("✅ Remote server started successfully")
+                else:
+                    print("⚠️  Failed to start server")
+                    print("    Falling back to device API execution")
+                    self.spawn_server = False
+            except Exception as e:
+                print(f"⚠️  Failed to start server: {e}")
+                print("    Falling back to device API execution")
+                self.spawn_server = False
+
+        # ✅ EXPLICIT INIT: Initialize Genie runtime AFTER server is ready
         # This ensures:
-        # 1. Initialization cost is measured separately
-        # 2. Thread pool is ready before workloads
-        # 3. Server connection is established
-        # 4. GPU capabilities are known
+        # 1. Server is running before we try to connect
+        # 2. Initialization cost is measured separately
+        # 3. Thread pool is ready before workloads
+        # 4. Server connection is established
+        # 5. GPU capabilities are known
         print("\n🔧 Initializing Genie Runtime...")
         try:
-            import genie
+            from genie.runtime.initialization import init_async
             server_addr = 'localhost:5556' if self.spawn_server else None
-            init_result = genie.init(
+            init_result = await init_async(
                 server_address=server_addr,
                 auto_connect=self.spawn_server,
                 thread_pool_size=4,
@@ -165,18 +183,6 @@ class ComprehensiveEvaluation:
                 print(f"⚠️  Genie init failed: {init_result.get('error')}")
         except Exception as e:
             print(f"⚠️  Failed to initialize Genie: {e}")
-
-        # Start server if needed
-        if self.spawn_server:
-            try:
-                from benchmarks.utils.server_spawner import RemoteServerManager
-                self.server_manager = RemoteServerManager()
-                self.server_manager.start()
-                print("🖥️  Remote server started on localhost:5556")
-            except Exception as e:
-                print(f"⚠️  Failed to start server: {e}")
-                print("    Falling back to device API execution")
-                self.spawn_server = False
 
         try:
             # Configure baselines for network if needed

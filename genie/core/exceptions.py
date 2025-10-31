@@ -124,12 +124,47 @@ class ExecutionException(GenieException):
     pass
 
 
-# Old Result class for compatibility (deprecated, use Ok/Err instead)
+# ============================================================================
+# RESULT TYPE SYSTEM - USAGE GUIDE
+# ============================================================================
+#
+# Genie has TWO result handling systems (both are valid):
+#
+# 1. RESULT CLASS (Lines 128-174) - Simple, Backward Compatible
+#    - Used by: Semantic analysis, pattern matching, optimizer
+#    - Import: from genie.core.exceptions import Result
+#    - Usage: Result.ok(value), Result.err(error)
+#    - Type hint: Result[T] (documents intent, not enforced at runtime)
+#    - Example:
+#        def match_patterns(...) -> Result[List[MatchedPattern]]:
+#            return Result.ok(matches)
+#
+# 2. OK/ERR CLASSES (Lines 182-294) - Modern, Rust-inspired
+#    - Used by: Scheduler, new modules
+#    - Import: from genie.core.exceptions import Ok, Err
+#    - Usage: Ok(value), Err(error)
+#    - Type hint: ResultType[T, E] = Union[Ok[T], Err[E]]
+#    - Example:
+#        def schedule(...) -> ResultType[Plan, SchedulingError]:
+#            return Ok(plan)
+#
+# IMPORTANT: Don't mix systems in the same module. Pick one and stick with it.
+#
+# Why both? Historical reasons. Semantic module was built with Result class,
+# scheduler was built with Ok/Err. Both work fine. Future: may unify to Ok/Err.
+# ============================================================================
+
+# Result class for semantic analysis (backward compatible)
 class Result:
     """
-    Deprecated: Use Ok/Err types instead.
+    Simple Result type for explicit error handling.
     
-    Kept for backward compatibility only.
+    Used by semantic analysis module. For new code, consider using Ok/Err classes.
+    
+    Usage:
+        result = Result.ok(value)
+        if result.is_ok:
+            value = result.unwrap()
     """
     
     def __init__(self, value=None, error=None):
@@ -294,8 +329,9 @@ class Err(Generic[E]):
         return f"Err({repr(self.error)}, context={self.context})"
 
 
-# Type alias: Result[T, E] = Union[Ok[T], Err[E]]
-Result = Union[Ok[T], Err[E]]
+# Type alias for Ok/Err union (use ResultType for type annotations with Ok/Err)
+# Note: Result class (lines 128-174) is separate and used by semantic module
+ResultType = Union[Ok[T], Err[E]]
 
 
 # ============================================================================
