@@ -30,8 +30,8 @@ Framework-specific frontends (we prototype PyTorch) capture application intent a
 annotating it with high-level cues like execution phase and data residency.
 A pluggable scheduler consumes the SRG to make intelligent placement and data movement decisions, exploiting semantic cues to reduce data motion and expose parallelism.
 The scheduler also enables fleet-wide, multi-tenant optimization when used at datacenter scale by talking to a global coordinator.
-Backends execute the plan on remote accelerators via user-space networking. 
-\sys supports commodity clients (RNIC optional) and assumes RNIC-equipped disaggregated servers; when RDMA and GPUDirect are available, the server datapath achieves NIC-to-GPU zero-copy.
+Backends execute the plan on remote accelerators via reliable network transport.
+\sys's current PyTorch prototype uses TCP as a portable, vendor-agnostic transport mechanism. Future versions will integrate DPDK's user-space networking stack with GPUDirect RDMA support to achieve near-zero-copy data movement between GPUs and NICs when specialized hardware is available.
 Because the SRG represents a complete, replayable lineage of the computation, this architecture also provides a natural foundation for targeted, lineage-based fault tolerance.
 
 Together, these ideas chart a path where developers write standard framework code, while a semantics-aware runtime and scheduler decide what to run, where, and when---turning disaggregation from a hardware trick into an application-informed systems capability.
@@ -134,14 +134,13 @@ A critical source of overhead in accelerator disaggregation is redundant data mo
 \sys allocates tensors in network-ready pinned buffers at creation time, avoiding reactive pinning and extra copies.
 Remote-sesident objects (weights, KV caches, etc) are materialized once and referenced by opaque handles.
 
-\sys proactively integrates tensor allocation with a user-space networking stack (DPDK) from the outset. 
-Specifically, when an application creates a tensor, \sys intercepts this operation and directly allocates the tensor in pinned, network-ready host memory managed by DPDK. 
-This proactive approach completely eliminates the initial copy overhead associated with reactive pinning (calling \texttt{pin\_memory()} post-hoc).
+\heading{Current Implementation (PyTorch Prototype):}
+The current implementation uses TCP for network transport as a reliable, portable fallback. This design choice prioritizes compatibility and ease of deployment over raw performance. When application creates a tensor, \sys intercepts this operation and manages the tensor through the networking stack. While TCP introduces additional latency compared to specialized networking solutions, it provides a complete, working prototype of semantic-driven disaggregation that can run on any infrastructure.
 
-To achieve a true zero-copy data path between GPUs and NICs, \sys leverages DPDK's \texttt{gpudev} abstraction, which provides a vendor-agnostic interface for GPU memory management and data transfers.
-Under the hood, \texttt{gpudev} integrates vendor-specific technologies such as NVIDIA GPUDirect RDMA, enabling NICs to directly DMA data into GPU memory without intermediate CPU involvement.
-Importantly, this capability relies on vendor-supported GPU-NIC integration mechanisms and appropriate OS-level configurations (e.g., IOMMU settings, PCIe ACS configurations).
-Clients can be equipped with commodity NICs without RDMA capabilities but still take advantage of zero-copy transfers.
+\heading{Future Work (DPDK Zero-Copy):}
+Future versions will integrate \sys with DPDK's user-space networking stack and \texttt{gpudev} abstraction for zero-copy GPU memory transfers. This enhancement will leverage vendor-specific technologies such as NVIDIA GPUDirect RDMA to enable NICs to directly DMA data into GPU memory without intermediate CPU involvement, significantly reducing transfer latency. Clients can be equipped with commodity NICs without RDMA capabilities and still benefit from improved transfer performance through DPDK's optimized networking stack.
+
+Importantly, these high-performance networking capabilities rely on vendor-supported GPU-NIC integration mechanisms and appropriate OS-level configurations (e.g., IOMMU settings, PCIe ACS configurations), making them optional for \sys deployments.
 
 The backend executes kernels, orchestrates scheduled tran\-sfers, and tracks per-node completion and resource usage.
 

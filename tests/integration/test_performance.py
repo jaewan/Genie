@@ -22,7 +22,7 @@ from typing import List, Dict, Any
 
 from genie.server.server import GenieServer, ServerConfig
 from genie.core.coordinator import GenieCoordinator, CoordinatorConfig
-from genie.scheduler.basic_scheduler import BasicScheduler, Device
+from genie.semantic.scheduling import Scheduler
 
 logger = logging.getLogger(__name__)
 

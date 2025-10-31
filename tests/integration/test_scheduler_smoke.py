@@ -128,7 +128,7 @@ class TestSchedulerIntegration:
         """Test that coordinator actually consults scheduler."""
         import genie
         from genie.core.coordinator import GenieCoordinator, CoordinatorConfig
-        from genie.scheduler.stub_scheduler import get_scheduler
+        from genie.semantic.scheduling import Scheduler
         import asyncio
 
         async def test_integration():
@@ -138,7 +138,7 @@ class TestSchedulerIntegration:
             await coordinator.start()
 
             # Get scheduler
-            scheduler = get_scheduler()
+            scheduler = Scheduler()
 
             # Register a test server
             scheduler.register_server('localhost:9999')
@@ -185,9 +185,9 @@ class TestSchedulerIntegration:
 
     def test_scheduler_semantic_awareness(self):
         """Test scheduler makes semantic-aware decisions."""
-        from genie.scheduler.stub_scheduler import get_scheduler
+        from genie.semantic.scheduling import Scheduler
 
-        scheduler = get_scheduler()
+        scheduler = Scheduler()
 
         # Test LLM decode detection
         decode_metadata = {

@@ -345,10 +345,10 @@ class BenchmarkRunner:
     async def _apply_config(self, config: BenchmarkConfig):
         """Apply configuration to Genie system."""
         # Enable/disable semantic features based on config
-        from genie.scheduler.stub_scheduler import get_scheduler
+        from genie.semantic.scheduling import Scheduler
 
         try:
-            scheduler = get_scheduler()
+            scheduler = Scheduler()
 
             # Toggle semantic features in scheduler
             if hasattr(scheduler, 'enable_colocation'):

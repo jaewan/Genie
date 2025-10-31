@@ -94,8 +94,8 @@ class GenieNoSemanticsBaseline:
         """Disable all semantic features in the system."""
         try:
             # Disable scheduler semantic features
-            from genie.scheduler.stub_scheduler import get_scheduler
-            scheduler = get_scheduler()
+            from genie.semantic.scheduling import Scheduler
+            scheduler = Scheduler()
 
             # Save original state
             self._original_state['scheduler'] = {
@@ -138,8 +138,8 @@ class GenieNoSemanticsBaseline:
         try:
             # Restore scheduler
             if 'scheduler' in self._original_state:
-                from genie.scheduler.stub_scheduler import get_scheduler
-                scheduler = get_scheduler()
+                from genie.semantic.scheduling import Scheduler
+                scheduler = Scheduler()
 
                 for key, value in self._original_state['scheduler'].items():
                     if hasattr(scheduler, key):

@@ -59,15 +59,6 @@ class SemanticAnalyzer:
 		start_time = time.perf_counter()
 		logger = logging.getLogger(__name__)
 		
-		# TODO(Jae) Delete profiling hooks later
-		try:
-			from genie.profiling import get_detailed_profiler
-			profiler = get_detailed_profiler()
-			profiler_active = profiler is not None
-		except ImportError:
-			profiler_active = False
-			profiler = None
-		
 		# Stable graph-id caching (best-effort in-process)
 		# Note: Currently only supports ComputationGraph hashing
 		cache_enabled = os.getenv("GENIE_ANALYZER_CACHE", "1") == "1"

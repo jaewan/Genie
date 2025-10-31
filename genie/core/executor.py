@@ -44,7 +44,6 @@ class SimpleExecutor:
 			'failures': [],  # List of (op_name, error_msg)
 		}
 		
-		# TODO(Jae) Delete profiling hooks later - BATCH COMPILATION
 		# Initialize batch compiler for Phase 1 optimization
 		self.batch_compiler = get_batch_compiler()
 		self.batch_stats = {
@@ -98,45 +97,40 @@ class SimpleExecutor:
 			# ✅ Activations: relu, sigmoid, tanh
 			# ✅ Device ops: cpu
 			# ✅ Convolution: conv2d
-			# ✅ Pooling: max_pool2d, avg_pool2d, adaptive_avg_pool2d, adaptive_max_pool2d
-			# ✅ Normalization: batch_norm, layer_norm
-			# ✅ Dropout: dropout
-			# ✅ Interpolation: interpolate
-			# ✅ Tensor manipulation: split, cat
-			# ✅ Reductions: sum, mean, var, std, argmax, argmin, softmax, dim
-			# ✅ Type conversions: float, int, long, bool
-			# ✅ Indexing: __getitem__
+			# ✅ Normalization: layer_norm, batch_norm
+			# ✅ Pooling: max_pool2d, avg_pool2d
+			# ✅ Reduction: sum, mean, max, min
+			# ✅ Shape: view, reshape, permute, transpose, squeeze, unsqueeze
+			# ✅ Indexing: __getitem__, __setitem__, index_select
+			# ✅ Gradient: backward, grad
 			#
-			# Total: ~35 operations now handled automatically!
-			# ========================================================================
+			# These are ALL handled automatically by UniversalDispatcher via PyTorch's
+			# built-in dispatch system. New operations added to PyTorch work automatically!
 		}
 
-	def _ensure_concrete(self, value: Any) -> Any:  # noqa: ANN001
+	def _ensure_concrete(self, value: Any) -> Any:
 		"""
 		Convert LazyTensor to concrete tensor if needed.
-		
-		✅ PHASE 2: Respects logical device abstraction.
-		- LazyTensors are materialized to their logical device
-		- Meta tensors are left as-is (no storage to copy)
-		- Concrete tensors are moved to target device if needed
+
+		Recursively materializes LazyTensor -> concrete Tensor.
+		Non-tensor values pass through unchanged.
 		"""
-		if type(value).__name__ == 'LazyTensor':
-			# Call materialize() directly to avoid recursion through __torch_function__
-			# Materialization will respect the logical device
-			return value.materialize()
-		elif type(value).__name__ == 'Tensor':
-			# ✅ PHASE 2: Don't try to move meta tensors - they have no storage
-			if value.device.type == 'meta':
-				# Meta tensors should not be used in computation
-				# This indicates a bug in the logical device abstraction
-				logger.warning(f"Meta tensor leaked into computation: {value.shape}, {value.dtype}")
-				return value
-			# Keep tensors on their current device (don't force CPU)
-			return value
+		from .lazy_tensor import LazyTensor
+
+		if isinstance(value, LazyTensor):
+			# Recursively materialize all LazyTensor arguments
+			return self.execute_graph(value)
+		elif isinstance(value, (list, tuple)):
+			# Recursively process collection arguments
+			materialized = [self._ensure_concrete(v) for v in value]
+			# Return same type as input (list or tuple)
+			return type(value)(materialized)
+		elif isinstance(value, dict):
+			# Recursively process dict arguments
+			return {k: self._ensure_concrete(v) for k, v in value.items()}
 		else:
 			return value
 
-	# TODO(Jae) Delete profiling hooks later - BATCH COMPILATION
 	def _detect_batch_size(self, inputs: list) -> int:
 		"""Detect batch size from input tensors.
 		
@@ -148,7 +142,6 @@ class SimpleExecutor:
 				return inp.shape[0]
 		return 1
 	
-	# TODO(Jae) Delete profiling hooks later - BATCH COMPILATION
 	def _try_batch_compilation(self, operation: str, inputs: list, kwargs: dict):
 		"""Try to use batch compilation for this operation.
 		
@@ -844,27 +837,12 @@ class SimpleExecutor:
 
 	# Operation handlers
 	def _execute_add(self, lazy_tensor, inputs, kwargs) -> torch.Tensor:  # noqa: ANN001
-		self._track_operation("aten::add")
-		if len(inputs) < 2:
-			return torch.tensor(0.0)
-		
-		# TODO(Jae) Delete profiling hooks later - BATCH COMPILATION (Phase 1)
 		# Try batch compilation first for better performance on batches
 		compiled_result = self._try_batch_compilation("aten::add", inputs, kwargs)
 		if compiled_result is not None:
 			return compiled_result
 		
 		# OPTIMIZATION: Handle alpha parameter efficiently
-		# TODO(Jae) Delete profiling hooks later - OPTIMIZATION FIX for element-wise add
-		# 
-		# Root Cause: torch.add with alpha parameter triggers type checking and
-		# implicit broadcasting overhead. Most additions use alpha=1 (default).
-		# 
-		# Fix: Check if alpha=1 before passing to torch.add. If not, pre-scale
-		# on CPU to avoid broadcast overhead.
-		#
-		# Expected improvement: 60-80% reduction in add overhead
-		
 		alpha = kwargs.get("alpha", 1)
 		
 		# FAST PATH: Most common case - alpha is default (1)
@@ -879,71 +857,34 @@ class SimpleExecutor:
 			
 			return torch.add(x, y)  # No alpha parameter = no broadcast overhead!
 		
-		# OPTIMIZATION: Pre-scale on CPU instead of letting torch handle broadcast
+		# SLOW PATH: Alpha parameter is not 1 - requires broadcasting
 		x = self._ensure_concrete(inputs[0])
 		y = self._ensure_concrete(inputs[1])
 		
-		# ✅ PHASE 2: Ensure device consistency (only for tensors)
+		# ✅ PHASE 2: Ensure device consistency
 		if isinstance(x, torch.Tensor) and isinstance(y, torch.Tensor) and x.device != y.device:
-			logger.debug(f"Moving tensor from {y.device} to {x.device} for add")
+			logger.debug(f"Moving tensor from {y.device} to {x.device} for add (with alpha)")
 			y = y.to(x.device)
 		
-		if isinstance(alpha, (int, float)) and alpha != 1:
-			# Scale y by alpha before adding (simpler than torch's broadcast)
+		# Pre-scale on CPU (cheaper) before broadcasting
+		if alpha != 1:
 			y = y * alpha
-			return torch.add(x, y)
 		
-		# FALLBACK: If alpha is not a simple scalar, use standard path
-		return torch.add(x, y, alpha=alpha)
-	
-	# OPTIMIZATION: Fast path for element-wise operations (fixes 27x add slowdown)
-	# TODO(Jae) Delete profiling hooks later - OPTIMIZATION FIX for element-wise add
-	def _execute_add_optimized(self, lazy_tensor, inputs, kwargs) -> torch.Tensor:
-		"""
-		Fast path for element-wise add operation.
-		
-		OPTIMIZATION FIX: This addresses the 97ms element-wise add overhead.
-		When both inputs are simple tensors (not requiring complex materialization),
-		we can use direct torch.add instead of full execution pipeline.
-		
-		Expected improvement: 25x speedup (97ms → 3-4ms)
-		"""
-		self._track_operation("aten::add")
-		
-		if len(inputs) < 2:
-			return torch.tensor(0.0)
-		
-		alpha = kwargs.get("alpha", 1)
-		
-		# Fast path: Both inputs are already concrete tensors
-		if isinstance(inputs[0], torch.Tensor) and isinstance(inputs[1], torch.Tensor):
-			try:
-				# Direct add without materialization
-				return torch.add(inputs[0], inputs[1], alpha=alpha)
-			except Exception:
-				# Fall back if direct add fails
-				pass
-		
-		# Standard path with materialization
-		x = self._ensure_concrete(inputs[0])
-		y = self._ensure_concrete(inputs[1])
-		return torch.add(x, y, alpha=alpha)
+		return torch.add(x, y)
 
 	def _execute_sub(self, lazy_tensor, inputs, kwargs) -> torch.Tensor:  # noqa: ANN001
 		self._track_operation("aten::sub")
 		if len(inputs) < 2:
 			return torch.tensor(0.0)
-		alpha = kwargs.get("alpha", 1)
 		x = self._ensure_concrete(inputs[0])
 		y = self._ensure_concrete(inputs[1])
-		return torch.sub(x, y, alpha=alpha)
+		return torch.sub(x, y)
 
 	def _execute_mul(self, lazy_tensor, inputs, kwargs) -> torch.Tensor:  # noqa: ANN001
 		self._track_operation("aten::mul")
 		if len(inputs) < 2:
 			return torch.tensor(0.0)
 		
-		# TODO(Jae) Delete profiling hooks later - BATCH COMPILATION (Phase 1)
 		compiled_result = self._try_batch_compilation("aten::mul", inputs, kwargs)
 		if compiled_result is not None:
 			return compiled_result
@@ -964,7 +905,6 @@ class SimpleExecutor:
 		if len(inputs) < 2:
 			return torch.tensor(0.0)
 		
-		# TODO(Jae) Delete profiling hooks later - BATCH COMPILATION (Phase 1)
 		compiled_result = self._try_batch_compilation("aten::matmul", inputs, kwargs)
 		if compiled_result is not None:
 			return compiled_result
@@ -1734,88 +1674,6 @@ def execute_subgraph(target_lazy_tensor) -> torch.Tensor:  # noqa: ANN001
 # P0 OPTIMIZATION: Graph Caching for Batch Execution
 # ============================================================================
 
-class CachedGraphExecutor:
-    """
-    ✅ OPTIMIZATION P1.3: Cache compiled graphs across batches.
-    
-    Insight: Graph structure is identical for same model,
-    only inputs change between batches.
-    
-    Benefit: Amortize 300ms capture overhead over many batches
-    
-    Example:
-        executor = CachedGraphExecutor()
-        for batch_inputs in data_loader:
-            result = executor.execute(model, batch_inputs)
-            # First batch: 300ms (capture)
-            # Subsequent batches: <10ms (cache hit)
-    """
-    
-    def __init__(self, cache_size: int = 32):
-        self._graph_cache = {}  # model_id → compiled graph
-        self._cache_hits = 0
-        self._cache_misses = 0
-        self.cache_size = cache_size
-        self._executor = Executor()  # Underlying executor
-    
-    def execute(self, model, inputs, compile_cache_key=None) -> torch.Tensor:
-        """
-        Execute with automatic graph caching.
-        
-        Args:
-            model: The model to execute
-            inputs: Input tensors
-            compile_cache_key: Optional key for cache (defaults to model id)
-        
-        Returns:
-            Result tensor
-        """
-        # Generate cache key
-        if compile_cache_key is None:
-            compile_cache_key = self._compute_cache_key(model)
-        
-        # Check cache
-        if compile_cache_key in self._graph_cache:
-            self._cache_hits += 1
-            # Cache hit - reuse graph, only materialize inputs/output
-            cached_graph = self._graph_cache[compile_cache_key]
-            return self._execute_with_cached_graph(cached_graph, inputs)
-        
-        # Cache miss - capture and execute
-        self._cache_misses += 1
-        result = self._executor.execute_graph_from_model(model, inputs)
-        
-        # Store in cache (with LRU eviction)
-        if len(self._graph_cache) >= self.cache_size:
-            # Remove oldest entry
-            oldest_key = next(iter(self._graph_cache))
-            del self._graph_cache[oldest_key]
-        
-        self._graph_cache[compile_cache_key] = result.graph
-        
-        return result
-    
-    def _compute_cache_key(self, model) -> str:
-        """Generate cache key from model id and architecture."""
-        model_id = id(model)
-        # Simple hash: model id + number of parameters
-        param_count = sum(p.numel() for p in model.parameters() if hasattr(model, 'parameters'))
-        return f"{model_id}_{param_count}"
-    
-    def _execute_with_cached_graph(self, graph, inputs):
-        """Execute using pre-cached graph."""
-        # Re-bind inputs to graph and execute
-        return self._executor.execute_cached_graph(graph, inputs)
-    
-    def get_stats(self) -> Dict[str, Any]:
-        """Get caching statistics."""
-        total = self._cache_hits + self._cache_misses
-        hit_rate = (self._cache_hits / total * 100) if total > 0 else 0
-        
-        return {
-            'hits': self._cache_hits,
-            'misses': self._cache_misses,
-            'total': total,
-            'hit_rate': f"{hit_rate:.1f}%",
-            'cache_size': len(self._graph_cache),
-        }
+# [Removed CachedGraphExecutor class - this optimization is now handled by 
+# get_graph_cache() in genie/__init__.py main execute flow. The graph caching
+# functionality has been consolidated into GraphCache class.]

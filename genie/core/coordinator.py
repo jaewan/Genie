@@ -16,7 +16,7 @@ from typing import Optional, Dict, Callable, Any, List
 import asyncio
 import uuid
 import torch
-from genie.scheduler.stub_scheduler import get_scheduler
+from genie.semantic.scheduling import Scheduler
 from .metadata_types import OperationMetadata, create_operation_metadata
 
 logger = logging.getLogger(__name__)
@@ -131,7 +131,7 @@ class GenieCoordinator:
         self._result_handlers: Dict[str, Any] = {}
 
         # ✅ ADD: Scheduler integration (CRITICAL for semantic awareness)
-        self.scheduler = get_scheduler()
+        self.scheduler = Scheduler()
 
         # ✅ ADD: Profiling integration (CRITICAL for performance analysis)
         network_config = config.get_network_config()

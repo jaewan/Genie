@@ -362,17 +362,6 @@ def _cached_shape_inference(op: Any, inputs: tuple,
     """
     global _shape_cache_hits, _shape_cache_misses
     
-    # TODO(Jae) Delete profiling hooks later
-    # OPTIMIZATION: Use cached profiler to reduce import overhead
-    profiler = _get_shape_inference_profiler_cached()
-    profiler_active = profiler is not None
-    
-    if profiler_active:
-        profiler_context = profiler.profile_component("shape_inference")
-        profiler_context.__enter__()
-    else:
-        profiler_context = None
-    
     try:
         # Check circuit breaker - if too many failures, skip shape inference
         with _circuit_breaker_lock:
@@ -388,35 +377,23 @@ def _cached_shape_inference(op: Any, inputs: tuple,
                 input_shape = object.__getattribute__(inputs[0], '_shape')
                 if input_shape is not None:
                     _shape_cache_hits += 1
-                    if profiler_active:
-                        profiler.profile_component("shape_inference_fast_path").__enter__().__exit__(None, None, None)
-                        return input_shape
+                    return input_shape
         
         # Fast-path 2: Reduction operations
         if hasattr(op, '__name__') and op.__name__ in ('sum', 'mean', 'max', 'min'):
             if inputs and isinstance(inputs[0], LazyTensor):
                 # These reduce dimensions, but we can compute quickly
                 _shape_cache_hits += 1
-                if profiler_active:
-                    profiler.profile_component("shape_inference_fast_path").__enter__().__exit__(None, None, None)
                 return torch.Size([1])  # Simplified for now
         
         # Check cache
         cache_key = _create_shape_cache_key(op, inputs)
         if cache_key and cache_key in _shape_inference_cache:
             _shape_cache_hits += 1
-            if profiler_active:
-                profiler.profile_component("shape_inference_cache_hit").__enter__().__exit__(None, None, None)
             return _shape_inference_cache[cache_key]
         
         # Cache miss: fall back to slow path WITH TIMEOUT
         _shape_cache_misses += 1
-        if profiler_active:
-            meta_context = profiler.profile_component("shape_inference_meta_tensor")
-            meta_context.__enter__()
-        else:
-            meta_context = None
-        
         try:
             # PROTECTION: Add timeout to prevent 1000ms+ shape inference operations
             start_time = time.time()
@@ -461,13 +438,15 @@ def _cached_shape_inference(op: Any, inputs: tuple,
             with _circuit_breaker_lock:
                 _shape_inference_circuit_breaker['failures'] += 1
             return None
-        finally:
-            if meta_context is not None:
-                meta_context.__exit__(None, None, None)
-    finally:
-        # TODO(Jae) Delete profiling hooks later
-        if profiler_context is not None:
-            profiler_context.__exit__(None, None, None)
+    except Exception as e:
+        elapsed = time.time() - start_time
+        if elapsed > _shape_inference_timeout_seconds:
+            with _circuit_breaker_lock:
+                _shape_inference_circuit_breaker['failures'] += 1
+            logger.warning(f"Shape inference timeout ({elapsed*1000:.1f}ms > {_shape_inference_timeout_seconds*1000:.0f}ms): {e}")
+            return None
+        logger.debug(f"Shape inference failed: {e}")
+        return None
 
 
 class LazyTensor(torch.Tensor):
@@ -500,27 +479,30 @@ class LazyTensor(torch.Tensor):
     Thread Safety:
         - LazyTensor instances are immutable (thread-safe)
         - Graph building uses thread-local state (safe)
-        - Materialization is thread-safe (no shared state)
+
+    Shape Inference:
+        - Shapes are computed lazily using meta device (no computation overhead)
+        - Cached for fast lookup (O(1) after first computation)
+        - Falls back gracefully if inference fails
+    
+    Metadata Storage:
+        - Uses object.__setattr__ to bypass torch.Tensor constraints
+        - Stores _logical_device (what PyTorch expects) separately from
+        - _physical_device (always 'meta' for symbolic storage)
+    
+    Graph Checkpointing:
+        - Automatically materializes every 100 operations
+        - Prevents unbounded graph growth in long-running workloads
+        - Critical for LLM generation and sequential processing
     """
-
-    # Class-level state
-    _graph_builder: Optional['GraphBuilder'] = None
-
-    # Fast path for simple operations (avoids FakeTensorMode overhead)
-    _SIMPLE_OPS = {
-        'aten::relu': lambda inputs: inputs[0].shape,
-        'aten::sigmoid': lambda inputs: inputs[0].shape,
-        'aten::tanh': lambda inputs: inputs[0].shape,
-        'aten::abs': lambda inputs: inputs[0].shape,
-        'aten::neg': lambda inputs: inputs[0].shape,
-        'aten::exp': lambda inputs: inputs[0].shape,
-        'aten::log': lambda inputs: inputs[0].shape,
+    
+    # Map of ATen operations to handler methods
+    _OPERATION_HANDLERS = {
         # NOTE: Removed simplified add/sub/mul/div - they need proper broadcasting support
         # which requires FakeTensor mode for accurate shape inference
     }
 
     # OPTIMIZATION: Graph checkpointing to fix long sequence failures
-    # TODO(Jae) Delete profiling hooks later - OPTIMIZATION FIX for unbounded graph accumulation
     _operation_counter = 0
     _checkpoint_interval = 100  # Materialize graph every 100 operations
     _checkpoint_lock = threading.Lock()
@@ -688,21 +670,13 @@ class LazyTensor(torch.Tensor):
         """
         kwargs = kwargs or {}
         
-        # TODO(Jae) Delete profiling hooks later
-        # OPTIMIZATION: Cache profiler to reduce per-call import overhead
-        profiler = _get_shape_inference_profiler_cached()
-        profiler_active = profiler is not None
+        # Check if interception should be disabled
+        if not should_intercept():
+            # Interception disabled - let PyTorch handle this normally
+            # This happens during LazyTensor construction or materialization
+            return NotImplemented
         
-        if profiler_active:
-            # Get operation name for profiling
-            op_name = cls._normalize_op_name(func) if hasattr(cls, '_normalize_op_name') else str(func)
-            component_name = f"torch_dispatch_{op_name}" if op_name else "torch_dispatch"
-            profiler_context = profiler.profile_component("torch_dispatch")
-            profiler_context.__enter__()
-        else:
-            profiler_context = None
-        
-        try:
+        with disable_interception(InterceptionContext.NONE):
             # ✅ TRIGGER ASYNC INIT: First Genie operation call
             # This is called on ANY operation on a LazyTensor
             from ..runtime.initialization import _ensure_async_init
@@ -755,9 +729,6 @@ class LazyTensor(torch.Tensor):
                         method = getattr(materialized_args[0], method_name)
                         result = method(*materialized_args[1:], **kwargs)
                         return result
-                # For regular function calls, use the function
-                result = func(*materialized_args, **kwargs)
-                return result
 
             # ✅ Check for mixed operations ONLY when outside capture
             from .capture import is_capturing
@@ -876,10 +847,6 @@ class LazyTensor(torch.Tensor):
             )
 
             return result
-        finally:
-            # TODO(Jae) Delete profiling hooks later
-            if profiler_context is not None:
-                profiler_context.__exit__(None, None, None)
 
     # Operator methods that route through torch_dispatch
     def __matmul__(self, other):
@@ -1191,8 +1158,7 @@ class LazyTensor(torch.Tensor):
                             
                             # Use ShapeInference to infer output shape
                             try:
-                                from .shape_inference_v2 import ShapeInferenceV2
-                                inferred_shape = ShapeInferenceV2.infer_shape('aten::cat', [tensors], {'dim': dim})
+                                inferred_shape = ShapeInference.infer_shape('aten::cat', [tensors], {'dim': dim})
                             except Exception as e:
                                 # Fallback: use first tensor's shape
                                 logger.debug(f"Shape inference failed for cat: {e}")
@@ -2214,7 +2180,7 @@ class LazyTensor(torch.Tensor):
         current_shape = object.__getattribute__(self, '_shape')
         if current_shape is None or (len(current_shape) == 0 and self.operation != 'aten::tensor'):
             # Need to infer shape
-            # ✅ FIX: Use ShapeInferenceV2 (new system) instead of old _infer_shape
+            # ✅ Use ShapeInference for consistent shape inference
             from .shape_inference import ShapeInference
             try:
                 inferred_shape = ShapeInference.infer_shape(self.operation, self.inputs, self.kwargs)

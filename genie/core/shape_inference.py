@@ -1,5 +1,5 @@
 """
-Shape Inference V2: Production-Grade Implementation
+Shape Inference: Production-Grade Implementation
 
 Architecture:
 1. Use PyTorch meta tensors as PRIMARY mechanism (95% coverage)
@@ -12,6 +12,9 @@ Design Principles:
 - Prefer PyTorch's logic over manual implementation
 - Make debugging easy
 - Keep special cases explicit and documented
+
+Note: This is the consolidated implementation. Previously called "V2", it's now
+the single production implementation for shape inference in Genie.
 """
 
 import torch
@@ -37,7 +40,7 @@ class InferenceResult:
     method: str  # 'meta', 'manual', 'fallback'
     
 
-class ShapeInferenceV2:
+class ShapeInference:
     """
     Production-grade shape inference using PyTorch meta tensors.
     
@@ -45,6 +48,10 @@ class ShapeInferenceV2:
     1. Try meta tensor inference (fast, automatic, 95% coverage)
     2. Try manual handlers for special cases (explicit, 5% coverage)
     3. Fail with clear error message (better than silent bugs)
+    
+    This class uses PyTorch's meta device to automatically infer shapes for 1000+
+    operations without manual implementation. Only special cases that can't use
+    meta tensors (e.g., operations requiring actual data) need manual handlers.
     """
     
     # Operations that need special handling (can't use meta tensors)
@@ -342,39 +349,11 @@ def _infer_softmax_shape(inputs: List[Any], kwargs: Dict[str, Any]) -> torch.Siz
 
 
 # Register special handlers
-ShapeInferenceV2.SPECIAL_HANDLERS['aten::reshape'] = _infer_reshape_shape
-ShapeInferenceV2.SPECIAL_HANDLERS['aten::view'] = _infer_reshape_shape
-ShapeInferenceV2.SPECIAL_HANDLERS['aten::embedding'] = _infer_embedding_shape
-ShapeInferenceV2.SPECIAL_HANDLERS['aten::softmax'] = _infer_softmax_shape
-ShapeInferenceV2.SPECIAL_HANDLERS['aten::_softmax'] = _infer_softmax_shape
-
-
-# ============================================================================
-# Backward Compatibility Wrapper
-# ============================================================================
-
-class ShapeInference:
-    """
-    Backward compatibility wrapper for existing code.
-    
-    This maintains the same API as the old ShapeInference class
-    but uses the new V2 implementation under the hood.
-    """
-    
-    @staticmethod
-    def infer_shape(operation: str, inputs: List[Any], kwargs: Dict[str, Any]) -> torch.Size:
-        """Infer output shape (backward compatible API)."""
-        return ShapeInferenceV2.infer_shape(operation, inputs, kwargs)
-    
-    @staticmethod
-    def infer_dtype(operation: str, inputs: List[Any], kwargs: Dict[str, Any]) -> torch.dtype:
-        """Infer output dtype (backward compatible API)."""
-        return ShapeInferenceV2.infer_dtype(operation, inputs, kwargs)
-    
-    @staticmethod
-    def infer_device(operation: str, inputs: List[Any], kwargs: Dict[str, Any]) -> torch.device:
-        """Infer output device (backward compatible API)."""
-        return ShapeInferenceV2.infer_device(operation, inputs, kwargs)
+ShapeInference.SPECIAL_HANDLERS['aten::reshape'] = _infer_reshape_shape
+ShapeInference.SPECIAL_HANDLERS['aten::view'] = _infer_reshape_shape
+ShapeInference.SPECIAL_HANDLERS['aten::embedding'] = _infer_embedding_shape
+ShapeInference.SPECIAL_HANDLERS['aten::softmax'] = _infer_softmax_shape
+ShapeInference.SPECIAL_HANDLERS['aten::_softmax'] = _infer_softmax_shape
 
 
 # ============================================================================
@@ -385,7 +364,7 @@ def test_shape_inference():
     """Test shape inference on common operations."""
     from genie.core.lazy_tensor import LazyTensor
     
-    print("Testing ShapeInferenceV2...")
+    print("Testing ShapeInference...")
     
     test_cases = [
         # (operation, inputs, kwargs, expected_shape)
@@ -397,7 +376,7 @@ def test_shape_inference():
     passed = 0
     for operation, inputs, kwargs, expected in test_cases:
         try:
-            result = ShapeInferenceV2.infer_shape(operation, inputs, kwargs)
+            result = ShapeInference.infer_shape(operation, inputs, kwargs)
             if result == expected:
                 print(f"✓ {operation}")
                 passed += 1
