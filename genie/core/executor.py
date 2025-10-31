@@ -121,15 +121,27 @@ class SimpleExecutor:
 		}
 
 	def _ensure_concrete(self, value: Any) -> Any:  # noqa: ANN001
-		"""Convert LazyTensor to concrete tensor if needed."""
+		"""
+		Convert LazyTensor to concrete tensor if needed.
+		
+		✅ PHASE 2: Respects logical device abstraction.
+		- LazyTensors are materialized to their logical device
+		- Meta tensors are left as-is (no storage to copy)
+		- Concrete tensors are moved to target device if needed
+		"""
 		if type(value).__name__ == 'LazyTensor':
 			# Call materialize() directly to avoid recursion through __torch_function__
+			# Materialization will respect the logical device
 			return value.materialize()
 		elif type(value).__name__ == 'Tensor':
-			# Don't try to move meta tensors to CPU - they can't be copied
+			# ✅ PHASE 2: Don't try to move meta tensors - they have no storage
 			if value.device.type == 'meta':
+				# Meta tensors should not be used in computation
+				# This indicates a bug in the logical device abstraction
+				logger.warning(f"Meta tensor leaked into computation: {value.shape}, {value.dtype}")
 				return value
-			return value.cpu() if value.device.type != 'cpu' else value
+			# Keep tensors on their current device (don't force CPU)
+			return value
 		else:
 			return value
 
@@ -851,11 +863,22 @@ class SimpleExecutor:
 		if alpha == 1:
 			x = self._ensure_concrete(inputs[0])
 			y = self._ensure_concrete(inputs[1])
+			
+			# ✅ PHASE 2: Ensure device consistency (only for tensors)
+			if isinstance(x, torch.Tensor) and isinstance(y, torch.Tensor) and x.device != y.device:
+				logger.debug(f"Moving tensor from {y.device} to {x.device} for add")
+				y = y.to(x.device)
+			
 			return torch.add(x, y)  # No alpha parameter = no broadcast overhead!
 		
 		# OPTIMIZATION: Pre-scale on CPU instead of letting torch handle broadcast
 		x = self._ensure_concrete(inputs[0])
 		y = self._ensure_concrete(inputs[1])
+		
+		# ✅ PHASE 2: Ensure device consistency (only for tensors)
+		if isinstance(x, torch.Tensor) and isinstance(y, torch.Tensor) and x.device != y.device:
+			logger.debug(f"Moving tensor from {y.device} to {x.device} for add")
+			y = y.to(x.device)
 		
 		if isinstance(alpha, (int, float)) and alpha != 1:
 			# Scale y by alpha before adding (simpler than torch's broadcast)
@@ -941,6 +964,85 @@ class SimpleExecutor:
 		x = self._ensure_concrete(inputs[0])
 		y = self._ensure_concrete(inputs[1])
 		return torch.matmul(x, y)
+
+	def _execute_cat(self, lazy_tensor, inputs, kwargs) -> torch.Tensor:  # noqa: ANN001
+		"""
+		Execute torch.cat operation.
+		
+		✅ NEW: Support for ViT and other models that use concatenation.
+		"""
+		if not inputs or not inputs[0]:
+			return torch.tensor(0.0)
+		
+		# First input is a list/tuple of tensors to concatenate
+		tensors = inputs[0]
+		if not isinstance(tensors, (list, tuple)):
+			tensors = [tensors]
+		
+		# Materialize all tensors
+		materialized_tensors = []
+		for t in tensors:
+			concrete = self._ensure_concrete(t)
+			materialized_tensors.append(concrete)
+		
+		# Get dimension (default is 0)
+		dim = kwargs.get('dim', 0)
+		
+		# Ensure all tensors are on the same device
+		if materialized_tensors:
+			target_device = materialized_tensors[0].device
+			for i in range(1, len(materialized_tensors)):
+				if materialized_tensors[i].device != target_device:
+					logger.debug(f"Moving tensor from {materialized_tensors[i].device} to {target_device} for cat")
+					materialized_tensors[i] = materialized_tensors[i].to(target_device)
+		
+		return torch.cat(materialized_tensors, dim=dim)
+
+	def _execute_scaled_dot_product_attention(self, lazy_tensor, inputs, kwargs) -> torch.Tensor:  # noqa: ANN001
+		"""
+		Execute scaled_dot_product_attention operation.
+		
+		✅ NEW: Support for CLIP and other models using PyTorch's optimized attention.
+		
+		This is PyTorch's fused attention implementation that's more efficient than
+		manual attention computation.
+		"""
+		import torch.nn.functional as F
+		
+		if len(inputs) < 3:
+			return torch.tensor(0.0)
+		
+		# Materialize query, key, value
+		query = self._ensure_concrete(inputs[0])
+		key = self._ensure_concrete(inputs[1])
+		value = self._ensure_concrete(inputs[2])
+		
+		# Ensure all tensors are on the same device
+		if query.device != key.device:
+			logger.debug(f"Moving key from {key.device} to {query.device} for attention")
+			key = key.to(query.device)
+		if query.device != value.device:
+			logger.debug(f"Moving value from {value.device} to {query.device} for attention")
+			value = value.to(query.device)
+		
+		# Extract optional parameters
+		attn_mask = kwargs.get('attn_mask', None)
+		dropout_p = kwargs.get('dropout_p', 0.0)
+		is_causal = kwargs.get('is_causal', False)
+		
+		# Materialize attention mask if provided
+		if attn_mask is not None:
+			attn_mask = self._ensure_concrete(attn_mask)
+			if attn_mask.device != query.device:
+				attn_mask = attn_mask.to(query.device)
+		
+		# Call PyTorch's optimized attention
+		return F.scaled_dot_product_attention(
+			query, key, value,
+			attn_mask=attn_mask,
+			dropout_p=dropout_p,
+			is_causal=is_causal
+		)
 
 	def _execute_linear(self, lazy_tensor, inputs, kwargs) -> torch.Tensor:  # noqa: ANN001
 		"""Execute linear transformation (y = x @ weight.t() + bias)."""
@@ -1104,18 +1206,26 @@ class SimpleExecutor:
 		HuggingFace models pass additional kwargs like max_norm and norm_type.
 		We need to use torch.nn.functional.embedding which supports these.
 
-		Note: aten::embedding signature is embedding(weight, indices, ...)
-		But F.embedding signature is embedding(input, weight, ...) where input=indices
+		✅ CRITICAL FIX: PyTorch's signature is embedding(input, weight), NOT embedding(weight, input)!
+		This must match the V2 shape inference order.
+		
+		✅ PHASE 2: Device consistency - ensure indices and weight are on the same device.
 		"""
 		import torch.nn.functional as F
 
-		# Skip batch compilation for embedding - it's not typically batched in the same way
-		weight = self._ensure_concrete(inputs[0])
-		indices = self._ensure_concrete(inputs[1])
+		# ✅ FIXED: indices is first, weight is second (matches PyTorch signature)
+		indices = self._ensure_concrete(inputs[0])
+		weight = self._ensure_concrete(inputs[1])
 		
 		# Indices must be Long/Int type for embedding
 		if indices.dtype not in (torch.long, torch.int, torch.int32, torch.int64):
 			indices = indices.long()
+		
+		# ✅ PHASE 2: Ensure device consistency
+		# Move indices to the same device as weight (model parameters)
+		if indices.device != weight.device:
+			logger.debug(f"Moving indices from {indices.device} to {weight.device} for embedding")
+			indices = indices.to(weight.device)
 		
 		# Extract kwargs for torch.nn.functional.embedding
 		# It supports: padding_idx, max_norm, norm_type, scale_grad_by_freq, sparse

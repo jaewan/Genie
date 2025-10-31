@@ -25,6 +25,9 @@ from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
+# ✅ OPTIMIZATION: Import MetadataPlaceholder at module level to avoid per-call import overhead
+from .metadata import MetadataPlaceholder
+
 # ============================================================================
 # OPTIMIZATION: Module-level profiler caching to reduce per-call overhead
 # ============================================================================
@@ -233,18 +236,18 @@ class FactoryInterceptor:
                         if lazy_factory is not None:
                             return lazy_factory(*args, **kwargs)
                         else:
-                            # Final fallback: generic LazyTensor creation with metadata
-                            from genie.core.metadata_capture import get_metadata_capture
-                            metadata = get_metadata_capture().capture_metadata(
+                            # Final fallback: generic LazyTensor creation with LAZY metadata
+                            # ✅ FUNDAMENTAL FIX: Use MetadataPlaceholder for deferred semantic analysis
+                            metadata = MetadataPlaceholder(
                                 operation=f'aten::{func_name}',
-                                inputs=list(args),
+                                inputs=tuple(args),
                                 kwargs=kwargs
                             )
                             return LazyTensor(
                                 operation=f'aten::{func_name}',
                                 inputs=list(args),
                                 kwargs=kwargs,
-                                metadata=metadata  # ✅ NEW: Pass semantic metadata
+                                metadata=metadata  # ← Lazy metadata, not computed yet!
                             )
                     finally:
                         # Always clear the flag

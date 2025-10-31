@@ -1,34 +1,28 @@
 """
-Detailed workload implementations for comprehensive OSDI evaluation.
+Production-scale workload implementations for OSDI evaluation.
 
-Each workload demonstrates specific semantic optimizations and includes
+Each workload demonstrates specific semantic optimizations using
 real model implementations from HuggingFace.
 
-Includes both microbenchmark workloads (for fast iteration) and realistic
-production-scale workloads (for SOSP submission).
+All workloads use real models (GPT-2-XL, ResNet-50) for publication-quality results.
 """
 
-from .llm_decode import LLMDecodeWorkload
-from .llm_prefill import LLMPrefillWorkload
-from .vision_cnn import VisionCNNWorkload
-from .multimodal_vqa import MultimodalVQAWorkload
-from .microbenchmark import MicrobenchmarkWorkload
-
-# New realistic production-scale workloads (Phase 1: Week 1)
+# Production-scale realistic workloads with real models
 from .realistic_llm_decode import RealisticLLMDecodeWorkload
 from .realistic_llm_prefill import RealisticLLMPrefillWorkload
 from .realistic_vision_cnn import RealisticVisionCNNWorkload
 
+# Multimodal and microbenchmark workloads
+from .multimodal_vqa import MultimodalVQAWorkload
+from .microbenchmark import MicrobenchmarkWorkload
+
 __all__ = [
-    # Microbenchmarks (legacy)
-    'LLMDecodeWorkload',
-    'LLMPrefillWorkload',
-    'VisionCNNWorkload',
-    'MultimodalVQAWorkload',
-    'MicrobenchmarkWorkload',
-    
-    # Production-scale realistic workloads (new)
+    # Real model workloads (primary)
     'RealisticLLMDecodeWorkload',
     'RealisticLLMPrefillWorkload',
     'RealisticVisionCNNWorkload',
+    
+    # Supporting workloads
+    'MultimodalVQAWorkload',
+    'MicrobenchmarkWorkload',
 ]

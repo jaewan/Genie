@@ -305,33 +305,10 @@ def _infer_embedding_shape(inputs: List[Any], kwargs: Dict[str, Any]) -> torch.S
     return torch.Size(list(indices_shape) + [embedding_dim])
 
 
-def _infer_softmax_shape(inputs: List[Any], kwargs: Dict[str, Any]) -> torch.Size:
-    """
-    Special handler for softmax.
-    
-    aten::softmax preserves the input shape.
-    Signature: softmax(input, dim, dtype=None)
-    
-    ✅ FIX: Softmax was failing with meta tensors due to device mismatch.
-    """
-    if len(inputs) < 1:
-        raise ShapeInferenceError("Softmax needs at least 1 input")
-    
-    input_shape = inputs[0].shape if hasattr(inputs[0], 'shape') else torch.Size([])
-    
-    if not input_shape:
-        raise ShapeInferenceError(f"Invalid shape for softmax: {input_shape}")
-    
-    # Softmax preserves input shape
-    return input_shape
-
-
 # Register special handlers
 ShapeInferenceV2.SPECIAL_HANDLERS['aten::reshape'] = _infer_reshape_shape
 ShapeInferenceV2.SPECIAL_HANDLERS['aten::view'] = _infer_reshape_shape
 ShapeInferenceV2.SPECIAL_HANDLERS['aten::embedding'] = _infer_embedding_shape
-ShapeInferenceV2.SPECIAL_HANDLERS['aten::softmax'] = _infer_softmax_shape
-ShapeInferenceV2.SPECIAL_HANDLERS['aten::_softmax'] = _infer_softmax_shape
 
 
 # ============================================================================

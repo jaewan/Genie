@@ -73,13 +73,12 @@ class RealisticLLMDecodeWorkload:
                 print(f"❌ transformers not available: {e}")
                 print("Falling back to mock model...")
 
-        # Fallback to mock model
+        # Fallback to mock model (keep on CPU for validation)
         self.model = self._create_mock_model()
         self.tokenizer = self._create_mock_tokenizer()
         
-        # CRITICAL FIX: Ensure mock model is also on cuda:0
-        if torch.cuda.is_available():
-            self.model.to(torch.device('cuda:0'))
+        # Keep mock model on CPU to avoid GPU memory issues during validation
+        # Real benchmarks will use real models on GPU
         
         return False
 

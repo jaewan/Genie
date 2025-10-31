@@ -35,6 +35,7 @@ except ImportError:
 # Import baselines
 from benchmarks.baselines import (
     LocalPyTorchBaseline,
+    NaiveDisaggregationBaseline,
     GenieCaptureOnlyBaseline,
     GenieLocalRemoteBaseline,
     GenieNoSemanticsBaseline,
@@ -43,40 +44,31 @@ from benchmarks.baselines import (
     RayBaseline
 )
 
-# Import workloads
+# Import workloads (all realistic/production-scale)
 from benchmarks.workloads_detailed import (
-    LLMDecodeWorkload,
-    LLMPrefillWorkload,
-    VisionCNNWorkload,
+    RealisticLLMDecodeWorkload,
+    RealisticLLMPrefillWorkload,
+    RealisticVisionCNNWorkload,
     MultimodalVQAWorkload,
     MicrobenchmarkWorkload
 )
-
-# Import realistic workloads
-try:
-    from benchmarks.workloads_detailed import (
-        RealisticLLMDecodeWorkload,
-        RealisticLLMPrefillWorkload,
-        RealisticVisionCNNWorkload,
-    )
-    _REALISTIC_WORKLOADS_AVAILABLE = True
-except ImportError:
-    _REALISTIC_WORKLOADS_AVAILABLE = False
 
 
 class ComprehensiveEvaluation:
     """Runs all experiments"""
 
-    def __init__(self, output_dir: str = "paper_results", use_real_models: bool = False, spawn_server: bool = False):
+    def __init__(self, output_dir: str = "osdi_final_results", use_real_models: bool = True, spawn_server: bool = True):
         """
         Initialize comprehensive evaluation.
         
         Args:
-            output_dir: Output directory for results
+            output_dir: Output directory for results (default: osdi_final_results)
             use_real_models: If True, use RealisticLLMDecodeWorkload etc. (real HF models)
-                           If False, use LLMDecodeWorkload etc. (mock models, default)
+                           If False, use LLMDecodeWorkload etc. (mock models)
+                           DEFAULT: True (for OSDI publication-quality results)
             spawn_server: If True, spawn remote server for network execution
-                        If False, use device API (default)
+                        If False, use device API
+                        DEFAULT: True (for real network measurements)
         """
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
@@ -86,12 +78,13 @@ class ComprehensiveEvaluation:
 
         self.baselines = {
             '1_local_pytorch': LocalPyTorchBaseline(),
-            '2_genie_capture': GenieCaptureOnlyBaseline(),
-            '3_genie_local_remote': GenieLocalRemoteBaseline(),
-            '4_genie_no_semantics': GenieNoSemanticsBaseline(),
-            '5_genie_full': GenieFullBaseline(),
-            '6_pytorch_rpc': PyTorchRPCBaseline(),
-            '7_ray': RayBaseline(),
+            '2_naive_disaggregation': NaiveDisaggregationBaseline(),
+            '3_genie_capture': GenieCaptureOnlyBaseline(),
+            '4_genie_local_remote': GenieLocalRemoteBaseline(),
+            '5_genie_no_semantics': GenieNoSemanticsBaseline(),
+            '6_genie_full': GenieFullBaseline(),
+            '7_pytorch_rpc': PyTorchRPCBaseline(),
+            '8_ray': RayBaseline(),
         }
 
         # Load workloads based on configuration
@@ -103,37 +96,34 @@ class ComprehensiveEvaluation:
         self.measurement_errors = []
 
     def _load_workloads(self):
-        """Load workloads based on configuration (real vs mock models)."""
-        if self.use_real_models and _REALISTIC_WORKLOADS_AVAILABLE:
-            print("📚 Using REAL HuggingFace models")
+        """Load production-scale workloads with real models."""
+        if self.use_real_models:
+            print("📚 Using REAL HuggingFace models (GPT-2-XL, ResNet-50)")
             self.workloads = {
                 'llm_decode': RealisticLLMDecodeWorkload(use_real_model=True),
                 'llm_prefill': RealisticLLMPrefillWorkload(use_real_model=True),
                 'vision_cnn': RealisticVisionCNNWorkload(),
-                'multimodal_vqa': MultimodalVQAWorkload(),  # Falls back gracefully
-                'microbenchmark': MicrobenchmarkWorkload(),
-            }
-        elif self.use_real_models:
-            print("⚠️  Real models requested but not available, falling back to mock models")
-            self.workloads = {
-                'llm_decode': LLMDecodeWorkload(),
-                'llm_prefill': LLMPrefillWorkload(),
-                'vision_cnn': VisionCNNWorkload(),
                 'multimodal_vqa': MultimodalVQAWorkload(),
                 'microbenchmark': MicrobenchmarkWorkload(),
             }
         else:
-            print("📦 Using mock models (default)")
+            print("📦 Using mock models (for quick validation only)")
+            # Use realistic workloads but with mock models (fallback)
             self.workloads = {
-                'llm_decode': LLMDecodeWorkload(),
-                'llm_prefill': LLMPrefillWorkload(),
-                'vision_cnn': VisionCNNWorkload(),
+                'llm_decode': RealisticLLMDecodeWorkload(use_real_model=False),
+                'llm_prefill': RealisticLLMPrefillWorkload(use_real_model=False),
+                'vision_cnn': RealisticVisionCNNWorkload(),
                 'multimodal_vqa': MultimodalVQAWorkload(),
                 'microbenchmark': MicrobenchmarkWorkload(),
             }
 
-    async def run_all(self, num_runs: int = 5, num_warmup: int = 2):
-        """Run all baseline × workload combinations with proper measurement."""
+    async def run_all(self, num_runs: int = 20, num_warmup: int = 3):
+        """Run all baseline × workload combinations with proper measurement.
+        
+        Args:
+            num_runs: Number of measurement runs per configuration (default: 20 for statistical significance)
+            num_warmup: Number of warmup runs per configuration (default: 3 to eliminate cold start)
+        """
 
         num_baselines = len(self.baselines)
         num_workloads = len(self.workloads)
@@ -435,25 +425,34 @@ class ComprehensiveEvaluation:
 
         # Compute speedups
         local_pytorch = df[df['baseline'] == '1_local_pytorch'].groupby('workload')['latency_ms'].mean()
-        genie_full = df[df['baseline'] == '5_genie_full'].groupby('workload')['latency_ms'].mean()
-        genie_no_sem = df[df['baseline'] == '4_genie_no_semantics'].groupby('workload')['latency_ms'].mean()
+        naive_disagg = df[df['baseline'] == '2_naive_disaggregation'].groupby('workload')['latency_ms'].mean()
+        genie_full = df[df['baseline'] == '6_genie_full'].groupby('workload')['latency_ms'].mean()
+        genie_no_sem = df[df['baseline'] == '5_genie_no_semantics'].groupby('workload')['latency_ms'].mean()
 
-        # Calculate speedups (CORRECTED INTERPRETATION)
+        # Calculate speedups
         speedup_vs_local = local_pytorch / genie_full
         speedup_from_semantics = genie_no_sem / genie_full
+        speedup_vs_naive = naive_disagg / genie_full  # NEW: Show value of semantic optimization
 
         print(f"\n{'='*80}")
-        print("📊 COMPREHENSIVE RESULTS (CORRECTED MEASUREMENTS)")
+        print("📊 COMPREHENSIVE RESULTS (OSDI BENCHMARKS)")
         print(f"{'='*80}")
 
-        print("\n🎯 Speedup vs Local PyTorch (should be < 1.0, meaning slower):")
+        print("\n🎯 Overhead vs Local PyTorch (lower is better):")
         for workload, speedup in speedup_vs_local.items():
-            status = "✅" if speedup < 1.5 else "⚠️"
-            print(f"  {workload:15s}: {speedup:6.2f}x {status}")
+            overhead_pct = (1/speedup - 1) * 100 if speedup > 0 else float('inf')
+            status = "✅" if overhead_pct < 30 else "⚠️"
+            print(f"  {workload:15s}: {overhead_pct:+6.1f}% {status}")
 
-        print("\n🔍 Speedup from Semantic Awareness (should be > 1.0, meaning Genie Full is faster):")
+        print("\n🔥 Speedup from Semantic Awareness (Genie Full vs No Semantics):")
         for workload, speedup in speedup_from_semantics.items():
             status = "✅" if speedup > 1.2 else "⚠️"
+            print(f"  {workload:15s}: {speedup:6.2f}x {status}")
+
+        print("\n🚀 Speedup vs Naive Disaggregation (shows optimization value):")
+        for workload in speedup_vs_naive.index:
+            speedup = speedup_vs_naive[workload]
+            status = "✅" if speedup > 2.0 else "⚠️"
             print(f"  {workload:15s}: {speedup:6.2f}x {status}")
 
         # Save detailed summary
@@ -463,6 +462,7 @@ class ComprehensiveEvaluation:
         speedup_analysis = pd.DataFrame({
             'speedup_vs_local': speedup_vs_local,
             'speedup_from_semantics': speedup_from_semantics,
+            'speedup_vs_naive': speedup_vs_naive,
         })
         speedup_analysis.to_csv(self.output_dir / "speedup_analysis.csv")
 
@@ -711,21 +711,25 @@ class ComprehensiveEvaluation:
     def _export_speedup_table(self, df):
         """Export speedup analysis table."""
         local_pytorch = df[df['baseline'] == '1_local_pytorch'].groupby('workload')['latency_ms'].mean()
-        genie_full = df[df['baseline'] == '5_genie_full'].groupby('workload')['latency_ms'].mean()
-        genie_no_sem = df[df['baseline'] == '4_genie_no_semantics'].groupby('workload')['latency_ms'].mean()
+        naive_disagg = df[df['baseline'] == '2_naive_disaggregation'].groupby('workload')['latency_ms'].mean()
+        genie_full = df[df['baseline'] == '6_genie_full'].groupby('workload')['latency_ms'].mean()
+        genie_no_sem = df[df['baseline'] == '5_genie_no_semantics'].groupby('workload')['latency_ms'].mean()
 
         speedup_data = []
         for workload in local_pytorch.index:
             local_time = local_pytorch[workload]
+            naive_time = naive_disagg.get(workload, float('inf'))
             genie_time = genie_full.get(workload, float('inf'))
             no_sem_time = genie_no_sem.get(workload, float('inf'))
 
             speedup_vs_local = local_time / genie_time if genie_time > 0 else 0
             speedup_from_sem = no_sem_time / genie_time if genie_time > 0 else 1
+            speedup_vs_naive = naive_time / genie_time if genie_time > 0 else 1
 
             speedup_data.append({
                 'Workload': workload.replace('_', ' ').title(),
                 'vs Local': f"{speedup_vs_local:.2f}x",
+                'vs Naive': f"{speedup_vs_naive:.2f}x",
                 'from Semantics': f"{speedup_from_sem:.2f}x",
                 'Improvement': f"{(speedup_from_sem - 1) * 100:.1f}%"
             })

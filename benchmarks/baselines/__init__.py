@@ -1,11 +1,12 @@
 """
 Baseline configurations for comprehensive OSDI evaluation.
 
-This module implements the 7 baseline configurations from best to worst
+This module implements the 8 baseline configurations from best to worst
 expected performance to prove semantic awareness matters.
 """
 
 from .local_pytorch import LocalPyTorchBaseline
+from .naive_disaggregation import NaiveDisaggregationBaseline
 from .genie_capture_only import GenieCaptureOnlyBaseline
 from .genie_local_remote import GenieLocalRemoteBaseline
 from .genie_no_semantics import GenieNoSemanticsBaseline
@@ -15,6 +16,7 @@ from .ray_baseline import RayBaseline
 
 __all__ = [
     'LocalPyTorchBaseline',
+    'NaiveDisaggregationBaseline',
     'GenieCaptureOnlyBaseline',
     'GenieLocalRemoteBaseline',
     'GenieNoSemanticsBaseline',
