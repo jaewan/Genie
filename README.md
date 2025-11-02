@@ -117,6 +117,31 @@ python3 -m pytest tests/integration/test_hero_integration.py::TestHeroIntegratio
 python3 -m pytest tests/ -x --tb=short
 ```
 
+## Documentation
+
+Genie documentation is organized into 7 core documents for different audiences:
+
+| Document | Purpose | Audience |
+|----------|---------|----------|
+| [0_OVERVIEW.md](docs/0_OVERVIEW.md) | System introduction, quick start | Everyone |
+| [1_ARCHITECTURE.md](docs/1_ARCHITECTURE.md) | System architecture, design principles | Researchers, architects |
+| [2_FRONTEND_IMPLEMENTATION.md](docs/2_FRONTEND_IMPLEMENTATION.md) | Frontend implementation details | Frontend engineers |
+| [3_SCHEDULER_IMPLEMENTATION.md](docs/3_SCHEDULER_IMPLEMENTATION.md) | Scheduler implementation details | Scheduler engineers |
+| [4_BACKEND_IMPLEMENTATION.md](docs/4_BACKEND_IMPLEMENTATION.md) | Backend & network transport | Backend engineers |
+| [5_PERFORMANCE_VALIDATION.md](docs/5_PERFORMANCE_VALIDATION.md) | Benchmarks, profiling, validation | Performance engineers |
+| [6_DEPLOYMENT_GUIDE.md](docs/6_DEPLOYMENT_GUIDE.md) | Production deployment guide | DevOps, SREs |
+
+**Reading Paths**:
+- **For Researchers**: [0_OVERVIEW](docs/0_OVERVIEW.md) → [1_ARCHITECTURE](docs/1_ARCHITECTURE.md) → [5_PERFORMANCE](docs/5_PERFORMANCE_VALIDATION.md)
+- **For Engineers (New)**: [0_OVERVIEW](docs/0_OVERVIEW.md) → [1_ARCHITECTURE](docs/1_ARCHITECTURE.md) → Implementation docs (2/3/4)
+- **For Engineers (Existing)**: Jump to relevant implementation doc (2/3/4)
+- **For Operators**: [0_OVERVIEW](docs/0_OVERVIEW.md) → [6_DEPLOYMENT](docs/6_DEPLOYMENT_GUIDE.md)
+
+**Additional Resources**:
+- [research_proposal.tex](docs/research_proposal.tex) - Academic paper (OSDI submission)
+- [implementation/](docs/implementation/) - Detailed implementation notes
+- [cluster/](docs/cluster/) - Cluster deployment guides
+
 ## Key Features
 
 ### ✅ Semantic-Aware Scheduling

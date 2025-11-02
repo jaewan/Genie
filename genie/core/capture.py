@@ -83,6 +83,13 @@ class CaptureContext:
         self.prev_active = getattr(_capture_context, 'active', False)
         _capture_context.active = True
 
+        # ✅ NEW: Set interception context to CAPTURING during graph capture
+        from .interception_control import disable_interception, InterceptionContext, get_current_context
+        self.prev_interception_context = get_current_context()
+        # Store the context manager so we can exit it properly
+        self._interception_disabler = disable_interception(InterceptionContext.CAPTURING)
+        self._interception_disabler.__enter__()
+
         # Save previous state - get the CURRENT root_tensor before clearing
         self.prev_root = self.builder.root_tensor
 
@@ -93,6 +100,10 @@ class CaptureContext:
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Preserve captured graph but restore parent context state."""
         try:
+            # ✅ NEW: Exit the interception context
+            if hasattr(self, '_interception_disabler'):
+                self._interception_disabler.__exit__(exc_type, exc_val, exc_tb)
+            
             # ✅ FIX: Preserve the captured graph for retrieval
             self.captured_root = self.builder.root_tensor
             

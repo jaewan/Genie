@@ -59,9 +59,9 @@ class MultimodalVQAWorkload:
             self.model = self._create_mock_clip()
             self.processor = self._create_mock_processor()
             
-            # CRITICAL FIX: Ensure mock model is also on cuda:0
-            if torch.cuda.is_available():
-                self.model.to(torch.device('cuda:0'))
+            # CRITICAL FIX: Keep mock model on CPU to avoid GPU OOM
+            # Real benchmarks will use real models on GPU
+            # self.model stays on CPU for validation
             
             return False
 

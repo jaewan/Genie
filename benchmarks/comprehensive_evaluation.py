@@ -57,7 +57,7 @@ from benchmarks.workloads_detailed import (
 class ComprehensiveEvaluation:
     """Runs all experiments"""
 
-    def __init__(self, output_dir: str = "osdi_final_results", use_real_models: bool = True, spawn_server: bool = True):
+    def __init__(self, output_dir: str = "osdi_final_results", use_real_models: bool = True, spawn_server: bool = True, selected_baselines: Optional[List[str]] = None):
         """
         Initialize comprehensive evaluation.
         
@@ -69,6 +69,8 @@ class ComprehensiveEvaluation:
             spawn_server: If True, spawn remote server for network execution
                         If False, use device API
                         DEFAULT: True (for real network measurements)
+            selected_baselines: Optional list of baseline keys to run. If provided, only these
+                               baselines will be executed. If None, all baselines are run.
         """
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
@@ -76,7 +78,7 @@ class ComprehensiveEvaluation:
         self.spawn_server = spawn_server
         self.server_manager = None
 
-        self.baselines = {
+        all_baselines = {
             '1_local_pytorch': LocalPyTorchBaseline(),
             '2_naive_disaggregation': NaiveDisaggregationBaseline(),
             '3_genie_capture': GenieCaptureOnlyBaseline(),
@@ -86,6 +88,12 @@ class ComprehensiveEvaluation:
             '7_pytorch_rpc': PyTorchRPCBaseline(),
             '8_ray': RayBaseline(),
         }
+
+        # Filter baselines if selected_baselines is provided
+        if selected_baselines is not None:
+            self.baselines = {k: v for k, v in all_baselines.items() if k in selected_baselines}
+        else:
+            self.baselines = all_baselines
 
         # Load workloads based on configuration
         self._load_workloads()

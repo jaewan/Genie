@@ -48,7 +48,7 @@ class OperationRegistry:
 
             # Transpose operations
             'aten::t': lambda inputs, kwargs: torch.t(inputs[0]),
-            'aten::transpose': lambda inputs, kwargs: torch.transpose(inputs[0], **kwargs),
+            'aten::transpose': lambda inputs, kwargs: torch.transpose(inputs[0], inputs[1], inputs[2]),
 
             # Activation functions
             'aten::relu': lambda inputs, kwargs: torch.relu(inputs[0]),
@@ -91,7 +91,7 @@ class OperationRegistry:
 
             # Normalization
             'aten::batch_norm': lambda inputs, kwargs: torch.ops.aten.batch_norm(*inputs, **kwargs),
-            'aten::layer_norm': lambda inputs, kwargs: F.layer_norm(inputs[0], **kwargs),
+            'aten::layer_norm': lambda inputs, kwargs: F.layer_norm(inputs[0], inputs[1], **kwargs),
             'aten::instance_norm': lambda inputs, kwargs: F.instance_norm(inputs[0], **kwargs),
 
             # Dropout
@@ -112,6 +112,7 @@ class OperationRegistry:
             'aten::chunk': lambda inputs, kwargs: torch.chunk(*inputs, **kwargs),
             'aten::cat': lambda inputs, kwargs: torch.cat(inputs, **kwargs),
             'aten::stack': lambda inputs, kwargs: torch.stack(inputs, **kwargs),
+            'aten::__getitem__': lambda inputs, kwargs: inputs[0].__getitem__(inputs[1]),
 
             # Special operations
             'aten::alias': lambda inputs, kwargs: inputs[0],  # Pass-through
@@ -121,6 +122,7 @@ class OperationRegistry:
 
             # Linear layer operations
             'aten::linear': lambda inputs, kwargs: torch.nn.functional.linear(*inputs, **kwargs),
+            'aten::embedding': lambda inputs, kwargs: F.embedding(inputs[1].long(), inputs[0], **kwargs),
 
             # Device operations (should not appear in subgraphs, but handle gracefully)
             'aten::cpu': lambda inputs, kwargs: inputs[0].cpu(),

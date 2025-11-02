@@ -1,30 +1,9 @@
 """
-Genie profiling module for measuring component overhead.
+Comprehensive profiling for Genie.
 
-Exports:
-- GenieProfiler: End-to-end operation profiling
-- DetailedComponentProfiler: Fine-grained component timing
-- PerformanceAnalyzer: Bottleneck identification and recommendations
+This module provides end-to-end profiling to identify where latency comes from.
 """
 
-from .profiler import (
-    GenieProfiler,
-    DetailedComponentProfiler,
-    get_detailed_profiler,
-    OperationTiming,
-    ResourceSnapshot,
-    GPUMonitor,
-    NetworkMonitor,
-)
-from .performance_analyzer import PerformanceAnalyzer
+from .comprehensive_profiler import ComprehensiveProfiler, RemoteTiming, ProfileSummary
 
-__all__ = [
-    "GenieProfiler",
-    "DetailedComponentProfiler",
-    "get_detailed_profiler",
-    "OperationTiming",
-    "ResourceSnapshot",
-    "GPUMonitor",
-    "NetworkMonitor",
-    "PerformanceAnalyzer",
-]
+__all__ = ['ComprehensiveProfiler', 'RemoteTiming', 'ProfileSummary']

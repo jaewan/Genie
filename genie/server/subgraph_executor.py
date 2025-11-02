@@ -85,6 +85,12 @@ class SubgraphExecutor:
 
         try:
             logger.info(f"🚀 Executing subgraph: {len(subgraph_request['operations'])} operations")
+            logger.info(
+                "   Executor device=%s | CUDA available=%s | current_device=%s",
+                self.device,
+                torch.cuda.is_available(),
+                torch.cuda.current_device() if torch.cuda.is_available() else "cpu",
+            )
 
             context = ExecutionContext(
                 device=self.device,
@@ -94,9 +100,30 @@ class SubgraphExecutor:
 
             # Step 1: Move inputs to GPU
             logger.debug(f"Moving {len(input_data)} inputs to GPU {self.gpu_id}")
+            move_start = time.time()
             for tensor_id_str, tensor_data in input_data.items():
                 tensor_id = int(tensor_id_str)
-                context.tensors[tensor_id] = tensor_data.to(self.device)
+                logger.info(
+                    "      loading input tensor[%s]: shape=%s dtype=%s src_device=%s",
+                    tensor_id,
+                    tuple(tensor_data.shape),
+                    tensor_data.dtype,
+                    tensor_data.device,
+                )
+                copy_start = time.time()
+                moved_tensor = tensor_data.to(self.device, non_blocking=True)
+                copy_ms = (time.time() - copy_start) * 1000
+                logger.info(
+                    "      tensor[%s] moved to device=%s (transfer %.2f ms)",
+                    tensor_id,
+                    moved_tensor.device,
+                    copy_ms,
+                )
+                context.tensors[tensor_id] = moved_tensor
+            if self.device.type == "cuda":
+                torch.cuda.synchronize(device=self.device)
+            move_ms = (time.time() - move_start) * 1000
+            logger.info("   Input transfer time: %.2f ms", move_ms)
 
             # Step 2: Execute operations in topological order
             logger.debug(f"Executing {len(subgraph_request['operations'])} operations")
@@ -105,6 +132,12 @@ class SubgraphExecutor:
 
                 result = self._execute_operation(op_spec, context)
                 context.tensors[op_spec['op_id']] = result
+                logger.debug(
+                    "      op[%s] result device=%s shape=%s",
+                    op_spec['op_id'],
+                    result.device,
+                    tuple(result.shape) if hasattr(result, 'shape') else "n/a",
+                )
 
                 # Check memory usage
                 if torch.cuda.is_available():
@@ -117,9 +150,18 @@ class SubgraphExecutor:
             final_result = context.tensors[output_id]
 
             logger.debug(f"Transferring final result: {final_result.shape} to CPU")
+            logger.info(
+                "   Final result before transfer: device=%s shape=%s dtype=%s",
+                final_result.device,
+                tuple(final_result.shape),
+                final_result.dtype,
+            )
 
             # Move to CPU and detach from computation graph for transfer
+            transfer_start = time.time()
             result_cpu = final_result.cpu().detach()
+            transfer_ms = (time.time() - transfer_start) * 1000
+            logger.info("   Final result transfer to CPU: %.2f ms", transfer_ms)
 
             # Statistics
             elapsed = time.time() - start_time
@@ -211,13 +253,26 @@ class SubgraphExecutor:
         """
         operation = op_spec['operation']
         input_ids = op_spec['inputs']
-        kwargs = op_spec.get('kwargs', {})
+        kwargs = op_spec.get('kwargs', {}).copy()
+        kwargs.pop('_stacklevel', None)
 
-        # Get input tensors from context (already on GPU)
-        inputs = [context.tensors[inp_id] for inp_id in input_ids]
+        inputs = []
+        for identifier in input_ids:
+            if isinstance(identifier, dict) and 'type' in identifier:
+                inputs.append(self._decode_literal(identifier))
+            else:
+                inputs.append(context.tensors[identifier])
 
-        # Execute operation using shared registry
         result = self.operation_registry.execute(operation, inputs, kwargs)
+
+        result_index = op_spec.get('result_index')
+        if result_index is not None and isinstance(result, (tuple, list)):
+            try:
+                result = result[result_index]
+            except IndexError as exc:
+                raise RuntimeError(
+                    f"Result index {result_index} out of range for operation {operation}"
+                ) from exc
 
         return result  # Result stays on GPU!
 
@@ -239,3 +294,32 @@ class SubgraphExecutor:
             stats['avg_operations_per_subgraph'] = 0.0
 
         return stats
+
+    @staticmethod
+    def _decode_literal(spec: Dict[str, Any]) -> Any:
+        literal_type = spec.get('type')
+        value = spec.get('value')
+
+        if literal_type == 'scalar':
+            return value
+        if literal_type == 'tuple':
+            return tuple(
+                SubgraphExecutor._decode_literal(v) if isinstance(v, dict) else v
+                for v in value
+            )
+        if literal_type == 'list':
+            return [
+                SubgraphExecutor._decode_literal(v) if isinstance(v, dict) else v
+                for v in value
+            ]
+        if literal_type == 'none':
+            return None
+        if literal_type == 'dtype':
+            return getattr(torch, value.split('.')[-1]) if isinstance(value, str) else value
+        if literal_type == 'slice':
+            start, stop, step = (
+                SubgraphExecutor._decode_literal(v) if isinstance(v, dict) else v
+                for v in value
+            )
+            return slice(start, stop, step)
+        raise ValueError(f"Unsupported literal spec: {spec}")

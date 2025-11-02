@@ -11,6 +11,7 @@ from enum import Enum
 class InterceptionContext(Enum):
     """What we're doing when interception is disabled."""
     NONE = "none"  # Normal operation, intercept
+    CAPTURING = "capturing"  # Capturing LazyTensors into computation graph
     CONSTRUCTION = "construction"  # LazyTensor being constructed
     MATERIALIZATION = "materialization"  # Executing operations
     PROPERTY_ACCESS = "property_access"  # Accessing tensor metadata
