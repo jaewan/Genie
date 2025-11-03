@@ -28,179 +28,49 @@ class RealisticLLMDecodeWorkload:
 
     def __init__(
         self,
-        model_name: str = "gpt2-xl",  # Use XL by default (1.5B), can upgrade to GPT-J
-        max_new_tokens: int = 512,    # Realistic generation length
-        batch_size: int = 8,          # Concurrent requests
-        use_real_model: bool = False  # Can set to True for GPT-J if available
+        model_name: str = "gpt2-xl",  # GPT-2-XL 1.5B
+        max_new_tokens: int = 128,    # Realistic generation length (reduced from 512 for GPU memory)
+        batch_size: int = 4,          # Concurrent requests (reduced from 8)
+        use_real_model: bool = True   # ALWAYS use real models
     ):
         self.model_name = model_name
         self.max_new_tokens = max_new_tokens
         self.batch_size = batch_size
-        self.use_real_model = use_real_model
-        # Load model and tokenizer immediately
+        self.device = None  # Will be set during load_model
         self.load_model()
 
     def load_model(self) -> bool:
-        """Load model from HuggingFace (with fallback to mock)."""
-        if self.use_real_model:
-            try:
-                from transformers import AutoModelForCausalLM, AutoTokenizer
+        """Load model from HuggingFace - ONLY REAL MODELS."""
+        try:
+            from transformers import AutoModelForCausalLM, AutoTokenizer
 
-                print(f"Loading {self.model_name}...")
-                self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-                
-                # CRITICAL FIX: Use explicit device placement, not device_map="auto"
-                # device_map="auto" can place on cuda:1 or other devices
-                self.model = AutoModelForCausalLM.from_pretrained(
-                    self.model_name,
-                    torch_dtype=torch.float16,  # Use FP16 for memory efficiency
-                    device_map=None              # No auto-mapping - explicit control
-                )
-                self.model.eval()
+            print(f"Loading {self.model_name}...")
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            
+            # Load with explicit device placement on GPU
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.model_name,
+                torch_dtype=torch.float16,
+                device_map=None  # No auto-mapping - explicit control
+            )
+            self.model.eval()
 
-                if self.tokenizer.pad_token is None:
-                    self.tokenizer.pad_token = self.tokenizer.eos_token
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
 
-                # CRITICAL FIX: Ensure model is on cuda:0
-                if torch.cuda.is_available():
-                    device = torch.device('cuda:0')
-                    self.model.to(device)
+            # CRITICAL: Ensure model is on GPU (cuda:0 by default)
+            if not torch.cuda.is_available():
+                raise RuntimeError("CUDA not available - GPU required for benchmarking")
+            
+            self.device = torch.device('cuda:0')
+            self.model.to(self.device)
 
-                print(f"✓ Loaded {self.model_name}")
-                return True
+            print(f"✓ Loaded {self.model_name} on {self.device}")
+            return True
 
-            except ImportError as e:
-                print(f"❌ transformers not available: {e}")
-                print("Falling back to mock model...")
-
-        # Fallback to mock model (keep on CPU for validation)
-        self.model = self._create_mock_model()
-        self.tokenizer = self._create_mock_tokenizer()
-        
-        # Keep mock model on CPU to avoid GPU memory issues during validation
-        # Real benchmarks will use real models on GPU
-        
-        return False
-
-    def _create_mock_model(self) -> nn.Module:
-        """Create a realistic mock GPT-J model for testing."""
-        class MockGPTJ(nn.Module):
-            def __init__(self, hidden_size: int = 4096, num_layers: int = 28):
-                super().__init__()
-                self.hidden_size = hidden_size
-                self.num_layers = num_layers
-                
-                # GPT-J approximate architecture
-                self.embeddings = nn.Embedding(50257, hidden_size)
-                self.pos_embeddings = nn.Embedding(2048, hidden_size)
-                
-                self.transformer = nn.TransformerEncoder(
-                    nn.TransformerEncoderLayer(
-                        d_model=hidden_size,
-                        nhead=16,  # GPT-J uses 16 heads
-                        dim_feedforward=hidden_size * 4,
-                        batch_first=True,
-                        dropout=0.0  # No dropout for inference
-                    ),
-                    num_layers=num_layers
-                )
-                
-                self.lm_head = nn.Linear(hidden_size, 50257)
-                self.ln_f = nn.LayerNorm(hidden_size)
-
-            def forward(
-                self,
-                input_ids: torch.Tensor,
-                past_key_values: Optional[List] = None,
-                use_cache: bool = False,
-                **kwargs
-            ) -> Dict:
-                """Forward pass with KV cache support."""
-                batch_size, seq_len = input_ids.shape
-                
-                # Embeddings
-                hidden_states = self.embeddings(input_ids)
-                
-                # Add position embeddings (simplified)
-                pos_ids = torch.arange(seq_len, device=input_ids.device).unsqueeze(0)
-                hidden_states = hidden_states + self.pos_embeddings(pos_ids)
-                
-                # Transformer
-                hidden_states = self.transformer(hidden_states)
-                
-                # Final layer norm and LM head
-                hidden_states = self.ln_f(hidden_states)
-                logits = self.lm_head(hidden_states)
-                
-                result = {'logits': logits}
-                
-                if use_cache:
-                    # Generate mock KV cache (28 layers, each with K and V)
-                    mock_kv = []
-                    for _ in range(self.num_layers):
-                        # Shape: [batch, num_heads, seq_len, head_dim]
-                        mock_kv.append((
-                            torch.randn(batch_size, 16, seq_len, hidden_size // 16),
-                            torch.randn(batch_size, 16, seq_len, hidden_size // 16)
-                        ))
-                    result['past_key_values'] = mock_kv
-
-                # Return a proper named tuple that behaves like the real transformers output
-                from types import SimpleNamespace
-                return SimpleNamespace(**result)
-
-        return MockGPTJ()
-
-    def _create_mock_tokenizer(self):
-        """Create a mock tokenizer."""
-        class MockTokenizer:
-            def __init__(self):
-                self.pad_token = "[PAD]"
-                self.eos_token = "[EOS]"
-                self.vocab_size = 50257
-
-            def encode(self, text: str, return_tensors: str = 'pt') -> torch.Tensor:
-                # Simulate variable-length encoding
-                token_ids = [101] * len(text.split())  # Rough token count
-                return torch.tensor([token_ids[:50]])  # Cap at 50 tokens
-
-            def decode(self, tokens: torch.Tensor) -> str:
-                return "Mock decoded text from generated tokens"
-
-            def __call__(
-                self,
-                texts: List[str],
-                return_tensors: str = 'pt',
-                padding: bool = True,
-                truncation: bool = False,
-                max_length: Optional[int] = None,
-                **kwargs
-            ):
-                # Simulate batch tokenization
-                max_len = max_length or 100
-                batch = []
-                for text in texts:
-                    # Simulate token encoding
-                    tokens = [101] * min(len(text.split()), max_len)
-                    batch.append(tokens)
-                
-                # Pad to same length
-                if padding and batch:
-                    max_batch_len = max(len(b) for b in batch)
-                    batch = [b + [0] * (max_batch_len - len(b)) for b in batch]
-                    # Recalculate attention mask with proper length
-                    attention_mask = [
-                        [1] * len(b) + [0] * (max_batch_len - len(b))
-                        for b in batch
-                    ]
-
-                # Return a simple dictionary that supports subscript access
-                return {
-                    'input_ids': torch.tensor(batch),
-                    'attention_mask': torch.tensor(attention_mask)
-                }
-
-        return MockTokenizer()
+        except Exception as e:
+            print(f"❌ Failed to load model: {e}")
+            raise
 
     def get_sample_inputs(self) -> List[torch.Tensor]:
         """Get batch of prompt tokens - returns list with single tensor."""
@@ -229,8 +99,7 @@ class RealisticLLMDecodeWorkload:
         )
 
         # CRITICAL FIX: Ensure input is on the correct device
-        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-        input_ids = encodings['input_ids'].to(device)
+        input_ids = encodings['input_ids'].to(self.device)
         
         return [input_ids]
 
@@ -242,9 +111,6 @@ class RealisticLLMDecodeWorkload:
         """
         if self.model is None:
             self.load_model()
-
-        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-        self.model.to(device)
 
         # Batch of prompts
         prompts = [
@@ -264,7 +130,14 @@ class RealisticLLMDecodeWorkload:
             padding=True,
             truncation=True,
             max_length=100
-        ).to(device)
+        )
+        
+        # CRITICAL FIX: Move to device
+        device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')
+        batch_encodings = {k: v.to(device) for k, v in batch_encodings.items()}
+        
+        # Ensure model is on device
+        self.model = self.model.to(device)
 
         with torch.no_grad():
             outputs = self.model.generate(
@@ -291,9 +164,6 @@ class RealisticLLMDecodeWorkload:
         if self.model is None:
             self.load_model()
 
-        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-        self.model.to(device)
-
         # Batch of prompts
         prompts = [
             "Once upon a time in a land far away",
@@ -312,7 +182,7 @@ class RealisticLLMDecodeWorkload:
             padding=True,
             truncation=True,
             max_length=100
-        ).to(device)
+        ).to(self.device)
 
         start_time = time.perf_counter()
 

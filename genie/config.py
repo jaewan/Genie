@@ -207,6 +207,46 @@ class LoggingConfig:
 
 
 @dataclass
+class OptimizationConfig:
+    """Optimization features configuration (Tensor Registry & SRG Fusion)."""
+    # Tensor Registry
+    enable_tensor_registry: bool = True              # Enable tensor caching across requests
+    tensor_registry_max_models: int = 5             # Max models to cache
+    tensor_registry_max_bytes_per_model: Optional[int] = None  # Max bytes per model
+    tensor_registry_max_total_bytes: Optional[int] = None      # Max total bytes
+    
+    # SRG-Driven Fusion
+    enable_srg_fusion: bool = True                  # Enable pattern-based fusion
+    enable_fusion_torchscript: bool = False         # Enable Tier 2 TorchScript (experimental)
+    enable_fusion_compilation: bool = False         # Enable Tier 3 TensorRT (experimental)
+    
+    # Profiling
+    profile_registry_overhead: bool = True          # Track registry overhead
+    profile_fusion_overhead: bool = True            # Track fusion overhead
+    
+    @classmethod
+    def from_env(cls) -> 'OptimizationConfig':
+        """Load optimization config from environment variables."""
+        return cls(
+            enable_tensor_registry=os.getenv('GENIE_TENSOR_REGISTRY', 'true').lower() == 'true',
+            tensor_registry_max_models=int(os.getenv('GENIE_REGISTRY_MAX_MODELS', 5)),
+            tensor_registry_max_bytes_per_model=(
+                int(os.getenv('GENIE_REGISTRY_MAX_BYTES_PER_MODEL'))
+                if os.getenv('GENIE_REGISTRY_MAX_BYTES_PER_MODEL') else None
+            ),
+            tensor_registry_max_total_bytes=(
+                int(os.getenv('GENIE_REGISTRY_MAX_TOTAL_BYTES'))
+                if os.getenv('GENIE_REGISTRY_MAX_TOTAL_BYTES') else None
+            ),
+            enable_srg_fusion=os.getenv('GENIE_SRG_FUSION', 'true').lower() == 'true',
+            enable_fusion_torchscript=os.getenv('GENIE_FUSION_TORCHSCRIPT', 'false').lower() == 'true',
+            enable_fusion_compilation=os.getenv('GENIE_FUSION_COMPILATION', 'false').lower() == 'true',
+            profile_registry_overhead=os.getenv('GENIE_PROFILE_REGISTRY', 'true').lower() == 'true',
+            profile_fusion_overhead=os.getenv('GENIE_PROFILE_FUSION', 'true').lower() == 'true',
+        )
+
+
+@dataclass
 class GenieConfig:
     """Main configuration class for Genie framework."""
     network: NetworkConfig = field(default_factory=NetworkConfig)
@@ -214,6 +254,7 @@ class GenieConfig:
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    optimization: OptimizationConfig = field(default_factory=OptimizationConfig)
 
     # Global settings
     debug_mode: bool = False
@@ -253,6 +294,7 @@ class GenieConfig:
         config.runtime = RuntimeConfig.from_env()
         config.server = ServerConfig.from_env()
         config.logging = LoggingConfig.from_env()
+        config.optimization = OptimizationConfig.from_env()
 
         # Global environment overrides
         config.debug_mode = os.getenv('GENIE_DEBUG', 'false').lower() == 'true'
@@ -267,6 +309,7 @@ class GenieConfig:
         runtime_data = data.get('runtime', {})
         server_data = data.get('server', {})
         logging_data = data.get('logging', {})
+        optimization_data = data.get('optimization', {})
 
         return cls(
             network=NetworkConfig(**network_data),
@@ -274,6 +317,7 @@ class GenieConfig:
             runtime=RuntimeConfig(**runtime_data),
             server=ServerConfig(**server_data),
             logging=LoggingConfig(**logging_data),
+            optimization=OptimizationConfig(**optimization_data),
             debug_mode=data.get('debug_mode', False)
         )
 
@@ -335,6 +379,17 @@ class GenieConfig:
                 'file_path': self.logging.file_path,
                 'max_file_size_mb': self.logging.max_file_size_mb,
                 'backup_count': self.logging.backup_count
+            },
+            'optimization': {
+                'enable_tensor_registry': self.optimization.enable_tensor_registry,
+                'tensor_registry_max_models': self.optimization.tensor_registry_max_models,
+                'tensor_registry_max_bytes_per_model': self.optimization.tensor_registry_max_bytes_per_model,
+                'tensor_registry_max_total_bytes': self.optimization.tensor_registry_max_total_bytes,
+                'enable_srg_fusion': self.optimization.enable_srg_fusion,
+                'enable_fusion_torchscript': self.optimization.enable_fusion_torchscript,
+                'enable_fusion_compilation': self.optimization.enable_fusion_compilation,
+                'profile_registry_overhead': self.optimization.profile_registry_overhead,
+                'profile_fusion_overhead': self.optimization.profile_fusion_overhead,
             },
             'debug_mode': self.debug_mode
         }

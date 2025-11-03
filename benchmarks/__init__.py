@@ -23,13 +23,18 @@ Expected Results:
 - Ablation studies: Quantify impact of each semantic feature
 """
 
-from .framework import (
-    BenchmarkRunner,
-    AblationStudyRunner,
-    BenchmarkConfig,
-    BenchmarkResult,
-    ComparativeAnalysis
-)
+# Framework components (optional - may not exist yet)
+try:
+    from .framework import (
+        BenchmarkRunner,
+        AblationStudyRunner,
+        BenchmarkConfig,
+        BenchmarkResult,
+        ComparativeAnalysis
+    )
+    _FRAMEWORK_AVAILABLE = True
+except ImportError:
+    _FRAMEWORK_AVAILABLE = False
 
 # Basic workloads removed - use workloads_detailed/ for comprehensive implementations
 
@@ -69,14 +74,17 @@ except ImportError:
     _BASELINES_AVAILABLE = False
 
 __version__ = "2.0.0"
-__all__ = [
-    # Framework
-    "BenchmarkRunner",
-    "AblationStudyRunner",
-    "BenchmarkConfig",
-    "BenchmarkResult",
-    "ComparativeAnalysis",
-]
+__all__ = []
+
+# Add framework components if available
+if _FRAMEWORK_AVAILABLE:
+    __all__.extend([
+        "BenchmarkRunner",
+        "AblationStudyRunner",
+        "BenchmarkConfig",
+        "BenchmarkResult",
+        "ComparativeAnalysis",
+    ])
 
 # Add comprehensive evaluation components if available
 if _COMPREHENSIVE_AVAILABLE:

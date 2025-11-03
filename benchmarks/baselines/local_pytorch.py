@@ -12,6 +12,30 @@ from typing import Any, Dict, List
 from contextlib import contextmanager
 
 
+class ModelWrapper(nn.Module):
+    """Wrapper to extract tensor from complex outputs like CLIPOutput or BERT outputs."""
+    
+    def __init__(self, model: nn.Module):
+        super().__init__()
+        self.model = model
+        
+    def forward(self, *args, **kwargs):
+        output = self.model(*args, **kwargs)
+        
+        # Handle CLIP output
+        if hasattr(output, 'logits_per_image'):
+            return output.logits_per_image
+        # Handle BERT/other HuggingFace models with last_hidden_state
+        elif hasattr(output, 'last_hidden_state'):
+            return output.last_hidden_state
+        # Handle standard HuggingFace models with logits
+        elif hasattr(output, 'logits'):
+            return output.logits
+        # Already a tensor or unknown type
+        else:
+            return output
+
+
 class LocalPyTorchBaseline:
     """
     Pure PyTorch execution on single GPU.
@@ -21,7 +45,7 @@ class LocalPyTorchBaseline:
     """
 
     def __init__(self, device: str = 'cuda:0'):
-        self.device = torch.device(device) if torch.cuda.is_available() else torch.device('cpu')
+        self.device = torch.device(device)
         self.name = "local_pytorch"
 
     def run(self, model: nn.Module, inputs: List[torch.Tensor], **kwargs) -> torch.Tensor:
@@ -41,23 +65,23 @@ class LocalPyTorchBaseline:
             # For synthetic workloads, just return a mock output
             return torch.randn(1, 1000)  # Mock output
 
-        # Move model and inputs to device
-        model = model.to(self.device)
+        # Wrap model to handle complex outputs (BERT, CLIP)
+        wrapped_model = ModelWrapper(model)
+        
+        # Move model and inputs to GPU
+        wrapped_model = wrapped_model.to(self.device)
         device_inputs = [inp.to(self.device) for inp in inputs]
 
         # Execute with no_grad for inference
         with torch.no_grad():
-            output = model(*device_inputs)
+            output = wrapped_model(*device_inputs)
 
-        # Handle different output types
-        if hasattr(output, 'logits'):
-            # HuggingFace model output (e.g., CausalLMOutputWithCrossAttentions)
-            return output.logits.cpu()
+        # Ensure output is tensor and move to CPU
+        if isinstance(output, torch.Tensor):
+            return output.cpu()
         elif hasattr(output, 'cpu'):
-            # Regular tensor output
             return output.cpu()
         else:
-            # Fallback - convert to tensor if possible
             return torch.tensor(output).cpu()
 
     def get_metadata(self) -> Dict[str, Any]:

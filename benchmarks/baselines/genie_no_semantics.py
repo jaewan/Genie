@@ -1,14 +1,13 @@
 """
-Genie No Semantics Baseline - Critical Comparison.
+Genie No Semantics Baseline - Generic Graph Capture.
 
-Genie with semantic awareness DISABLED.
-This is the key comparison:
-- Same capture overhead
-- Same network stack
-- Same execution model
-BUT: Random placement, no co-location, no parallelism
+Genie framework but WITHOUT semantic optimizations:
+- Graph capture: Enabled
+- Semantic analysis: Disabled
+- Pattern matching: Disabled
+- Phase detection: Disabled
 
-Difference from "Full Genie" = value of semantic awareness.
+Purpose: Measure semantic optimization impact
 """
 
 import torch
@@ -17,20 +16,44 @@ from typing import Any, Dict, List
 from contextlib import contextmanager
 
 
+class ModelWrapper(nn.Module):
+    """Wrapper to extract tensor from complex outputs like CLIPOutput or BERT outputs."""
+    
+    def __init__(self, model: nn.Module):
+        super().__init__()
+        self.model = model
+        
+    def forward(self, *args, **kwargs):
+        output = self.model(*args, **kwargs)
+        
+        # Handle CLIP output
+        if hasattr(output, 'logits_per_image'):
+            return output.logits_per_image
+        # Handle BERT/other HuggingFace models with last_hidden_state
+        elif hasattr(output, 'last_hidden_state'):
+            return output.last_hidden_state
+        # Handle standard HuggingFace models with logits
+        elif hasattr(output, 'logits'):
+            return output.logits
+        # Already a tensor or unknown type
+        else:
+            return output
+
+
 class GenieNoSemanticsBaseline:
     """
-    Genie with semantic awareness DISABLED.
+    Genie framework but WITHOUT semantic optimizations.
 
-    This is your key comparison:
-    - Same capture overhead
-    - Same network stack
-    - Same execution model
-    BUT: Random placement, no co-location, no parallelism
+    - Graph capture: Enabled
+    - Semantic analysis: Disabled
+    - Pattern matching: Disabled
+    - Phase detection: Disabled
 
-    Difference from "Full Genie" = value of semantic awareness
+    Purpose: Measure semantic optimization impact
     """
 
     def __init__(self, device: str = 'remote_accelerator:0'):
+        """Initialize Genie No Semantics baseline."""
         try:
             self.device = torch.device(device)
         except RuntimeError:
@@ -43,12 +66,12 @@ class GenieNoSemanticsBaseline:
 
     def run(self, model: nn.Module, inputs: List[torch.Tensor], **kwargs) -> torch.Tensor:
         """
-        Run with semantic features disabled.
+        Run with graph capture but NO semantic optimizations.
 
         Args:
             model: PyTorch model (or model identifier for synthetic workloads)
             inputs: List of input tensors
-            **kwargs: Additional arguments (passed to model)
+            **kwargs: Additional arguments
 
         Returns:
             Output tensor on CPU
@@ -58,37 +81,29 @@ class GenieNoSemanticsBaseline:
             # For synthetic workloads, just return a mock output
             return torch.randn(1, 1000)  # Mock output
 
-        # Disable semantic features
-        self._disable_semantic_features()
+        # Wrap model to handle complex outputs (BERT, CLIP)
+        wrapped_model = ModelWrapper(model)
 
-        try:
-            # Move model to remote device
-            model = model.to(self.device)
-            device_inputs = [inp.to(self.device) for inp in inputs]
+        # Move model to device
+        wrapped_model = wrapped_model.to(self.device)
+        device_inputs = [inp.to(self.device) for inp in inputs]
 
-            # Execute without semantic optimizations
-            output = model(*device_inputs)
+        # Execute
+        output = wrapped_model(*device_inputs)
 
-            # Materialize result
-            if hasattr(output, '_materialize'):
-                result = output._materialize()
-            else:
-                result = output
+        # Materialize result
+        if hasattr(output, '_materialize'):
+            result = output._materialize()
+        else:
+            result = output
 
-            # Handle different output types
-            if hasattr(result, 'logits'):
-                # HuggingFace model output (e.g., CausalLMOutputWithCrossAttentions)
-                return result.logits.cpu()
-            elif hasattr(result, 'cpu'):
-                # Regular tensor output
-                return result.cpu()
-            else:
-                # Fallback - convert to tensor if possible
-                return torch.tensor(result).cpu()
-
-        finally:
-            # Always restore semantic features
-            self._restore_semantic_features()
+        # Ensure output is tensor and move to CPU
+        if isinstance(result, torch.Tensor):
+            return result.cpu()
+        elif hasattr(result, 'cpu'):
+            return result.cpu()
+        else:
+            return torch.tensor(result).cpu()
 
     def _disable_semantic_features(self):
         """Disable all semantic features in the system."""

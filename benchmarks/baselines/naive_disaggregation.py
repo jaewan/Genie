@@ -20,6 +20,30 @@ import torch.nn as nn
 from typing import List, Dict, Any
 
 
+class ModelWrapper(nn.Module):
+    """Wrapper to extract tensor from complex outputs like CLIPOutput or BERT outputs."""
+    
+    def __init__(self, model: nn.Module):
+        super().__init__()
+        self.model = model
+        
+    def forward(self, *args, **kwargs):
+        output = self.model(*args, **kwargs)
+        
+        # Handle CLIP output
+        if hasattr(output, 'logits_per_image'):
+            return output.logits_per_image
+        # Handle BERT/other HuggingFace models with last_hidden_state
+        elif hasattr(output, 'last_hidden_state'):
+            return output.last_hidden_state
+        # Handle standard HuggingFace models with logits
+        elif hasattr(output, 'logits'):
+            return output.logits
+        # Already a tensor or unknown type
+        else:
+            return output
+
+
 class NaiveDisaggregationBaseline:
     """
     Worst-case disaggregation: transfer everything without optimization.
@@ -111,14 +135,17 @@ class NaiveDisaggregationBaseline:
         """
         import time
         
+        # Wrap model to handle complex outputs (BERT, CLIP)
+        wrapped_model = ModelWrapper(model)
+        
         # Move model and inputs to device
         device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-        model = model.to(device)
+        wrapped_model = wrapped_model.to(device)
         device_inputs = [inp.to(device) for inp in inputs]
         
         # Simulate naive transfer overhead
         # Estimate: ~10ms per MB transferred
-        model_size_mb = sum(p.numel() * p.element_size() for p in model.parameters()) / (1024 * 1024)
+        model_size_mb = sum(p.numel() * p.element_size() for p in wrapped_model.parameters()) / (1024 * 1024)
         input_size_mb = sum(inp.numel() * inp.element_size() for inp in inputs) / (1024 * 1024)
         
         # Naive approach: transfer everything
@@ -127,7 +154,7 @@ class NaiveDisaggregationBaseline:
         
         # Execute with no_grad for inference
         with torch.no_grad():
-            output = model(*device_inputs)
+            output = wrapped_model(*device_inputs)
         
         # Simulate output transfer overhead
         if hasattr(output, 'logits'):

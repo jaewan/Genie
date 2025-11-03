@@ -35,6 +35,14 @@ try:
         ConvolutionMatcher,
         KVCacheMatcher,
     )
+    from .phase_executor import (  # noqa: F401
+        PhaseAwareExecutor,
+        PrefillExecutionStrategy,
+        DecodeExecutionStrategy,
+        VisionExecutionStrategy,
+        ExecutionPhaseStrategy,
+        ExecutionStrategy,
+    )
 except ImportError as e:
     # Phase 3 not available yet
     pass
@@ -68,4 +76,11 @@ __all__ = [
     'AttentionMatcher',
     'ConvolutionMatcher',
     'KVCacheMatcher',
+    # Phase-aware execution exports
+    'PhaseAwareExecutor',
+    'PrefillExecutionStrategy',
+    'DecodeExecutionStrategy',
+    'VisionExecutionStrategy',
+    'ExecutionPhaseStrategy',
+    'ExecutionStrategy',
 ]

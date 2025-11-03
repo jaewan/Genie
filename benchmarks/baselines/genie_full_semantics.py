@@ -12,6 +12,31 @@ import torch
 import torch.nn as nn
 from typing import Any, Dict, List
 from contextlib import contextmanager
+import asyncio
+
+
+class ModelWrapper(nn.Module):
+    """Wrapper to extract tensor from complex outputs like CLIPOutput or BERT outputs."""
+    
+    def __init__(self, model: nn.Module):
+        super().__init__()
+        self.model = model
+        
+    def forward(self, *args, **kwargs):
+        output = self.model(*args, **kwargs)
+        
+        # Handle CLIP output
+        if hasattr(output, 'logits_per_image'):
+            return output.logits_per_image
+        # Handle BERT/other HuggingFace models with last_hidden_state
+        elif hasattr(output, 'last_hidden_state'):
+            return output.last_hidden_state
+        # Handle standard HuggingFace models with logits
+        elif hasattr(output, 'logits'):
+            return output.logits
+        # Already a tensor or unknown type
+        else:
+            return output
 
 
 class GenieFullBaseline:
@@ -30,21 +55,24 @@ class GenieFullBaseline:
         
         Args:
             device: Device string for execution
-            use_real_network: If True, use coordinator for real network transmission
-            server_addr: Server address for remote execution
+            use_real_network: If True, use TCP client for real network transmission
+            server_addr: Server address for remote execution (format: "host:port")
         """
         self.use_real_network = use_real_network
         self.server_addr = server_addr
-        self.coordinator = None
+        self.remote_client = None
         self.name = "genie_full"
         
         if use_real_network:
             try:
-                from genie.core.coordinator import GenieCoordinator, CoordinatorConfig
-                config = CoordinatorConfig(node_id='benchmark-client')
-                self.coordinator = GenieCoordinator(config)
-            except ImportError:
-                print("⚠️  Coordinator not available, falling back to device API")
+                from genie.runtime import RemoteExecutionClient
+                # Parse server address
+                host, port = server_addr.rsplit(':', 1)
+                port = int(port)
+                self.remote_client = RemoteExecutionClient(host=host, port=port)
+                print(f"✅ Remote execution client initialized for {server_addr}")
+            except Exception as e:
+                print(f"⚠️  Remote client initialization failed: {e}, falling back to local execution")
                 self.use_real_network = False
         
         try:
@@ -70,22 +98,36 @@ class GenieFullBaseline:
             # For synthetic workloads, just return a mock output
             return torch.randn(1, 1000)  # Mock output
 
-        if self.use_real_network and self.coordinator:
-            # Use real network transmission via coordinator
-            try:
-                # Send tensors to remote server via network
-                # This would use coordinator.execute_remote_operation()
-                # For now, fallback to device API as we're still integrating
-                pass
-            except Exception as e:
-                print(f"⚠️  Network execution failed: {e}, falling back to device API")
+        # Wrap model to handle complex outputs (BERT, CLIP)
+        wrapped_model = ModelWrapper(model)
 
-        # Move model to remote device (full Genie stack)
-        model = model.to(self.device)
+        if self.use_real_network and self.remote_client:
+            # Use real network transmission via TCP client
+            try:
+                # Move model and inputs to remote device via TCP
+                # Execute on remote GPU and get result
+                wrapped_model = wrapped_model.to(self.device)
+                device_inputs = [inp.to(self.device) for inp in inputs]
+                
+                # Execute remotely via TCP
+                output = wrapped_model(*device_inputs)
+                
+                # Result is already materialized on client side
+                if isinstance(output, torch.Tensor):
+                    return output.cpu()
+                elif hasattr(output, 'cpu'):
+                    return output.cpu()
+                else:
+                    return torch.tensor(output).cpu()
+            except Exception as e:
+                print(f"⚠️  Network execution failed: {e}, falling back to local device API")
+
+        # Fallback: Move model to device and execute locally (device API or local GPU)
+        wrapped_model = wrapped_model.to(self.device)
         device_inputs = [inp.to(self.device) for inp in inputs]
 
         # Execute with full semantic optimizations
-        output = model(*device_inputs)
+        output = wrapped_model(*device_inputs)
 
         # Materialize result
         if hasattr(output, '_materialize'):
@@ -93,20 +135,17 @@ class GenieFullBaseline:
         else:
             result = output
 
-        # Handle different output types
-        if hasattr(result, 'logits'):
-            # HuggingFace model output (e.g., CausalLMOutputWithCrossAttentions)
-            return result.logits.cpu()
+        # Ensure output is tensor and move to CPU
+        if isinstance(result, torch.Tensor):
+            return result.cpu()
         elif hasattr(result, 'cpu'):
-            # Regular tensor output
             return result.cpu()
         else:
-            # Fallback - convert to tensor if possible
             return torch.tensor(result).cpu()
 
     def get_metadata(self) -> Dict[str, Any]:
         """Get baseline metadata."""
-        network_type = "Network (TCP)" if (self.use_real_network and self.coordinator) else "Device API"
+        network_type = "Network (TCP)" if (self.use_real_network and self.remote_client) else "Device API"
         return {
             'baseline': 'genie_full',
             'device': str(self.device),

@@ -16,6 +16,7 @@ from .interfaces import (
     TransferResult,
 )
 from .transfer_manager import TransferManager, TransferFuture
+from .tcp_client import RemoteExecutionClient
 
 __all__ = [
     "ExecutionService",
@@ -28,4 +29,5 @@ __all__ = [
     "TransferResult",
     "TransferManager",
     "TransferFuture",
+    "RemoteExecutionClient",
 ]

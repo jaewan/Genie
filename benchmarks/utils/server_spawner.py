@@ -5,7 +5,17 @@ import logging
 import multiprocessing as mp
 import socket
 import time
+import sys
 from typing import Optional
+from pathlib import Path
+
+# Set multiprocessing start method to 'spawn' to avoid CUDA reinitialization issues
+# This must be done before any processes are created
+try:
+    mp.set_start_method('spawn', force=True)
+except RuntimeError:
+    # Already set, ignore
+    pass
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -14,14 +24,14 @@ logger = logging.getLogger(__name__)
 class RemoteServerManager:
     """Manages spawning and lifecycle of remote Genie server."""
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 5556, timeout: int = 30):
+    def __init__(self, host: str = "127.0.0.1", port: int = 5556, timeout: int = 60):
         """
         Initialize server manager.
         
         Args:
             host: Server host address
             port: Server port
-            timeout: Timeout for server startup in seconds
+            timeout: Timeout for server startup in seconds (increased to 60 for initialization)
         """
         self.host = host
         self.port = port
@@ -37,26 +47,43 @@ class RemoteServerManager:
             True if server started successfully, False otherwise
         """
         try:
-            # Spawn server in daemon process
-            self.process = mp.Process(
-                target=self._run_server,
-                daemon=True
+            # First, check if port is available
+            if not self._is_port_available(self.host, self.port):
+                logger.warning(f"Port {self.port} is in use, trying next port...")
+                # Try alternative ports
+                for alt_port in [5557, 5558, 5559, 5560]:
+                    if self._is_port_available(self.host, alt_port):
+                        self.port = alt_port
+                        logger.info(f"Using alternative port: {alt_port}")
+                        break
+                else:
+                    logger.error("No available ports found")
+                    return False
+            
+            # Spawn server in daemon process using 'spawn' context (CUDA-safe)
+            ctx = mp.get_context('spawn')
+            self.process = ctx.Process(
+                target=self._run_server_subprocess,
+                daemon=True,
+                name="genie-server"
             )
             self.process.start()
             logger.info(f"Server process started (PID: {self.process.pid})")
 
-            # Wait for server to be ready
+            # Wait for server to be ready with more aggressive checking
             if self._wait_for_server():
                 self.server_ready = True
                 logger.info(f"✓ Server ready on {self.host}:{self.port}")
                 return True
             else:
-                logger.warning("Server did not respond within timeout")
+                logger.warning(f"Server did not respond within timeout ({self.timeout}s)")
                 self.stop()
                 return False
 
         except Exception as e:
             logger.error(f"Failed to start server: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
     def stop(self):
@@ -75,52 +102,82 @@ class RemoteServerManager:
     def is_ready(self) -> bool:
         """Check if server is ready."""
         return self.server_ready
+    
+    def _is_port_available(self, host: str, port: int) -> bool:
+        """Check if a port is available."""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1)
+            result = sock.connect_ex((host, port))
+            sock.close()
+            return result != 0
+        except Exception:
+            return True
 
-    def _wait_for_server(self, check_interval: float = 0.5) -> bool:
+    def _wait_for_server(self, check_interval: float = 0.2, max_attempts: int = None) -> bool:
         """
         Wait for server to be ready by checking TCP connection.
         
         Args:
             check_interval: Interval between checks in seconds
+            max_attempts: Maximum number of checks (overrides timeout)
             
         Returns:
             True if server is ready, False if timeout
         """
+        if max_attempts is None:
+            max_attempts = int(self.timeout / check_interval)
+        
         start_time = time.time()
-        while time.time() - start_time < self.timeout:
+        attempt = 0
+        
+        while attempt < max_attempts and (time.time() - start_time < self.timeout):
+            attempt += 1
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(1)
                 result = sock.connect_ex((self.host, self.port))
                 sock.close()
                 if result == 0:
-                    time.sleep(0.5)  # Extra delay to ensure server is fully ready
+                    logger.info(f"✓ Server connection successful on attempt {attempt}")
+                    time.sleep(0.2)  # Extra delay to ensure server is fully ready
                     return True
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Connection attempt {attempt} failed: {e}")
             
             time.sleep(check_interval)
         
+        elapsed = time.time() - start_time
+        logger.warning(f"Server not ready after {elapsed:.1f}s ({attempt} attempts)")
         return False
 
-    def _run_server(self):
+    def _run_server_subprocess(self):
         """Run server in separate process."""
         try:
-            # Import Genie server
-            from genie.server.server import GenieServer, ServerConfig
+            # Import Genie TCP server - the new async implementation
+            from genie.server.tcp_server import start_server, initialize_server
             
-            # Create server configuration
-            config = ServerConfig(
-                node_id='benchmark-server',
-                data_port=self.port
-            )
+            logger.info(f"Starting TCP server on port {self.port}...")
             
-            # Start server
-            server = GenieServer(config)
-            asyncio.run(server.start())
+            # Start TCP server (this blocks)
+            try:
+                async def run_tcp_server():
+                    """Initialize and start TCP server."""
+                    await initialize_server()
+                    await start_server(host="127.0.0.1", port=self.port)
+                
+                asyncio.run(run_tcp_server())
+            except Exception as e:
+                logger.error(f"TCP server start failed: {e}")
+                import traceback
+                traceback.print_exc()
             
         except ImportError as e:
-            logger.error(f"Failed to import Genie server: {e}")
+            logger.error(f"Failed to import Genie TCP server: {e}")
             logger.error("Make sure Genie is properly installed")
+            import traceback
+            traceback.print_exc()
         except Exception as e:
             logger.error(f"Server error: {e}")
+            import traceback
+            traceback.print_exc()

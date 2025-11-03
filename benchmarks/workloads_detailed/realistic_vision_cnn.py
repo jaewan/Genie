@@ -171,7 +171,8 @@ class RealisticVisionCNNWorkload:
         # Use fixed seed for reproducibility
         torch.manual_seed(42)
         
-        # Create batch of frames
+        # Create batch of frames with SAME seed as get_sample_inputs
+        # This ensures reference matches the actual input
         frames = torch.randn(
             self.batch_size,
             3,
@@ -182,8 +183,15 @@ class RealisticVisionCNNWorkload:
 
         with torch.no_grad():
             outputs = self.model(frames)
-
-        return outputs.cpu()
+        
+        # Handle complex output types (wrap in tensor if needed)
+        if isinstance(outputs, torch.Tensor):
+            return outputs.cpu()
+        elif hasattr(outputs, 'logits'):
+            return outputs.logits.cpu()
+        else:
+            # Fallback - convert to tensor
+            return torch.tensor(outputs).cpu()
 
     def run(self, baseline_config: Dict) -> Dict[str, Any]:
         """

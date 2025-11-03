@@ -20,9 +20,7 @@ from typing import Dict, List, Optional
 import torch
 
 from ..core.coordinator import GenieCoordinator, CoordinatorConfig
-from ..runtime.control_plane import ControlPlane
-from .capability_provider import CapabilityProvider
-from .executor import RemoteExecutor
+from ..server.optimization_executor import OptimizationExecutor
 from ..core.metadata_types import ResultMetadata, ErrorMetadata, create_result_metadata, create_error_metadata
 
 logger = logging.getLogger(__name__)
@@ -142,10 +140,10 @@ class GenieServer:
             # Server doesn't need control plane for basic operation
             # Control plane is handled by the coordinator if needed
 
-            # 4. Initialize remote executor
-            logger.info("Initializing remote executor...")
-            self.executor = RemoteExecutor(gpu_id=0)  # Use first GPU
-            logger.info(f"✓ Remote executor ready (GPU {self.executor.gpu_id})")
+            # 4. Initialize optimization executor (with tensor registry and fusion compiler)
+            logger.info("Initializing optimization executor...")
+            self.executor = OptimizationExecutor(gpu_id=0)  # Use first GPU
+            logger.info(f"✓ Optimization executor ready (GPU {self.executor.gpu_id}, Registry: enabled, Fusion: enabled)")
 
             self.is_running = True
             logger.info(f"\n🎉 Genie server ready on {self.node_id}")
