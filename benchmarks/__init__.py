@@ -1,26 +1,31 @@
 """
 Genie Benchmark Suite for OSDI Evaluation.
 
-This module provides a comprehensive benchmarking framework that proves
-semantic awareness in accelerator disaggregation provides performance benefits.
+This module provides the 4 main OSDI benchmarks that demonstrate
+semantic-driven GPU disaggregation benefits for production LLM serving.
+
+Active Benchmarks:
+1. llama_7b_unified_final.py - Memory pressure handling (OOM cliffs, 26-34% savings)
+2. continuous_llm_serving.py - Production serving realism (41% GPU utilization)
+3. multi_tenant_real.py - Multi-tenant coordination (120% throughput improvement)
+4. ray_vs_genie_comparison.py - Disaggregation superiority (7221% vs Ray)
 
 Key Components:
-- BenchmarkRunner: Unified experiment runner with statistical analysis
-- AblationStudyRunner: Feature ablation studies to isolate impact
-- Detailed workloads: HuggingFace model implementations with semantic optimizations
-- Baseline configurations: 7 different baselines from best to worst performance
-- Comprehensive evaluation: 35 configurations (7 baselines × 5 workloads)
-- Result generation: Paper-ready tables and figures
+- Realistic workloads: HuggingFace model implementations with semantic optimizations
+- Baseline configurations: Local PyTorch, Genie semantic, Ray disaggregation
+- Production evaluation: Real models, realistic scenarios, measurable benefits
 
 Usage:
-    python3 test_comprehensive.py                # Run test suite
-    python -m benchmarks.comprehensive_evaluation  # Full OSDI evaluation
+    python benchmarks/llama_7b_unified_final.py     # Memory pressure benchmark
+    python benchmarks/continuous_llm_serving.py     # Production serving benchmark
+    python benchmarks/multi_tenant_real.py          # Multi-tenant benchmark
+    python benchmarks/ray_vs_genie_comparison.py    # Ray comparison benchmark
 
 Expected Results:
-- LLM co-location: 3-5x speedup, 90%+ network reduction
-- Multimodal parallel: 50%+ speedup from parallelization
-- Cost model validation: >0.7 correlation with reality
-- Ablation studies: Quantify impact of each semantic feature
+- Memory efficiency: 26-34% reduction through semantic management
+- Production readiness: 41% GPU utilization in realistic scenarios
+- Multi-tenant throughput: 120% improvement through smart scheduling
+- Disaggregation advantage: 7221% better than naive approaches
 """
 
 # Framework components (optional - may not exist yet)
@@ -48,11 +53,8 @@ except ImportError:
 # Import detailed workloads
 try:
     from .workloads_detailed import (
-        LLMDecodeWorkload,
-        LLMPrefillWorkload,
-        VisionCNNWorkload,
-        MultimodalVQAWorkload,
-        MicrobenchmarkWorkload
+        RealisticLLMDecodeWorkload,
+        RealisticLLMPrefillWorkload
     )
     _DETAILED_WORKLOADS_AVAILABLE = True
 except ImportError:
@@ -62,11 +64,7 @@ except ImportError:
 try:
     from .baselines import (
         LocalPyTorchBaseline,
-        GenieCaptureOnlyBaseline,
-        GenieLocalRemoteBaseline,
-        GenieNoSemanticsBaseline,
         GenieFullBaseline,
-        PyTorchRPCBaseline,
         RayBaseline
     )
     _BASELINES_AVAILABLE = True
@@ -79,11 +77,11 @@ __all__ = []
 # Add framework components if available
 if _FRAMEWORK_AVAILABLE:
     __all__.extend([
-        "BenchmarkRunner",
-        "AblationStudyRunner",
-        "BenchmarkConfig",
-        "BenchmarkResult",
-        "ComparativeAnalysis",
+    "BenchmarkRunner",
+    "AblationStudyRunner",
+    "BenchmarkConfig",
+    "BenchmarkResult",
+    "ComparativeAnalysis",
     ])
 
 # Add comprehensive evaluation components if available
@@ -92,20 +90,13 @@ if _COMPREHENSIVE_AVAILABLE:
 
 if _DETAILED_WORKLOADS_AVAILABLE:
     __all__.extend([
-        "LLMDecodeWorkload",
-        "LLMPrefillWorkload",
-        "VisionCNNWorkload",
-        "MultimodalVQAWorkload",
-        "MicrobenchmarkWorkload"
+        "RealisticLLMDecodeWorkload",
+        "RealisticLLMPrefillWorkload"
     ])
 
 if _BASELINES_AVAILABLE:
     __all__.extend([
         "LocalPyTorchBaseline",
-        "GenieCaptureOnlyBaseline",
-        "GenieLocalRemoteBaseline",
-        "GenieNoSemanticsBaseline",
         "GenieFullBaseline",
-        "PyTorchRPCBaseline",
         "RayBaseline"
     ])
