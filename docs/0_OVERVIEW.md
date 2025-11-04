@@ -1,24 +1,24 @@
 # Genie: Semantic-Driven GPU Disaggregation
 
-**Status**: ✅ Production Ready  
-**Last Updated**: November 2, 2025  
+**Status**: Need auditing with real implementation
+**Last Updated**: November 4, 2025
 **Version**: 1.0
 
 ---
 
-**📋 Documentation Audit Status** (November 3, 2025):
-- ✅ Frontend implementation: Verified against actual code
-- ✅ Semantic metadata structure: Confirmed accurate
-- ✅ Memory Management (Phase 1-3): Complete with production hardening
-- ✅ Performance monitoring: Prometheus metrics integrated
-- ✅ TCP Transport: Fully implemented and deployed
-- ✅ Serialization Optimization: NumPy-based format deployed
-- ✅ SRG-Driven Fusion: Pattern grouping (Tier 1) implemented
-- ✅ Tensor Registry: Version-aware caching with LRU eviction
-- ✅ OptimizationExecutor: Default executor integrating all components
+**📋 Documentation Audit Status** (Edit this section after auditing):
+-  Frontend implementation: Need verification against actual code
+-  Semantic metadata structure: 
+-  Memory Management (Phase 1-3): Complete with production hardening
+-  Performance monitoring: Prometheus metrics integrated
+-  TCP Transport: Fully implemented and deployed
+-  Serialization Optimization: NumPy-based format deployed
+-  SRG-Driven Fusion: Pattern grouping (Tier 1) implemented
+-  Tensor Registry: Version-aware caching with LRU eviction
+-  OptimizationExecutor: Default executor integrating all components
+-  Multi-Layer Optimization: Phases 1-4 all implemented (Graph Caching, Block Compilation, GPU Cache, TensorRT)
+-  Remote execution: Validated on TCP transport
 - ⚠️ Zero-Copy Transport: Not implemented (future phase)
-- ⚠️ Remote execution: Validated on TCP transport
-- See "Implementation Status" section for current architecture
 
 ---
 
@@ -122,9 +122,15 @@ This semantic richness enables optimizations like:
 - Reduces RPC calls through coarse-grained execution
 - Coarse-grained execution strategy for efficiency
 
+**GPU Cache** (Phase 3):
+- Persistent weight storage on GPU (LRU eviction)
+- Eliminates deserialization overhead on warm requests
+- Memory-aware eviction with pressure handling
+
 **TensorRT Optimization** (Phase 4):
 - Lazy compilation after profiling threshold
 - Adaptive optimization for repeated blocks
+- FP16 acceleration for 2-3x speedup
 
 ### 3. Three Execution Strategies
 
@@ -137,7 +143,7 @@ Genie selects the optimal execution strategy automatically:
 ### 4. Hybrid Graph Builder
 
 Intelligently chooses between representations:
-- **FX Symbolic Trace** - Covers ~80% of models, enables better optimizations
+- **FX Symbolic Trace** - Attempted first, falls back to LazyTensor DAG for complex models (e.g., transformers)
 - **LazyTensor DAG** - Always works, handles dynamic control flow (20% of models)
 
 Both representations exposed through unified `GenieGraph` interface.
@@ -172,9 +178,8 @@ For specific performance measurements in your environment, run the benchmarking 
 
 ### Network Transport Selection
 Genie supports multiple transport mechanisms:
-- **HTTP**: Suitable for development and debugging
 - **TCP**: Recommended for production deployments
-- **DPDK**: Future option for ultra-low latency hardware
+- **DPDK**: Future option for ultra-low latency hardware (WIP)
 
 Choose based on your infrastructure constraints and latency requirements.
 
@@ -182,8 +187,8 @@ Choose based on your infrastructure constraints and latency requirements.
 Genie implements progressive optimization layers:
 1. **Graph Caching**: Eliminates repeated graph capture overhead
 2. **Block Compilation**: Reduces RPC calls via TorchScript blocks
-3. **TensorRT Optimization**: Auto-compilation after profiling threshold
-4. **GPU Cache**: Persistent weight storage (LRU)
+3. **GPU Cache**: Persistent weight storage (LRU eviction)
+4. **TensorRT Optimization**: Auto-compilation after profiling threshold
 
 These optimizations are transparently applied but can be tuned via configuration.
 
@@ -362,7 +367,7 @@ Genie's architecture follows a **clean separation of concerns**:
 
 - **Latency**: <10ms recommended
 - **Bandwidth**: 1Gbps minimum, 10Gbps+ recommended
-- **Protocol**: TCP (production), HTTP (development)
+- **Protocol**: TCP (production)
 
 ---
 
@@ -379,7 +384,7 @@ Genie's architecture follows a **clean separation of concerns**:
 | **Scheduler** | ✅ Production-ready | Semantic optimizations implemented |
 | **Backend (TCP)** | ✅ Production-ready | Connection pooling, async/await |
 | **Backend (DPDK)** | 🚧 Experimental | Future enhancement, requires hardware support |
-| **GPU Cache** | ✅ Production-ready | LRU eviction, memory-aware |
+| **GPU Cache** | ✅ Production-ready | Persistent weights, LRU eviction, memory-aware |
 | **Memory Management (Phase 1)** | ✅ Production-ready | Memory-aware eviction, KV session pinning |
 | **Memory Management (Phase 2)** | ✅ Production-ready | Lifetime-based eviction, phase-aware budgets |
 | **Memory Management (Phase 3)** | ✅ Production-ready | Prometheus metrics, pressure handling, adaptive tuning |
@@ -445,8 +450,8 @@ See `CONTRIBUTING.md` for guidelines.
 
 ## Contact
 
-- **Project Lead**: [Name]
-- **Email**: [Email]
+- **Project Lead**: Jaewan Hong
+- **Email**: jaewan@berkeley.edu
 - **GitHub**: https://github.com/your-org/genie
 - **Paper**: [Link to research_proposal.tex or published paper]
 

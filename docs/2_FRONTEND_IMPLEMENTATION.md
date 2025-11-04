@@ -1,6 +1,6 @@
 # Genie Frontend Implementation
 
-**Status**: ✅ Production Ready  
+**Status**: Need Audiiting with real implementation 
 **Last Updated**: November 2, 2025  
 **Based on**: Implementation in `genie/core` and `genie/semantic`
 
@@ -299,7 +299,7 @@ LazyTensor now supports **lazy metadata capture** via `MetadataPlaceholder`:
 
 ### §4.2 Logical vs Physical Device Abstraction
 
-**Key Innovation** (October 2025):
+**Key Innovation** :
 
 ```python
 class LazyTensor:
@@ -545,7 +545,7 @@ class HybridGraphBuilder:
     Thread-local graph builder with two representation options.
     
     Strategy:
-    1. Try torch.fx.symbolic_trace (covers ~80% of models)
+    1. Try torch.fx.symbolic_trace (works for simple models, falls back for complex ones like transformers)
     2. If that fails, use LazyTensor DAG (always works)
     
     Both representations exposed through unified Graph interface.

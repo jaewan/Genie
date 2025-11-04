@@ -167,7 +167,7 @@ The frontend is responsible for **transparently capturing application intent** a
                                 ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  STAGE 2: Hybrid Graph Construction                             │
-│  • Try FX Symbolic Tracing first (~80% of models)              │
+│  • Try FX Symbolic Tracing first (falls back for complex models)│
 │  • Fallback to LazyTensor DAG (~20% with dynamic control flow) │
 │  • Unified GenieGraph interface for both representations        │
 │  • Static analysis of module hierarchy                          │
@@ -234,9 +234,9 @@ class LazyTensor:
 ```
 
 **Key Innovation: Local Metadata Storage**
-- **Problem**: Traditional disaggregation requires remote queries for tensor metadata
+- **Problem**: Lack of it requires remote queries for tensor metadata
 - **Solution**: Store metadata locally using logical device abstraction
-- **Impact**: Eliminates remote network calls for scheduling decisions
+- **Impact**: Eliminates remote network calls for scheduling decisions and metadata operations like shape()s
 
 ### §3.4 Hybrid Graph Builder
 
@@ -247,7 +247,7 @@ class HybridGraphBuilder:
     """Attempts two strategies for graph construction."""
     
     def build_from_capture():
-        # Strategy 1: FX Symbolic Tracing (covers ~80% of models)
+        # Strategy 1: FX Symbolic Tracing (attempted first, falls back for complex models)
         try:
             module = reconstruct_module_from_lazy_dag(root_tensor)
             traced = fx.symbolic_trace(module)
@@ -264,8 +264,6 @@ class HybridGraphBuilder:
 - Semantic metadata stored separately (MetadataRegistry)
 
 ### §3.5 Semantic Metadata Structure
-
-**Enhanced Semantic Metadata** (matches research_proposal.tex §X):
 
 ```python
 @dataclass

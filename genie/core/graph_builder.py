@@ -38,7 +38,7 @@ class HybridGraphBuilder:
     race conditions during concurrent capture.
 
     Strategy:
-    1. Try torch.fx.symbolic_trace (covers ~80% of models)
+    1. Try torch.fx.symbolic_trace (works for simple models, falls back for complex ones like transformers)
     2. If that fails, use LazyTensor DAG (always works)
 
     Both representations are exposed through unified Graph interface.
