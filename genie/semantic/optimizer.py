@@ -13,7 +13,7 @@ import torch
 import torch.fx as fx
 from collections import defaultdict
 
-from ..core.semantic_metadata import ExecutionPhase, MemoryPattern
+from ..core.types import ExecutionPhase, MemoryPattern
 from ..semantic.workload import WorkloadType, WorkloadProfile
 from ..core.exceptions import Result, OptimizationError
 

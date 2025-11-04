@@ -34,7 +34,7 @@ except ImportError:
     class stats:
         entropy = staticmethod(entropy)
 
-from genie.core.graph import ComputationGraph
+from genie.core.graph_interface import Graph
 
 
 logger = logging.getLogger(__name__)
@@ -139,91 +139,47 @@ def fx_graph_to_networkx(fx_graph: fx.GraphModule) -> nx.DiGraph:
     return G
 
 
-def graph_to_networkx(graph: Union[ComputationGraph, fx.GraphModule]) -> nx.DiGraph:
-    """Convert ComputationGraph or FX GraphModule to NetworkX DiGraph with caching.
-    
+def graph_to_networkx(graph: Union[fx.GraphModule, Graph]) -> nx.DiGraph:
+    """Convert FX GraphModule or unified Graph to NetworkX DiGraph with caching.
+
     Args:
-        graph: Either ComputationGraph (old format) or FX GraphModule (new format)
-        
+        graph: Either FX GraphModule or unified Graph interface
+
     Returns:
         NetworkX DiGraph
     """
     # Check if it's an FX GraphModule
     if isinstance(graph, fx.GraphModule):
         return fx_graph_to_networkx(graph)
-    
-    # Old format - ComputationGraph
-    # Create cache-friendly representation
-    nodes_tuple = tuple(
-        (node_id, node.operation, hash(str(node.metadata)))
-        for node_id, node in graph.nodes.items()
-    )
-    edges_tuple = tuple(graph.edges)
-    graph_hash = compute_graph_id_from_parts(nodes_tuple, edges_tuple)
-    
-    return convert_to_networkx(graph_hash, nodes_tuple, edges_tuple)
 
-
-def compute_graph_id(graph: ComputationGraph) -> str:
-    """Compute a stable content hash for a ComputationGraph.
-
-    Uses SHA1 over sorted nodes (id, op, metadata) and sorted edges to ensure stability.
-    """
-    nodes_items = []
-    for node_id in sorted(graph.nodes.keys()):
-        node = graph.nodes[node_id]
-        nodes_items.append((node_id, node.operation, str(sorted(node.metadata.items()))))
-    edges_items = sorted((str(s), str(t)) for s, t in graph.edges)
-    h = hashlib.sha1()
-    for nid, op, md in nodes_items:
-        h.update(nid.encode()); h.update(b"|"); h.update(op.encode()); h.update(b"|"); h.update(md.encode()); h.update(b"\n")
-    h.update(b"#edges\n")
-    for s, t in edges_items:
-        h.update(s.encode()); h.update(b"->"); h.update(t.encode()); h.update(b"\n")
-    return h.hexdigest()
-
-
-def compute_graph_id_from_parts(nodes_tuple: Tuple[Tuple[str, str, int], ...], edges_tuple: Tuple[Tuple[str, str], ...]) -> str:
-    """Compute a stable graph id from node/edge tuples (helper for cached conversion)."""
-    h = hashlib.sha1()
-    for node_id, op, mdh in sorted(nodes_tuple):
-        h.update(node_id.encode()); h.update(b"|"); h.update(op.encode()); h.update(b"|"); h.update(str(mdh).encode()); h.update(b"\n")
-    h.update(b"#edges\n")
-    for s, t in sorted(edges_tuple):
-        h.update(str(s).encode()); h.update(b"->"); h.update(str(t).encode()); h.update(b"\n")
-    return h.hexdigest()
+    # Unified Graph interface
+    return unified_graph_to_networkx(graph)
 
 
 @track_performance
-def analyze_operations_advanced(graph: Union[ComputationGraph, fx.GraphModule]) -> Dict[str, Any]:
+def analyze_operations_advanced(graph: fx.GraphModule) -> Dict[str, Any]:
     """Advanced operation analysis using statistical methods.
     
     Args:
-        graph: Either ComputationGraph or FX GraphModule
+        graph: FX GraphModule
         
     Returns:
         Dictionary with operation statistics
     """
-    # Extract operations based on graph type
-    if isinstance(graph, fx.GraphModule):
-        ops = []
-        num_nodes = 0
-        for node in graph.graph.nodes:
-            if node.op in ('call_function', 'call_method'):
-                num_nodes += 1
-                if node.op == 'call_function':
-                    op_name = f"aten::{getattr(node.target, '__name__', str(node.target))}"
-                else:
-                    op_name = f"aten::{node.target}"
-                ops.append(op_name)
-        num_edges = sum(1 for node in graph.graph.nodes 
-                       if node.op in ('call_function', 'call_method')
-                       for arg in node.all_input_nodes)
-    else:
-        # Old format - ComputationGraph
-        ops = [node.operation for node in graph.nodes.values()]
-        num_nodes = len(graph.nodes)
-        num_edges = len(graph.edges)
+    # Extract operations from FX GraphModule
+    ops = []
+    num_nodes = 0
+    for node in graph.graph.nodes:
+        if node.op in ('call_function', 'call_method'):
+            num_nodes += 1
+            if node.op == 'call_function':
+                op_name = f"aten::{getattr(node.target, '__name__', str(node.target))}"
+            else:
+                op_name = f"aten::{node.target}"
+            ops.append(op_name)
+    num_edges = sum(1 for node in graph.graph.nodes 
+                   if node.op in ('call_function', 'call_method')
+                   for arg in node.all_input_nodes)
     
     op_counts = Counter(ops)
     
@@ -365,3 +321,33 @@ def analyze_graph_complexity(G: nx.DiGraph) -> Dict[str, float]:
         "memory_bandwidth": memory_bandwidth,
         "parallelism": parallelism,
     }
+
+
+def unified_graph_to_networkx(graph: Graph) -> nx.DiGraph:
+    """Convert unified Graph interface to NetworkX DiGraph.
+
+    Args:
+        graph: Unified Graph interface (FX or LazyDAG backend)
+
+    Returns:
+        NetworkX DiGraph
+    """
+    G = nx.DiGraph()
+
+    # Add nodes with metadata
+    for node in graph.nodes():
+        # Extract metadata from the unified interface
+        metadata = getattr(node, 'metadata', {})
+        if hasattr(node, 'shape'):
+            metadata['shape'] = str(node.shape)
+        if hasattr(node, 'dtype'):
+            metadata['dtype'] = str(node.dtype)
+
+        G.add_node(node.id, operation=node.operation, **metadata)
+
+    # Add edges based on input relationships
+    for node in graph.nodes():
+        for inp in node.inputs:
+            G.add_edge(inp.id, node.id)
+
+    return G

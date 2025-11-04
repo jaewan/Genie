@@ -75,14 +75,14 @@ class DPDKBackend:
         async def _run() -> bool:
             await self._ensure_initialized()
             coord = self._require_coordinator()
-            if not coord.control_server:
+            if not coord.control_plane:
                 # Initialize control plane if not started yet
                 await coord._init_control_plane()  # type: ignore[attr-defined]
-            if not coord.control_server:
+            if not coord.control_plane:
                 return False
             if capabilities:
                 # Update advertised capabilities on the server
-                server_caps = coord.control_server.capabilities
+                server_caps = coord.control_plane.capabilities
                 for k, v in capabilities.items():
                     if hasattr(server_caps, k):
                         setattr(server_caps, k, v)

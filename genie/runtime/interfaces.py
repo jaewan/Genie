@@ -1,144 +1,114 @@
-from __future__ import annotations
+"""
+Runtime interfaces for Genie disaggregated execution.
 
-import enum
+Defines the core abstractions for remote execution, memory management,
+and transfer coordination.
+"""
+
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Protocol, Tuple
+from enum import Enum
+from typing import Any, Dict, List, Optional, Union
+import torch
 
 
-@dataclass(frozen=True)
-class RemoteAccelerator:
-    hostname: str
-    device_index: int
-
-
-@dataclass(frozen=True)
-class TensorHandle:
-    tensor_id: str
-    shape: Tuple[int, ...]
-    dtype: str
-    device: str
-
-
-@dataclass(frozen=True)
-class MemoryView:
-    tensor_id: str
-    size_bytes: int
-    # When using zero-copy, this may represent a DMA handle instead of raw bytes
-    data: Optional[memoryview] = None
-    dma_handle: Optional[Dict[str, Any]] = None
-
-
-class HealthStatus(enum.Enum):
-    OK = "ok"
+class HealthStatus(Enum):
+    """Health status of a remote accelerator."""
+    HEALTHY = "healthy"
     DEGRADED = "degraded"
     UNHEALTHY = "unhealthy"
+    UNKNOWN = "unknown"
 
 
-@dataclass(frozen=True)
-class PlanFragment:
-    plan_id: str
-    nodes: List[Dict[str, Any]]
-    inputs: List[str]
-    outputs: List[str]
+@dataclass
+class MemoryView:
+    """View into remote GPU memory."""
+    handle: int
+    size_bytes: int
+    device_id: int
+    is_pinned: bool = False
 
 
-@dataclass(frozen=True)
+@dataclass
+class TensorHandle:
+    """Handle to a tensor on remote accelerator."""
+    id: str
+    shape: torch.Size
+    dtype: torch.dtype
+    device: str  # e.g., "gpu:0"
+    memory_view: Optional[MemoryView] = None
+
+
+@dataclass
 class TransferRequest:
-    tensor_id: str
-    num_bytes: int
-    destination: RemoteAccelerator
-    # Optional payload for data-plane transfers; may carry a memoryview over
-    # CPU (pinned) storage to enable zero-copy framing on TCP/RDMA paths.
-    payload: Optional[memoryview] = None
-    # Keep-alive owner to ensure the underlying storage isn't GC'd while in-flight
-    payload_owner: Optional[object] = None
-
-    @staticmethod
-    def from_tensor(tensor: Any, destination: RemoteAccelerator) -> "TransferRequest":  # noqa: ANN401
-        import torch
-
-        if isinstance(tensor, torch.Tensor):
-            # Stage to CPU pinned memory when coming from CUDA
-            try:
-                device_type = tensor.device.type  # type: ignore[attr-defined]
-            except Exception:
-                device_type = "cpu"
-
-            owner: Optional[object] = None
-            cpu_tensor = tensor
-            if device_type == "cuda":
-                # Create a pinned CPU buffer and copy synchronously
-                try:
-                    pinned = torch.empty_like(tensor, device=torch.device("cpu"), pin_memory=True)
-                except Exception:
-                    pinned = torch.empty_like(tensor, device=torch.device("cpu"))
-                try:
-                    pinned.copy_(tensor, non_blocking=False)
-                except Exception:
-                    pinned.copy_(tensor)
-                cpu_tensor = pinned
-                owner = pinned
-            else:
-                # Ensure contiguous CPU storage; attempt to pin for faster I/O when possible
-                try:
-                    cpu_tensor = tensor.contiguous()
-                    if hasattr(cpu_tensor, "pin_memory"):
-                        cpu_tensor = cpu_tensor.pin_memory()
-                except Exception:
-                    cpu_tensor = tensor.contiguous()
-
-            # Build a memoryview over the underlying storage via numpy bridge
-            try:
-                np_arr = cpu_tensor.detach().cpu().contiguous().numpy()
-                payload_view = memoryview(np_arr)
-                num_bytes = np_arr.nbytes
-                tensor_id = str(id(cpu_tensor))
-                return TransferRequest(
-                    tensor_id=tensor_id,
-                    num_bytes=num_bytes,
-                    destination=destination,
-                    payload=payload_view,
-                    payload_owner=owner or cpu_tensor,
-                )
-            except Exception:
-                # Fallback: no payload; header-only
-                num_bytes = cpu_tensor.element_size() * cpu_tensor.nelement()
-                tensor_id = str(id(cpu_tensor))
-                return TransferRequest(tensor_id=tensor_id, num_bytes=num_bytes, destination=destination)
-        else:
-            # Fallback for unknown data; treat as bytes-like
-            buf = memoryview(tensor)
-            num_bytes = buf.nbytes
-            tensor_id = str(id(buf))
-            return TransferRequest(tensor_id=tensor_id, num_bytes=num_bytes, destination=destination, payload=buf, payload_owner=tensor)
+    """Request to transfer data between nodes."""
+    transfer_id: str
+    source_node: str
+    target_node: str
+    tensor_handle: TensorHandle
+    metadata: Dict[str, Any]
 
 
 @dataclass
 class TransferResult:
-    ok: bool
-    tensor_id: str
-    error: Optional[str] = None
-
-    @staticmethod
-    def success(tensor_id: str) -> "TransferResult":
-        return TransferResult(ok=True, tensor_id=tensor_id)
-
-    @staticmethod
-    def failure(tensor_id: str, error: str) -> "TransferResult":
-        return TransferResult(ok=False, tensor_id=tensor_id, error=error)
+    """Result of a transfer operation."""
+    transfer_id: str
+    success: bool
+    error_message: Optional[str] = None
+    tensor_handle: Optional[TensorHandle] = None
 
 
-class ExecutionService(Protocol):
-    def run_subgraph(self, plan_fragment: PlanFragment) -> List[TensorHandle]:
-        ...
-
-    def fetch_result(self, tensor_id: str) -> MemoryView:
-        ...
-
-    def cancel(self, plan_id: str) -> None:
-        ...
-
-    def health(self) -> HealthStatus:
-        ...
+@dataclass
+class PlanFragment:
+    """Fragment of an execution plan for remote accelerator."""
+    fragment_id: str
+    operations: List[Dict[str, Any]]  # Serialized operations
+    input_handles: List[TensorHandle]
+    output_handles: List[TensorHandle]
 
 
+class RemoteAccelerator(ABC):
+    """Abstract interface for remote GPU accelerator."""
+
+    @abstractmethod
+    async def execute_plan(self, plan: PlanFragment) -> Dict[str, TensorHandle]:
+        """Execute a plan fragment and return output handles."""
+        pass
+
+    @abstractmethod
+    async def get_health(self) -> HealthStatus:
+        """Get health status of this accelerator."""
+        pass
+
+    @abstractmethod
+    async def get_memory_info(self) -> Dict[str, Any]:
+        """Get memory usage information."""
+        pass
+
+
+class ExecutionService(ABC):
+    """Abstract interface for remote execution services."""
+
+    @abstractmethod
+    async def execute_operations(
+        self,
+        operations: List[Dict[str, Any]],
+        input_tensors: Dict[str, torch.Tensor]
+    ) -> Dict[str, torch.Tensor]:
+        """Execute operations on input tensors."""
+        pass
+
+    @abstractmethod
+    async def transfer_tensor(
+        self,
+        tensor: torch.Tensor,
+        target_node: str,
+        metadata: Dict[str, Any]
+    ) -> TransferResult:
+        """Transfer tensor to target node."""
+        pass
+
+    @abstractmethod
+    async def get_capabilities(self) -> Dict[str, Any]:
+        """Get capabilities of this execution service."""
+        pass

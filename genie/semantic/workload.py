@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Any, Optional
 
@@ -17,6 +17,7 @@ class WorkloadType(str, Enum):
 class MatchedPattern:
 	pattern_name: str
 	confidence: float
+	matched_nodes: List[str] = field(default_factory=list)  # Node IDs that matched this pattern
 	subgraph: Any | None = None
 	optimization_hints: Dict[str, Any] | None = None
 	metadata: Dict[str, Any] | None = None
@@ -95,5 +96,3 @@ class ExecutionPlan:
 	placement: Dict[str, Any]  # fragment_id -> device/node
 	transfers: List[Dict[str, Any]]
 	feature_flags: Dict[str, bool]
-
-

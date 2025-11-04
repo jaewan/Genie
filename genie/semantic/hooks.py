@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 
 from .phase_detector import get_phase_detector, PhaseAwareHook
-from ..core.semantic_metadata import ExecutionPhase
+from ..core.types import ExecutionPhase
 
 logger = logging.getLogger(__name__)
 

@@ -6,25 +6,8 @@ import time
 import torch
 from enum import Enum
 
-
-class ExecutionPhase(Enum):
-	"""Execution phases for workload-specific optimizations."""
-	PREFILL = "prefill"  # LLM initial token processing
-	DECODE = "decode"    # LLM autoregressive generation
-	VISION_BACKBONE = "vision_backbone"  # Vision model feature extraction
-	VISION_HEAD = "vision_head"  # Vision model classification/detection
-	MULTIMODAL_FUSION = "multimodal_fusion"  # Cross-modal attention
-	EMBEDDING = "embedding"  # Embedding lookup
-	UNKNOWN = "unknown"
-
-
-class MemoryPattern(Enum):
-	"""Memory access patterns for optimization."""
-	STREAMING = "streaming"  # One-time use, no reuse
-	REUSED = "reused"       # Multiple accesses, cache-friendly
-	EPHEMERAL = "ephemeral" # Short-lived intermediate
-	PERSISTENT = "persistent"  # Long-lived (e.g., KV cache)
-	RANDOM = "random"       # Random access pattern
+# Import shared types from core.types to avoid circular dependencies
+from .types import ExecutionPhase, MemoryPattern
 
 
 @dataclass
@@ -112,5 +95,3 @@ class SemanticMetadata:
 			"priority": self.priority,
 			"metadata_version": self.metadata_version
 		}
-
-

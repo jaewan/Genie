@@ -1,78 +1,71 @@
-from __future__ import annotations
+"""
+Transfer manager for coordinating data movement between nodes.
+
+Handles the lifecycle of transfers, including initiation, progress tracking,
+and completion notification.
+"""
 
 import asyncio
-from dataclasses import dataclass
-from typing import Dict, Optional
+import uuid
+from dataclasses import dataclass, field
+from typing import Dict, Optional, Callable, Any, List
+import logging
 
-import torch
+from .interfaces import TransferRequest, TransferResult
 
-from .interfaces import RemoteAccelerator, TransferRequest
-from .transports import Transport
+logger = logging.getLogger(__name__)
 
 
 @dataclass
 class TransferFuture:
-    tensor_id: str
-    _event: asyncio.Event
-    _result_ok: Optional[bool] = None
-    _error: Optional[str] = None
+    """Future for tracking transfer completion."""
+    transfer_id: str
+    request: TransferRequest
+    result: Optional[TransferResult] = None
+    done_callbacks: List[Callable] = field(default_factory=list)
 
-    def done(self) -> bool:
-        return self._event.is_set()
+    def set_result(self, result: TransferResult):
+        """Set the result and notify callbacks."""
+        self.result = result
+        for callback in self.done_callbacks:
+            try:
+                callback(self)
+            except Exception as e:
+                logger.error(f"Transfer callback failed: {e}")
 
-    async def wait(self) -> None:
-        await self._event.wait()
-
-    def result(self) -> None:
-        if not self.done():
-            raise RuntimeError("Transfer not complete")
-        if self._result_ok:
-            return None
-        raise RuntimeError(self._error or "transfer failed")
+    def add_done_callback(self, callback: Callable):
+        """Add callback to be called when transfer completes."""
+        self.done_callbacks.append(callback)
 
 
 class TransferManager:
-    def __init__(self, transport: Transport):
-        self.transport = transport
-        self.queue: "asyncio.Queue[TransferRequest]" = asyncio.Queue()
-        self._active: Dict[str, TransferFuture] = {}
-        self._batch_bytes = 0
-        self._max_batch_bytes = 1 << 20  # Target >= 1MB
-        self._flush_lock = asyncio.Lock()
+    """Manages ongoing transfers between nodes."""
 
-    def should_flush_batch(self) -> bool:
-        return self._batch_bytes >= self._max_batch_bytes
+    def __init__(self):
+        self.active_transfers: Dict[str, TransferFuture] = {}
+        self._lock = asyncio.Lock()
 
-    async def transfer_tensor(self, tensor: torch.Tensor, target: RemoteAccelerator) -> TransferFuture:
-        if not self.transport.is_dma_capable(tensor):
-            tensor = self.transport.prepare_for_dma(tensor)
-        request = TransferRequest.from_tensor(tensor, target)
-        fut = TransferFuture(tensor_id=request.tensor_id, _event=asyncio.Event())
-        self._active[request.tensor_id] = fut
-        await self.queue.put(request)
-        self._batch_bytes += request.num_bytes
-        if self.should_flush_batch():
-            await self.execute_batch()
-        return fut
+    async def initiate_transfer(self, request: TransferRequest) -> TransferFuture:
+        """Initiate a new transfer."""
+        async with self._lock:
+            transfer_id = str(uuid.uuid4())
+            future = TransferFuture(transfer_id, request)
+            self.active_transfers[transfer_id] = future
+            return future
 
-    async def execute_batch(self) -> None:
-        async with self._flush_lock:
-            requests = []
-            while not self.queue.empty():
-                try:
-                    requests.append(self.queue.get_nowait())
-                except asyncio.QueueEmpty:
-                    break
-            if not requests:
-                return
-            self._batch_bytes = 0
-            results = await self.transport.send_batch(requests)
-            for res in results:
-                fut = self._active.get(res.tensor_id)
-                if fut is None:
-                    continue
-                fut._result_ok = res.ok
-                fut._error = res.error
-                fut._event.set()
+    async def complete_transfer(self, transfer_id: str, result: TransferResult):
+        """Mark a transfer as complete."""
+        async with self._lock:
+            if transfer_id in self.active_transfers:
+                future = self.active_transfers[transfer_id]
+                future.set_result(result)
+                del self.active_transfers[transfer_id]
 
+    def get_transfer(self, transfer_id: str) -> Optional[TransferFuture]:
+        """Get transfer future by ID."""
+        return self.active_transfers.get(transfer_id)
 
+    def cancel_transfer(self, transfer_id: str):
+        """Cancel an ongoing transfer."""
+        if transfer_id in self.active_transfers:
+            del self.active_transfers[transfer_id]

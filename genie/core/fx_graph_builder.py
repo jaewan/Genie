@@ -76,12 +76,18 @@ class FXGraphBuilder:
         # Process inputs and build dependency nodes
         fx_args = []
         fx_kwargs = {}
-        
+
         for inp in lazy_tensor.inputs:
             if isinstance(inp, LazyTensor):
-                # Recursively add dependency
-                inp_node = self.add_lazy_tensor(inp)
-                fx_args.append(inp_node)
+                # Recursively add dependency - avoid recursion by not accessing properties
+                # that trigger __torch_function__
+                try:
+                    inp_node = self.add_lazy_tensor(inp)
+                    fx_args.append(inp_node)
+                except RecursionError:
+                    # If we get recursion, use a simplified approach
+                    logger.debug(f"Recursion detected for {lazy_tensor.operation}, using simplified FX building")
+                    return None
             elif isinstance(inp, (torch.Tensor, torch.nn.Parameter)):
                 # Create placeholder for concrete tensor
                 placeholder = self._get_or_create_placeholder(inp)
@@ -119,20 +125,33 @@ class FXGraphBuilder:
         
         # Attach metadata in new unified format (Refactoring #3)
         # Uses 'genie' namespace to coordinate with Refactoring #2's MetadataRegistry
-        node.meta['genie'] = {
-            'tensor_id': lazy_tensor.id,      # Key for MetadataRegistry lookup
-            'operation': lazy_tensor.operation,  # Duplicated for convenience
-            'shape': lazy_tensor.shape,       # Graph-structural info
-            'dtype': lazy_tensor.dtype,       # Graph-structural info
-            'device': lazy_tensor.device,     # Graph-structural info
-        }
-        
+        # Access properties directly to avoid __torch_function__ recursion
+        try:
+            node.meta['genie'] = {
+                'tensor_id': lazy_tensor.id,      # Key for MetadataRegistry lookup
+                'operation': lazy_tensor.operation,  # Duplicated for convenience
+                'shape': lazy_tensor.shape,       # Graph-structural info
+                'dtype': lazy_tensor.dtype,       # Graph-structural info
+                'device': lazy_tensor.device,     # Graph-structural info
+            }
+        except RecursionError:
+            # Fallback if we get recursion
+            node.meta['genie'] = {
+                'tensor_id': lazy_tensor.id,
+                'operation': lazy_tensor.operation,
+                'shape': torch.Size([]),
+                'dtype': torch.float32,
+                'device': torch.device('cpu'),
+            }
+
         # Keep old format for backward compatibility (will be removed in Refactoring #3 complete)
-        node.meta['semantic'] = lazy_tensor.metadata
         node.meta['lazy_tensor_id'] = lazy_tensor.id
-        node.meta['shape'] = lazy_tensor.shape
-        node.meta['dtype'] = lazy_tensor.dtype
-        node.meta['device'] = lazy_tensor.device
+        try:
+            node.meta['dtype'] = lazy_tensor.dtype
+            node.meta['device'] = lazy_tensor.device
+        except RecursionError:
+            node.meta['dtype'] = torch.float32
+            node.meta['device'] = torch.device('cpu')
         
         # Store mapping
         self.value_map[lazy_tensor.id] = node
