@@ -1,14 +1,13 @@
 """Scheduling strategies for semantic-aware execution.
 
-This module implements scheduling strategies for different workload types,
-including pipeline scheduling for CNNs and parallel scheduling for multi-modal.
+This module implements scheduling strategies for different workload types
+using the unified graph interface.
 """
 
 import logging
 from typing import Dict, List, Optional, Tuple, Set
 from dataclasses import dataclass, field
 from enum import Enum
-import torch.fx as fx
 from collections import defaultdict, deque
 
 from ..core.types import ExecutionPhase
@@ -67,7 +66,7 @@ class Scheduler:
         """Create execution schedule for a graph.
 
         Args:
-            graph: Graph to schedule (FX GraphModule or unified Graph interface)
+            graph: Graph to schedule using unified graph interface
             optimization_plan: Optional optimization plan with placement hints
 
         Returns:
@@ -297,11 +296,8 @@ class Scheduler:
         schedule.strategy = self._determine_cost_aware_strategy(groups, costs)
 
         # Add comprehensive metadata
-        # Handle both FX and unified Graph interfaces
-        if hasattr(graph, 'graph'):  # FX GraphModule
-            total_nodes = len(list(graph.graph.nodes))
-        else:  # Unified Graph interface
-            total_nodes = len(list(graph.nodes()))
+        # Use unified Graph interface
+        total_nodes = len(list(graph.nodes()))
 
         schedule.metadata.update({
             'total_nodes': total_nodes,
@@ -323,26 +319,20 @@ class Scheduler:
         """Analyze node dependencies in the graph.
 
         Args:
-            graph: Graph (FX GraphModule or unified Graph interface)
+            graph: Graph using unified graph interface
 
         Returns:
             Dictionary mapping node names to their dependencies
         """
         dependencies = defaultdict(set)
 
-        # Handle both FX and unified Graph interfaces
-        if hasattr(graph, 'graph'):  # FX GraphModule
-            for node in graph.graph.nodes:
-                if node.op in ['call_function', 'call_method', 'call_module']:
-                    for inp in node.all_input_nodes:
-                        dependencies[node.name].add(inp.name)
-        else:  # Unified Graph interface
-            for node in graph.nodes():
-                node_id = node.id
-                for inp in node.inputs:
-                    # Only add dependency if input is a node with an id (LazyTensor or NodeProtocol)
-                    if hasattr(inp, 'id'):
-                        dependencies[node_id].add(inp.id)
+        # Use unified Graph interface
+        for node in graph.nodes():
+            node_id = node.id
+            for inp in node.inputs:
+                # Only add dependency if input is a node with an id (LazyTensor or NodeProtocol)
+                if hasattr(inp, 'id'):
+                    dependencies[node_id].add(inp.id)
 
         return dependencies
     
@@ -351,7 +341,7 @@ class Scheduler:
         """Identify scheduling groups based on node metadata.
 
         Args:
-            graph: Graph (FX GraphModule or unified Graph interface)
+            graph: Graph using unified graph interface
             optimization_plan: Optional optimization plan
 
         Returns:
@@ -413,20 +403,13 @@ class Scheduler:
         parallel_groups = defaultdict(list)
         fusion_groups = defaultdict(list)
 
-        # Handle both FX and unified Graph interfaces
-        if hasattr(graph, 'graph'):  # FX GraphModule
-            nodes = graph.graph.nodes
-        else:  # Unified Graph interface
-            nodes = graph.nodes()
+        # Use unified Graph interface
+        nodes = graph.nodes()
 
         for node in nodes:
-            # Get node name and metadata for both graph types
-            if hasattr(graph, 'graph'):  # FX GraphModule
-                node_name = node.name
-                node_meta = node.meta
-            else:  # Unified Graph interface
-                node_name = node.id
-                node_meta = node.metadata
+            # Get node name and metadata for unified graph interface
+            node_name = node.id
+            node_meta = node.metadata
 
             if node_name in processed_nodes:
                 continue
@@ -478,21 +461,13 @@ class Scheduler:
                 processed_nodes.update(nodes)
         
         # 3. Default groups for remaining nodes
-        # Handle both FX and unified Graph interfaces
-        if hasattr(graph, 'graph'):  # FX GraphModule
-            remaining_nodes = [node for node in graph.graph.nodes
-                             if node.op in ['call_function', 'call_method', 'call_module']
-                             and node.name not in processed_nodes]
-        else:  # Unified Graph interface
-            remaining_nodes = [node for node in graph.nodes()
-                             if node.id not in processed_nodes]
+        # Use unified Graph interface
+        remaining_nodes = [node for node in graph.nodes()
+                         if node.id not in processed_nodes]
 
         for node in remaining_nodes:
-            # Get node name for both graph types
-            if hasattr(graph, 'graph'):  # FX GraphModule
-                node_name = node.name
-            else:  # Unified Graph interface
-                node_name = node.id
+            # Get node name for unified graph interface
+            node_name = node.id
 
             # Create individual group
             group = SchedulingGroup(
@@ -598,22 +573,14 @@ class Scheduler:
         """Identify nodes that should be co-located based on semantic metadata."""
         colocation_groups = {}
 
-        # Handle both FX and unified Graph interfaces
-        if hasattr(graph, 'graph'):  # FX GraphModule
-            nodes = graph.graph.nodes
-        else:  # Unified Graph interface
-            nodes = graph.nodes()
+        # Use unified Graph interface
+        nodes = graph.nodes()
 
         for node in nodes:
-            # Get node name and metadata for both graph types
-            if hasattr(graph, 'graph'):  # FX GraphModule
-                node_name = node.name
-                node_meta = node.meta
-                is_operation = node.op in ['call_function', 'call_method', 'call_module']
-            else:  # Unified Graph interface
-                node_name = node.id
-                node_meta = node.metadata
-                is_operation = True  # Assume all nodes in unified graph are operations
+            # Get node name and metadata for unified graph interface
+            node_name = node.id
+            node_meta = node.metadata
+            is_operation = True  # Assume all nodes in unified graph are operations
 
             if is_operation:
                 # Check for KV cache co-location (decode phase)
@@ -638,20 +605,13 @@ class Scheduler:
         # Simple greedy placement: assign to device with lowest estimated cost
         available_devices = list(self.devices.keys()) if self.devices else ['local']
 
-        # Handle both FX and unified Graph interfaces
-        if hasattr(graph, 'graph'):  # FX GraphModule
-            nodes = graph.graph.nodes
-        else:  # Unified Graph interface
-            nodes = graph.nodes()
+        # Use unified Graph interface
+        nodes = graph.nodes()
 
         for node in nodes:
-            # Get node name for both graph types
-            if hasattr(graph, 'graph'):  # FX GraphModule
-                node_name = node.name
-                is_operation = node.op in ['call_function', 'call_method', 'call_module']
-            else:  # Unified Graph interface
-                node_name = node.id
-                is_operation = True  # Assume all nodes in unified graph are operations
+            # Get node name for unified graph interface
+            node_name = node.id
+            is_operation = True  # Assume all nodes in unified graph are operations
 
             if is_operation:
                 # Check if node is in a co-location group
@@ -709,21 +669,13 @@ class Scheduler:
                 processed_nodes.update(node_names)
 
         # Handle any remaining nodes
-        # Handle both FX and unified Graph interfaces
-        if hasattr(graph, 'graph'):  # FX GraphModule
-            remaining_nodes = [node for node in graph.graph.nodes
-                             if node.op in ['call_function', 'call_method', 'call_module']
-                             and node.name not in processed_nodes]
-        else:  # Unified Graph interface
-            remaining_nodes = [node for node in graph.nodes()
-                             if node.id not in processed_nodes]
+        # Use unified Graph interface
+        remaining_nodes = [node for node in graph.nodes()
+                         if node.id not in processed_nodes]
 
         for node in remaining_nodes:
-            # Get node name for both graph types
-            if hasattr(graph, 'graph'):  # FX GraphModule
-                node_name = node.name
-            else:  # Unified Graph interface
-                node_name = node.id
+            # Get node name for unified graph interface
+            node_name = node.id
 
             group = SchedulingGroup(
                 group_id=f"default_{node_name}",
@@ -831,184 +783,4 @@ class Scheduler:
             pass  # Network topology manager not available
 
 
-class PipelineScheduler(Scheduler):
-    """Specialized scheduler for pipeline execution."""
-    
-    def __init__(self, num_stages: int = 3):
-        super().__init__()
-        self.num_stages = num_stages
-    
-    def create_pipeline_schedule(self, graph: fx.GraphModule) -> ExecutionSchedule:
-        """Create pipeline schedule for CNN-like workloads.
-        
-        Args:
-            graph: FX GraphModule
-            
-        Returns:
-            Pipeline ExecutionSchedule
-        """
-        # Find all convolution and related operations
-        conv_ops = []
-        for node in graph.graph.nodes:
-            if node.op == 'call_function':
-                op_name = str(node.target).lower()
-                if any(op in op_name for op in ['conv', 'pool', 'norm', 'relu']):
-                    conv_ops.append(node)
-        
-        if not conv_ops:
-            # Fallback to regular scheduling
-            return self.create_schedule(graph)
-        
-        # Divide into pipeline stages
-        stage_size = max(1, len(conv_ops) // self.num_stages)
-        pipeline_stages = []
-        
-        for i in range(0, len(conv_ops), stage_size):
-            stage_nodes = conv_ops[i:i+stage_size]
-            if stage_nodes:
-                group = SchedulingGroup(
-                    group_id=f"pipeline_stage_{len(pipeline_stages)}",
-                    nodes=[n.name for n in stage_nodes],
-                    strategy=SchedulingStrategy.PIPELINE,
-                    priority=self.num_stages - len(pipeline_stages)
-                )
-                pipeline_stages.append([group])
-        
-        # Create schedule
-        schedule = ExecutionSchedule(
-            stages=pipeline_stages,
-            total_stages=len(pipeline_stages),
-            strategy=SchedulingStrategy.PIPELINE
-        )
-        
-        # Fill mappings
-        for stage_idx, stage_groups in enumerate(pipeline_stages):
-            for group in stage_groups:
-                for node_name in group.nodes:
-                    schedule.node_to_stage[node_name] = stage_idx
-                    schedule.node_to_group[node_name] = group.group_id
-        
-        schedule.metadata['pipeline_depth'] = self.num_stages
-        
-        return schedule
-
-
-class DynamicScheduler(Scheduler):
-    """Dynamic scheduler that adapts based on runtime conditions."""
-    
-    def __init__(self):
-        super().__init__()
-        self.runtime_stats = defaultdict(lambda: {'latency': 0, 'memory': 0})
-    
-    def create_adaptive_schedule(self, graph: fx.GraphModule, 
-                                runtime_constraints: Optional[Dict] = None) -> ExecutionSchedule:
-        """Create adaptive schedule based on runtime constraints.
-        
-        Args:
-            graph: FX GraphModule
-            runtime_constraints: Optional runtime constraints (memory, latency targets)
-            
-        Returns:
-            Adaptive ExecutionSchedule
-        """
-        base_schedule = self.create_schedule(graph)
-        
-        if not runtime_constraints:
-            return base_schedule
-        
-        # Adapt based on constraints
-        memory_limit = runtime_constraints.get('memory_limit')
-        latency_target = runtime_constraints.get('latency_target')
-        
-        if memory_limit:
-            base_schedule = self._adapt_for_memory(base_schedule, memory_limit)
-        
-        if latency_target:
-            base_schedule = self._adapt_for_latency(base_schedule, latency_target)
-        
-        base_schedule.strategy = SchedulingStrategy.DYNAMIC
-        
-        return base_schedule
-    
-    def _adapt_for_memory(self, schedule: ExecutionSchedule, limit: float) -> ExecutionSchedule:
-        """Adapt schedule for memory constraints.
-        
-        Args:
-            schedule: Base schedule
-            limit: Memory limit
-            
-        Returns:
-            Adapted schedule
-        """
-        # Increase number of stages to reduce peak memory
-        # This is simplified - real implementation would estimate memory usage
-        
-        if schedule.total_stages < 10:  # Arbitrary limit
-            # Split large stages
-            new_stages = []
-            for stage in schedule.stages:
-                if len(stage) > 2:
-                    # Split into smaller stages
-                    mid = len(stage) // 2
-                    new_stages.append(stage[:mid])
-                    new_stages.append(stage[mid:])
-                else:
-                    new_stages.append(stage)
-            
-            schedule.stages = new_stages
-            schedule.total_stages = len(new_stages)
-        
-        schedule.metadata['memory_optimized'] = True
-        
-        return schedule
-    
-    def _adapt_for_latency(self, schedule: ExecutionSchedule, target: float) -> ExecutionSchedule:
-        """Adapt schedule for latency target.
-        
-        Args:
-            schedule: Base schedule
-            target: Latency target
-            
-        Returns:
-            Adapted schedule
-        """
-        # Merge stages to reduce overhead
-        # This is simplified - real implementation would estimate latency
-        
-        if schedule.total_stages > 3:
-            # Merge adjacent stages with low priority
-            new_stages = []
-            i = 0
-            while i < len(schedule.stages):
-                stage = schedule.stages[i]
-                
-                # Check if can merge with next stage
-                if i + 1 < len(schedule.stages):
-                    next_stage = schedule.stages[i + 1]
-                    # Merge if both have low priority
-                    if all(g.priority < 5 for g in stage + next_stage):
-                        merged = stage + next_stage
-                        new_stages.append(merged)
-                        i += 2
-                        continue
-                
-                new_stages.append(stage)
-                i += 1
-            
-            schedule.stages = new_stages
-            schedule.total_stages = len(new_stages)
-        
-        schedule.metadata['latency_optimized'] = True
-        
-        return schedule
-    
-    def update_runtime_stats(self, node_name: str, latency: float, memory: float):
-        """Update runtime statistics for adaptive scheduling.
-        
-        Args:
-            node_name: Name of the node
-            latency: Measured latency
-            memory: Measured memory usage
-        """
-        self.runtime_stats[node_name]['latency'] = latency
         self.runtime_stats[node_name]['memory'] = memory

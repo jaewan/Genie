@@ -387,7 +387,7 @@ This is critical for avoiding the `"Multiple dispatch failed for detach()"` erro
 
 ### §5.1 Unified Interception Architecture
 
-**File**: `genie/core/interception.py`
+**File**: `genie/core/interception_control.py`
 
 The frontend intercepts operations through **THREE coordinated mechanisms** with a clear decision hierarchy:
 

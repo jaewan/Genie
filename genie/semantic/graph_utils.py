@@ -108,29 +108,22 @@ def graph_to_networkx(graph: Graph) -> nx.DiGraph:
 
 
 @track_performance
-def analyze_operations_advanced(graph: fx.GraphModule) -> Dict[str, Any]:
+def analyze_operations_advanced(graph) -> Dict[str, Any]:
     """Advanced operation analysis using statistical methods.
-    
+
     Args:
-        graph: FX GraphModule
-        
+        graph: Graph using unified interface
+
     Returns:
         Dictionary with operation statistics
     """
-    # Extract operations from FX GraphModule
+    # Extract operations from unified graph interface
     ops = []
     num_nodes = 0
-    for node in graph.graph.nodes:
-        if node.op in ('call_function', 'call_method'):
-            num_nodes += 1
-            if node.op == 'call_function':
-                op_name = f"aten::{getattr(node.target, '__name__', str(node.target))}"
-            else:
-                op_name = f"aten::{node.target}"
-            ops.append(op_name)
-    num_edges = sum(1 for node in graph.graph.nodes 
-                   if node.op in ('call_function', 'call_method')
-                   for arg in node.all_input_nodes)
+    for node in graph.nodes():
+        num_nodes += 1
+        ops.append(node.operation)
+    num_edges = graph.num_edges
     
     op_counts = Counter(ops)
     

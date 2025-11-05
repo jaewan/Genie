@@ -8,14 +8,10 @@ import networkx as nx
 from genie.core.graph_interface import Graph
 from .base import PatternMatch, PatternPlugin
 from typing import Union
-import torch.fx as fx
 from genie.semantic.graph_utils import (
     graph_to_networkx, find_attention_pattern, find_conv_activation_pattern,
     find_mlp_pattern, find_embedding_pattern, analyze_graph_complexity,
     track_performance
-)
-from .fx_patterns import (
-    find_attention_pattern_fx, find_conv_activation_pattern_fx, find_mlp_pattern_fx
 )
 
 
@@ -36,7 +32,7 @@ class AdvancedLLMPattern(PatternPlugin):
     max_fanout = 50
 
     @track_performance
-    def match(self, graph: Union[Graph, fx.GraphModule]) -> Optional[PatternMatch]:
+    def match(self, graph) -> Optional[PatternMatch]:
         """Detect LLM patterns using sophisticated graph analysis."""
         # Convert to NetworkX for pattern analysis (handles all graph types)
         G = graph_to_networkx(graph)
@@ -118,19 +114,9 @@ class AdvancedVisionPattern(PatternPlugin):
     max_fanout = 20
 
     @track_performance
-    def match(self, graph: Union[Graph, fx.GraphModule]) -> Optional[PatternMatch]:
+    def match(self, graph) -> Optional[PatternMatch]:
         """Detect vision patterns including CNNs and ViTs."""
-        # Prefer FX-based matching when available
-        if isinstance(graph, fx.GraphModule):
-            fx_match = find_conv_activation_pattern_fx(graph)
-            if fx_match is not None:
-                return PatternMatch(
-                    pattern_name=self.name,
-                    confidence=0.85,
-                    matched_nodes=[n.name for n in fx_match.nodes]
-                )
-
-        # Convert to NetworkX for pattern analysis (handles all graph types)
+        # Use NetworkX for pattern analysis
         G = graph_to_networkx(graph)
         
         # Find convolutional patterns
@@ -218,19 +204,9 @@ class RecSysPattern(PatternPlugin):
     max_fanout = 30
 
     @track_performance
-    def match(self, graph: Union[Graph, fx.GraphModule]) -> Optional[PatternMatch]:
+    def match(self, graph) -> Optional[PatternMatch]:
         """Detect RecSys patterns: embeddings + MLPs."""
-        # Prefer FX-based matching when available
-        if isinstance(graph, fx.GraphModule):
-            fx_match = find_mlp_pattern_fx(graph)
-            if fx_match is not None:
-                return PatternMatch(
-                    pattern_name=self.name,
-                    confidence=0.8,
-                    matched_nodes=[n.name for n in fx_match.nodes]
-                )
-
-        # Convert to NetworkX for pattern analysis (handles all graph types)
+        # Use NetworkX for pattern analysis
         G = graph_to_networkx(graph)
         
         # Find embedding patterns
@@ -305,7 +281,7 @@ class MultiModalPattern(PatternPlugin):
     max_fanout = 50
 
     @track_performance
-    def match(self, graph: Union[Graph, fx.GraphModule]) -> Optional[PatternMatch]:
+    def match(self, graph) -> Optional[PatternMatch]:
         """Detect multi-modal patterns combining vision and language components."""
         # Prefer FX-based matching when available
         if isinstance(graph, fx.GraphModule):
@@ -416,7 +392,7 @@ class ResidualBlockPattern(PatternPlugin):
     max_fanout = 10
 
     @track_performance
-    def match(self, graph: Union[Graph, fx.GraphModule]) -> Optional[PatternMatch]:
+    def match(self, graph) -> Optional[PatternMatch]:
         G = graph_to_networkx(graph)
         # Look for nodes with operation 'aten::add' having two parents, and parents include a conv path
         for node_id in G.nodes:

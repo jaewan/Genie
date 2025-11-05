@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import time
 from typing import Dict, Any, Union
-import torch.fx as fx
 
 from genie.core.graph import ComputationGraph
 from genie.semantic.pattern_registry import PatternRegistry
@@ -14,9 +13,9 @@ import os
 
 
 class SemanticAnalyzer:
-	"""Three-tier semantic analyzer (dynamic, FX, hooks).
-	
-	Updated for Refactoring #3: Now supports both ComputationGraph and FX GraphModule.
+	"""Three-tier semantic analyzer (dynamic, patterns, hooks).
+
+	Updated for Refactoring #3: Now supports unified graph interface.
 	Updated for Refactoring #5: Now supports dependency injection for pattern matchers.
 	"""
 
@@ -52,7 +51,7 @@ class SemanticAnalyzer:
 		self._analysis_stats: Dict[str, float] = {}
 
 	@track_performance
-	def analyze_graph(self, graph: Union[ComputationGraph, fx.GraphModule]) -> WorkloadProfile:
+	def analyze_graph(self, graph) -> WorkloadProfile:
 		"""Analyze graph with performance tracking and advanced algorithms."""
 		start_time = time.perf_counter()
 		logger = logging.getLogger(__name__)
@@ -178,7 +177,7 @@ class SemanticAnalyzer:
 			"pattern_stats": self.pattern_matcher.get_performance_report()
 		}
 
-	def generate_stub_plan(self, graph: Union[ComputationGraph, fx.GraphModule], profile: "WorkloadProfile") -> "ExecutionPlan":
+	def generate_stub_plan(self, graph, profile: "WorkloadProfile") -> "ExecutionPlan":
 		"""Emit a minimal ExecutionPlan with placement hints.
 
 		This is a Phase-1 stub that wraps the entire graph into a single fragment

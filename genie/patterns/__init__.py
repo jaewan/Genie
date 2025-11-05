@@ -13,12 +13,6 @@ from .advanced_patterns import (  # noqa: F401
     MultiModalPattern,
     ResidualBlockPattern,
 )
-from .fx_patterns import (  # noqa: F401
-    find_matmul_chain,
-    find_attention_pattern_fx,
-    find_conv_activation_pattern_fx,
-    find_mlp_pattern_fx,
-)
 
 __all__ = [
     "PatternPlugin",
@@ -28,8 +22,4 @@ __all__ = [
     "RecSysPattern",
     "MultiModalPattern",
     "ResidualBlockPattern",
-    "find_matmul_chain",
-    "find_attention_pattern_fx",
-    "find_conv_activation_pattern_fx",
-    "find_mlp_pattern_fx",
 ]

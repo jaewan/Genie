@@ -2,9 +2,9 @@
 Unified graph interface for semantic-aware computation graphs.
 
 Design: Single abstraction point that works with different representations:
-- FX GraphModule (PyTorch traced)
 - LazyTensor DAG (deferred execution)
-- Materialized DAG (post-optimization)
+- Concrete node graphs (analysis)
+- Dict-based graphs (legacy)
 
 All graph algorithms use this interface, enabling multiple backends.
 """
@@ -28,7 +28,7 @@ class GenieGraph(ABC):
     Abstract base for all graph representations in Genie.
     
     Provides common operations: iteration, lookup, ordering.
-    Concrete implementations adapt to FX, LazyTensor, or other formats.
+    Concrete implementations adapt to LazyTensor, dict, or other formats.
     """
     
     @abstractmethod
@@ -179,60 +179,6 @@ class ConcreteGraphImpl(GenieGraph):
         return self._num_edges
 
 
-class FXGraphAdapter(GenieGraph):
-    """
-    Adapter for torch.fx.GraphModule.
-    
-    Translates FX representation to GenieGraph interface.
-    """
-    
-    def __init__(self, fx_graph: torch.fx.Graph):
-        self._fx_graph = fx_graph
-        self._node_cache: Optional[Dict[str, NodeProtocol]] = None
-        self._topological_order_cache: Optional[List[NodeProtocol]] = None
-    
-    def nodes(self) -> Iterator[NodeProtocol]:
-        """Iterate FX nodes."""
-        for fx_node in self._fx_graph.nodes:
-            if fx_node.op in ('call_function', 'call_method', 'call_module'):
-                yield _FXNodeAdapter(fx_node)
-            elif fx_node.op == 'placeholder':
-                yield _FXNodeAdapter(fx_node)
-            elif fx_node.op == 'output':
-                yield _FXNodeAdapter(fx_node)
-    
-    def get_node(self, node_id: str) -> Optional[NodeProtocol]:
-        """Get node by ID (lazy caching)."""
-        if self._node_cache is None:
-            self._build_node_cache()
-        return self._node_cache.get(node_id)
-    
-    def _build_node_cache(self) -> None:
-        """Build cache for O(1) lookups."""
-        self._node_cache = {}
-        for fx_node in self._fx_graph.nodes:
-            adapter = _FXNodeAdapter(fx_node)
-            self._node_cache[adapter.id] = adapter
-    
-    def topological_order(self) -> List[NodeProtocol]:
-        """Get nodes in execution order."""
-        if self._topological_order_cache is None:
-            self._topological_order_cache = list(self.nodes())
-        return self._topological_order_cache
-    
-    def topological_sort(self) -> List[NodeProtocol]:
-        """Get nodes in execution order (alias for backward compatibility)."""
-        return self.topological_order()
-
-    @property
-    def num_nodes(self) -> int:
-        """Number of nodes."""
-        return len(list(self._fx_graph.nodes))
-
-    @property
-    def num_edges(self) -> int:
-        """Number of edges."""
-        return sum(len(list(node.all_input_nodes)) for node in self._fx_graph.nodes)
 
 
 class DictGraphAdapter(GenieGraph):
@@ -288,51 +234,6 @@ class DictGraphAdapter(GenieGraph):
 # INTERNAL ADAPTERS
 # ============================================================================
 
-class _FXNodeAdapter:
-    """Adapter to make torch.fx.Node look like NodeProtocol."""
-    
-    def __init__(self, fx_node: torch.fx.Node):
-        self._node = fx_node
-
-    @property
-    def id(self) -> str:
-        return self._node.name
-
-    @property
-    def operation(self) -> str:
-        if self._node.op == 'call_function':
-            return str(self._node.target)
-        elif self._node.op == 'call_method':
-            return f"method:{self._node.target}"
-        elif self._node.op == 'call_module':
-            return f"module:{self._node.target}"
-        return self._node.op
-
-    @property
-    def inputs(self) -> List[NodeProtocol]:
-        return [_FXNodeAdapter(inp) for inp in self._node.all_input_nodes]
-    
-    @property
-    def outputs(self) -> List[NodeProtocol]:
-        return [_FXNodeAdapter(user) for user, _ in self._node.users]
-    
-    @property
-    def shape(self) -> Optional[torch.Size]:
-        meta = self._node.meta
-        if 'tensor_meta' in meta:
-            return meta['tensor_meta'].shape
-        return None
-    
-    @property
-    def dtype(self) -> Optional[torch.dtype]:
-        meta = self._node.meta
-        if 'tensor_meta' in meta:
-            return meta['tensor_meta'].dtype
-        return None
-
-    @property
-    def metadata(self) -> Dict[str, Any]:
-        return self._node.meta.get('genie_metadata', {})
 
 
 class _SubgraphAdapter(GenieGraph):
@@ -386,9 +287,6 @@ def create_concrete_graph(nodes: List[ConcreteNode]) -> ConcreteGraphImpl:
     return ConcreteGraphImpl(nodes)
 
 
-def create_fx_graph(fx_module: torch.fx.GraphModule) -> FXGraphAdapter:
-    """Create adapter for FX module."""
-    return FXGraphAdapter(fx_module.graph)
 
 
 def create_dict_graph(graph_dict: Dict[str, Any]) -> DictGraphAdapter:
@@ -402,7 +300,6 @@ def create_dict_graph(graph_dict: Dict[str, Any]) -> DictGraphAdapter:
 
 # Alias old names to new implementations for backward compatibility
 Graph = GenieGraph  # Old name -> New name
-FXGraphAdapter = FXGraphAdapter  # Already correct
 
 # Create LazyDAGAdapter as a backward-compatible alias
 class LazyDAGAdapter(GenieGraph):
@@ -487,12 +384,10 @@ class LazyDAGAdapter(GenieGraph):
 __all__ = [
     'GenieGraph',
     'ConcreteGraphImpl',
-    'FXGraphAdapter',
     'DictGraphAdapter',
     'LazyDAGAdapter',
     'Graph',  # Backward compat
     'create_concrete_graph',
-    'create_fx_graph',
     'create_dict_graph',
     'NodeProtocol',
 ]

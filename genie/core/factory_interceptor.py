@@ -25,7 +25,7 @@ from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# ✅ OPTIMIZATION: Import MetadataPlaceholder at module level to avoid per-call import overhead
+# Import MetadataPlaceholder at module level to avoid per-call import overhead
 from .metadata import MetadataPlaceholder
 
 # Thread-local storage to track when we're inside a LazyTensor factory method
