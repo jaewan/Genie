@@ -94,6 +94,37 @@ class MetadataPlaceholder:
             self.get_metadata(capture_fn)
         return self._computed_metadata
 
+    # Dict-like interface for compatibility with scheduler
+    def get(self, key: str, default=None):
+        """Dict-like get method."""
+        metadata = self.get_metadata()
+        return metadata.get(key, default)
+
+    def __getitem__(self, key: str):
+        """Dict-like getitem method."""
+        metadata = self.get_metadata()
+        return metadata[key]
+
+    def __contains__(self, key: str) -> bool:
+        """Dict-like contains method."""
+        metadata = self.get_metadata()
+        return key in metadata
+
+    def keys(self):
+        """Dict-like keys method."""
+        metadata = self.get_metadata()
+        return metadata.keys()
+
+    def values(self):
+        """Dict-like values method."""
+        metadata = self.get_metadata()
+        return metadata.values()
+
+    def items(self):
+        """Dict-like items method."""
+        metadata = self.get_metadata()
+        return metadata.items()
+
 
 def create_lazy_metadata(operation: str, inputs: tuple, kwargs: Dict[str, Any]) -> MetadataPlaceholder:
     """

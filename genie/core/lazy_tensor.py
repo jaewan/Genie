@@ -2354,9 +2354,9 @@ class LazyTensor(torch.Tensor):
         return object.__getattribute__(self, '_tensor_id')
 
     @property
-    def id(self) -> int:
+    def id(self) -> str:
         """Get unique ID for this tensor (alias for tensor_id)."""
-        return self.tensor_id
+        return str(self.tensor_id)
 
     @property
     def metadata(self) -> Dict[str, Any]:

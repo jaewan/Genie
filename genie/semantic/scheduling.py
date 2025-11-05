@@ -340,7 +340,9 @@ class Scheduler:
             for node in graph.nodes():
                 node_id = node.id
                 for inp in node.inputs:
-                    dependencies[node_id].add(inp.id)
+                    # Only add dependency if input is a node with an id (LazyTensor or NodeProtocol)
+                    if hasattr(inp, 'id'):
+                        dependencies[node_id].add(inp.id)
 
         return dependencies
     
