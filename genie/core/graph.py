@@ -31,8 +31,8 @@ class ComputationGraph:
 		in a future version. See the migration guide in docs/REFACTORING_PLAN.md.
 
 	New code should use:
-		- `genie.core.fx_graph_builder.FXGraphBuilder` for building graphs
-		- `genie.core.fx_graph_adapter.FXGraphAdapter` for analyzing graphs
+		- `genie.core.graph_builder.GraphBuilder` for building graphs
+		- `genie.core.legacy_graph_adapter.LegacyGraphAdapter` for analyzing graphs
 	"""
 	_nodes: Dict[str, ComputationNode]
 	edges: List[Tuple[str, str]]  # (source_id, target_id)

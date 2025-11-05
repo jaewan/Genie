@@ -94,65 +94,16 @@ def convert_to_networkx(graph_hash: str, nodes_tuple: tuple, edges_tuple: tuple)
     return G
 
 
-def fx_graph_to_networkx(fx_graph: fx.GraphModule) -> nx.DiGraph:
-    """Convert FX GraphModule to NetworkX DiGraph.
-    
-    Args:
-        fx_graph: FX GraphModule to convert
-        
-    Returns:
-        NetworkX DiGraph representation
-    """
-    try:
-        from genie.core.fx_graph_adapter import FXGraphAdapter
-        adapter = FXGraphAdapter(fx_graph)
-    except ImportError:
-        # Fallback to manual conversion if adapter not available
-        adapter = None
-    
-    G = nx.DiGraph()
-    
-    # Add nodes
-    for node in fx_graph.graph.nodes:
-        if node.op in ('call_function', 'call_method'):
-            # Extract operation name
-            if adapter:
-                operation = adapter.get_operation(node)
-            else:
-                # Fallback
-                if node.op == 'call_function':
-                    operation = f"aten::{getattr(node.target, '__name__', str(node.target))}"
-                else:
-                    operation = f"aten::{node.target}"
-            
-            G.add_node(node.name, operation=operation, node=node)
-            
-            # Add edges from dependencies
-            for arg in node.args:
-                if isinstance(arg, fx.Node) and arg.name in G:
-                    G.add_edge(arg.name, node.name)
-            
-            for kwarg in node.kwargs.values():
-                if isinstance(kwarg, fx.Node) and kwarg.name in G:
-                    G.add_edge(kwarg.name, node.name)
-    
-    return G
-
-
-def graph_to_networkx(graph: Union[fx.GraphModule, Graph]) -> nx.DiGraph:
-    """Convert FX GraphModule or unified Graph to NetworkX DiGraph with caching.
+def graph_to_networkx(graph: Graph) -> nx.DiGraph:
+    """Convert unified Graph to NetworkX DiGraph with caching.
 
     Args:
-        graph: Either FX GraphModule or unified Graph interface
+        graph: Unified Graph interface (FX support removed)
 
     Returns:
         NetworkX DiGraph
     """
-    # Check if it's an FX GraphModule
-    if isinstance(graph, fx.GraphModule):
-        return fx_graph_to_networkx(graph)
-
-    # Unified Graph interface
+    # Only unified Graph interface (FX removed)
     return unified_graph_to_networkx(graph)
 
 

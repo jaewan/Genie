@@ -7,7 +7,6 @@ import torch.fx as fx
 from genie.core.graph import ComputationGraph
 from genie.semantic.pattern_registry import PatternRegistry
 from genie.semantic.workload import WorkloadProfile, WorkloadType, WorkloadClassifier
-from genie.semantic.fx_analyzer import FXAnalyzer
 from genie.semantic.hooks import HookManager
 from genie.semantic.graph_utils import analyze_operations_advanced, track_performance
 import logging
@@ -49,7 +48,6 @@ class SemanticAnalyzer:
 			self.pattern_matcher = get_default_pattern_matcher()
 			self.pattern_registry = None
 		
-		self.fx_analyzer = FXAnalyzer()
 		self.hook_manager = HookManager()
 		self._analysis_stats: Dict[str, float] = {}
 
@@ -97,18 +95,7 @@ class SemanticAnalyzer:
 			if op_analysis_context is not None:
 				op_analysis_context.__exit__(None, None, None)
 		
-		# FX structural analysis
-		if profiler_active:
-			fx_analysis_context = profiler.profile_component("semantic_fx_analysis")
-			fx_analysis_context.__enter__()
-		else:
-			fx_analysis_context = None
-		
-		try:
-			structural_info = self.fx_analyzer.analyze_structure(graph)
-		finally:
-			if fx_analysis_context is not None:
-				fx_analysis_context.__exit__(None, None, None)
+		# Structural analysis removed (FX dependency eliminated)
 		
 		# Hook context
 		if profiler_active:
@@ -174,7 +161,6 @@ class SemanticAnalyzer:
 			workload_type=workload_type,
 			patterns=patterns,
 			metadata=ops_metadata,
-			structure=structural_info,
 			context=semantic_context,
 		)
 		if cache_enabled and graph_id:

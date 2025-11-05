@@ -72,7 +72,7 @@ Output: ExecutionSchedule
 |-----------|------|-------|---------|
 | **Scheduler** | `genie/semantic/scheduling.py` | 1,011 | Main orchestrator |
 | **Cost Estimator** | `genie/semantic/cost_estimator.py` | 600 | Latency prediction |
-| **Semantic Analyzer** | `genie/semantic/analyzer.py` | ~170 | Multi-tier semantic analysis (dynamic, FX, hooks) |
+| **Semantic Analyzer** | `genie/semantic/analyzer.py` | ~170 | Multi-tier semantic analysis (dynamic hooks, pattern matching) |
 | **Pattern Matchers** | `genie/semantic/pattern_matcher.py` | ~270 | Graph pattern recognition for workload analysis |
 | **Fusion Compiler** | `genie/semantic/fusion_compiler.py` | 280+ | SRG-driven pattern grouping |
 | **Network Topology** | `genie/core/network_topology.py` | 260 | Network info & device management |
@@ -82,7 +82,7 @@ Output: ExecutionSchedule
 | **Performance Monitor** | `genie/server/performance_monitor.py` | 417 | Metrics collection for optimization |
 
 **Note on Integration**: The scheduler works with multiple components for optimization:
-- **Semantic Analyzer** provides multi-tier analysis (dynamic hooks, FX tracing, runtime context)
+- **Semantic Analyzer** provides multi-tier analysis (dynamic hooks, pattern matching, runtime context)
 - **Pattern Matchers** identify optimization opportunities (attention patterns, KV cache, convolution stages)
 - **Fusion Compiler** groups operations based on semantic patterns
 - **Tensor Registry** provides smart caching with version-aware invalidation
@@ -611,7 +611,6 @@ The `GenieGraph` abstract base class provides a **unified interface** over multi
 ```
 GenieGraph (Abstract Interface)
 ├─ ConcreteGraphImpl (efficient for materialized DAGs)
-├─ FX GraphModule (PyTorch traced graphs)
 ├─ LazyTensor DAG (deferred execution)
 └─ Other backends (extensible)
 ```

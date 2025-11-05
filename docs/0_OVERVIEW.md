@@ -64,7 +64,7 @@ Genie bridges the gap between application intent and hardware execution through 
 ┌─────────────────────────────────────────────────────────────────┐
 │  STAGE 1: FRONTEND (Capturing Intent)                           │
 │  • Tensor interception (factory wrapping + __torch_dispatch__)  │
-│  • Graph construction (hybrid FX + LazyTensor DAG)              │
+│  • Graph construction (LazyTensor DAG)                          │
 │  • Basic semantic annotation (metadata capture)                 │
 │  Output: Computation Graph with metadata                        │
 └─────────────────────────────────────────────────────────────────┘
@@ -142,13 +142,11 @@ Genie selects the optimal execution strategy automatically:
 2. **Subgraph Optimization** - Good for medium-sized graphs  
 3. **Naive Recursion** - Fallback for simple/small graphs
 
-### 4. Hybrid Graph Builder
+### 4. LazyTensor DAG Graph Builder
 
-Intelligently chooses between representations:
-- **FX Symbolic Trace** - Attempted first, falls back to LazyTensor DAG for complex models (e.g., transformers)
-- **LazyTensor DAG** - Always works, handles dynamic control flow (20% of models)
-
-Both representations exposed through unified `GenieGraph` interface.
+Captures all tensor operations in LazyTensor DAG for remote execution:
+- **LazyTensor DAG** - Works on all models, provides operation-level granularity
+- **Unified Graph Interface** - LazyDAGAdapter exposes operations through unified Graph interface
 
 ### 5. Tensor Interception Strategy
 
@@ -313,8 +311,7 @@ Genie's architecture follows a **clean separation of concerns**:
 │                    FRONTEND (Intent Capture)                     │
 │  ┌──────────────┬──────────────┬──────────────┐                │
 │  │  LazyTensor  │ GraphBuilder │   Semantic   │                │
-│  │ Interception │  (Hybrid FX+ │  Annotation  │                │
-│  │              │   LazyDAG)   │              │                │
+│  │ Interception │  (LazyDAG)   │  Annotation  │                │
 │  └──────────────┴──────────────┴──────────────┘                │
 │                                                                  │
 │  Output: Semantically Rich Graph (SRG)                          │

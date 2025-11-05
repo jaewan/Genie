@@ -166,10 +166,10 @@ The frontend is responsible for **transparently capturing application intent** a
                                 │
                                 ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  STAGE 2: Hybrid Graph Construction                             │
-│  • Try FX Symbolic Tracing first (falls back for complex models)│
-│  • Fallback to LazyTensor DAG (~20% with dynamic control flow) │
-│  • Unified GenieGraph interface for both representations        │
+│  STAGE 2: LazyTensor DAG Construction                           │
+│  • LazyTensor DAG construction (works for all models)           │
+│  • Operation-level granularity for remote execution             │
+│  • Unified GenieGraph interface                                  │
 │  • Static analysis of module hierarchy                          │
 └─────────────────────────────────────────────────────────────────┘
                                 │
@@ -261,29 +261,26 @@ class LazyTensor:
 - **Solution**: Store metadata locally using logical device abstraction
 - **Impact**: Eliminates remote network calls for scheduling decisions and metadata operations like shape()s
 
-### §3.4 Hybrid Graph Builder
+### §3.4 LazyTensor DAG Graph Builder
 
-**Strategy: Try FX first, fall back to LazyTensor DAG**
+**Strategy: LazyTensor DAG for all models**
 
 ```python
-class HybridGraphBuilder:
-    """Attempts two strategies for graph construction."""
-    
-    def build_from_capture():
-        # Strategy 1: FX Symbolic Tracing (attempted first, falls back for complex models)
-        try:
-            module = reconstruct_module_from_lazy_dag(root_tensor)
-            traced = fx.symbolic_trace(module)
-            return FXGraphAdapter(traced.graph)  # Better optimizations
-        except:
-            # Strategy 2: LazyTensor DAG (always works, handles dynamic control flow)
-            return LazyDAGAdapter(root_tensor)
+class GraphBuilder:
+    """LazyTensor DAG graph builder for all models."""
+
+    def build_from_model(model, *args):
+        # Single strategy: LazyTensor DAG (works on all models)
+        output = model(*args)
+        if isinstance(output, LazyTensor):
+            self.root_tensor = output
+            return LazyDAGAdapter(self.root_tensor)
 ```
 
 **Unified Graph Interface**:
-- Both FX and LazyDAG exposed through `GenieGraph` abstraction
-- All graph algorithms work with either representation
-- Pattern recognition works on both backends
+- LazyDAGAdapter exposes LazyTensor DAG through `GenieGraph` abstraction
+- All graph algorithms work with the LazyTensor representation
+- Pattern recognition works on operation-level DAG
 - Semantic metadata stored separately (MetadataRegistry)
 
 ### §3.5 Semantic Metadata Structure
@@ -994,11 +991,10 @@ For specific performance characteristics, run the benchmarking suite on your har
 
 ### §10.2 Current Limitations
 
-1. **FX tracing failures**: ~20% of models with dynamic control flow require fallback to hooks-only mode
-2. **In-place operations**: Converted to out-of-place (slight memory overhead ~5%)
-3. **Mixed device operations**: Force materialization (lose potential optimizations)
-4. **Memory management**: Long-running workloads require graph compaction
-5. **Cold start overhead**: 32.2× slowdown (amortized over multiple requests)
+1. **In-place operations**: Converted to out-of-place (slight memory overhead ~5%)
+2. **Mixed device operations**: Force materialization (lose potential optimizations)
+3. **Memory management**: Long-running workloads require graph compaction
+4. **Cold start overhead**: 32.2× slowdown (amortized over multiple requests)
 
 ### §10.3 Future Work
 

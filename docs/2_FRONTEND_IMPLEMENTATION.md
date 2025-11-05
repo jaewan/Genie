@@ -44,10 +44,10 @@ The Genie frontend transparently captures application intent by intercepting PyT
                                 │
                                 ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  STAGE 2: Graph Construction (Hybrid Strategy)                  │
-│  • Try FX symbolic tracing (works for simple models)            │
-│  • Fallback to LazyTensor DAG (handles complex/dynamic models)  │
-│  • Unified Graph interface for both representations             │
+│  STAGE 2: Graph Construction (LazyTensor DAG)                    │
+│  • LazyTensor DAG construction (works for all models)           │
+│  • Operation-level granularity for remote execution             │
+│  • Unified Graph interface                                      │
 └─────────────────────────────────────────────────────────────────┘
                                 │
                                 ▼
@@ -66,7 +66,7 @@ The Genie frontend transparently captures application intent by intercepting PyT
 |-----------|------|---------|
 | **LazyTensor** | `genie/core/lazy_tensor.py` | Symbolic tensor, torch.Tensor subclass, deferred execution |
 | **Initialization** | `genie/__init__.py` | Async-first API with background initialization |
-| **Graph Builder** | `genie/core/graph_builder.py` | Hybrid FX + DAG construction |
+| **Graph Builder** | `genie/core/graph_builder.py` | LazyTensor DAG construction |
 | **Factory Interceptor** | `genie/core/factory_interceptor.py` | Intercept ~20 factory functions (torch.randn, torch.zeros, etc.) |
 | **Shape Inference** | `genie/core/shape_inference.py` | Production-grade shape inference using meta tensors |
 | **Automatic Dispatch** | `genie/core/automatic_dispatch.py` | Meta tensor-based automatic operation dispatch |
@@ -239,7 +239,7 @@ class Modality(str, Enum):
 
 **File**: `genie/core/types.py` (lines 54-100+)
 
-Standard interface for all graph nodes (FX, LazyTensor DAG, etc):
+Standard interface for all graph nodes (LazyTensor DAG, etc):
 
 ```python
 @runtime_checkable
@@ -593,53 +593,38 @@ def disable_interception(context: InterceptionContext) -> ContextManager:
 
 **File**: `genie/core/graph_builder.py` (250+ lines)
 
-Strategy: Try FX first, fallback to LazyTensor DAG
+Strategy: LazyTensor DAG for all models
 
 ```python
-class HybridGraphBuilder:
+class GraphBuilder:
     """
-    Thread-local graph builder with two representation options.
-    
-    Strategy:
-    1. Try torch.fx.symbolic_trace (works for simple models, falls back for complex ones like transformers)
-    2. If that fails, use LazyTensor DAG (always works)
-    
-    Both representations exposed through unified Graph interface.
+    Thread-local LazyTensor DAG graph builder.
+
+    Strategy: Capture all tensor operations in LazyTensor DAG for remote execution.
+    FX was removed because it operates at module level while Genie needs operation-level
+    capture, and FX fails on ~80% of real ML models due to dynamic control flow.
+
+    Provides unified Graph interface through LazyDAGAdapter.
     """
     
     _thread_local = threading.local()  # Thread-safe storage
     
     def build_from_model(self, model: torch.nn.Module, *args) -> Graph:
-        """Build graph from model using hybrid strategy."""
+        """Build graph from model using LazyTensor DAG capture."""
         
-        # Try FX first
-        try:
-            logger.info("Attempting FX symbolic trace...")
-            self.fx_module = fx.symbolic_trace(model)
-            self.fx_graph = self.fx_module.graph
-            self.use_fx = True
-            logger.info(f"✓ FX trace successful ({len(list(self.fx_graph.nodes))} nodes)")
-            return FXGraphAdapter(self.fx_graph)
-        
-        except Exception as e:
-            # FX failed - fall back to LazyTensor DAG
-            logger.info(f"FX trace failed: {e}")
-            logger.info("Falling back to LazyTensor DAG capture...")
-            
-            self.use_fx = False
-            
-            # Capture using LazyTensor by running forward pass
-            output = model(*args)
-            
-            if not isinstance(output, LazyTensor):
-                raise RuntimeError(
-                    "Model output is not a LazyTensor. "
-                    "Make sure tensors are on remote_accelerator device."
-                )
-            
-            self.root_tensor = output
-            logger.info(f"✓ LazyTensor DAG built successfully")
-            return LazyDAGAdapter(self.root_tensor)
+        # Single strategy: LazyTensor DAG (works on all models)
+        logger.info("Capturing computation graph with LazyTensor DAG...")
+        output = model(*args)
+
+        if not isinstance(output, LazyTensor):
+            raise RuntimeError(
+                "Model output is not a LazyTensor. "
+                "Make sure tensors are created on 'remote_accelerator' device."
+            )
+
+        self.root_tensor = output
+        logger.info(f"✓ LazyTensor DAG built successfully")
+        return LazyDAGAdapter(self.root_tensor)
 ```
 
 ### §6.2 Unified Graph Interface
@@ -652,7 +637,7 @@ class Graph(Protocol):
     """
     Unified interface for graph representations.
     
-    Allows FX graphs and LazyTensor DAGs to be treated uniformly
+    Provides unified Graph interface for LazyTensor DAGs
     for semantic analysis and optimization.
     """
     
@@ -671,8 +656,7 @@ class Graph(Protocol):
         ...
 ```
 
-Implementations:
-- `FXGraphAdapter`: Wraps torch.fx.Graph
+Implementation:
 - `LazyDAGAdapter`: Wraps LazyTensor DAG
 
 ### §6.3 Graph Caching
@@ -912,7 +896,7 @@ Semantic analyzer combines three analysis mechanisms with performance tracking:
 
 ```python
 class SemanticAnalyzer:
-    """Three-tier semantic analyzer (dynamic, FX, hooks)."""
+    """Multi-tier semantic analyzer (dynamic hooks, pattern matching, runtime context)."""
     
     def __init__(
         self, 
@@ -933,18 +917,17 @@ class SemanticAnalyzer:
             self.pattern_matcher = get_default_pattern_matcher()
             self.pattern_registry = None
         
-        self.fx_analyzer = FXAnalyzer()
         self.hook_manager = HookManager()
         self._analysis_stats: Dict[str, float] = {}
         self._cache: Dict[str, WorkloadProfile] = {}
     
-    def analyze_graph(self, graph: Union[ComputationGraph, fx.GraphModule]) -> WorkloadProfile:
+    def analyze_graph(self, graph: ComputationGraph) -> WorkloadProfile:
         """Analyze graph with semantic enrichment."""
         # Tier 1: Operation-level analysis
         ops_metadata = analyze_operations_advanced(graph)
         
-        # Tier 2: FX structural analysis
-        structural_info = self.fx_analyzer.analyze_structure(graph)
+        # Tier 2: Pattern-based structural analysis
+        structural_info = self.pattern_matcher.analyze_structure(graph)
         
         # Tier 3: Hook-based enrichment
         semantic_context = self.hook_manager.get_context(graph)
@@ -987,7 +970,7 @@ with genie.capture(model) as captured:
     y = model(x)
 
 # At this point:
-# - Stage 2 (Graph Construction): Hybrid builder created FX graph or DAG
+# - Stage 2 (Graph Construction): LazyTensor DAG captures all operations
 # - Stage 3 (Semantic Annotation): Multi-tier analysis completed
 
 # Step 3: Access semantic metadata
@@ -1049,7 +1032,7 @@ The implementation follows a modular approach:
 
 **Phase 1: Core Graph Capture** ✅ Complete
 - LazyTensor + __torch_dispatch__ + Factory interception
-- Hybrid FX + DAG graph builder
+- LazyTensor DAG graph builder
 - Basic semantic analysis
 
 **Phase 2: Smart Fragmentation & Semantic Analysis** ✅ Complete
@@ -1077,7 +1060,7 @@ The implementation follows a modular approach:
 
 The semantic analysis components provide multi-tier pattern recognition and workload analysis:
 
-- **SemanticAnalyzer**: Three-tier analysis (dynamic hooks, FX tracing, runtime context)
+- **SemanticAnalyzer**: Multi-tier analysis (dynamic hooks, pattern matching, runtime context)
 - **PatternMatcher**: Graph pattern matching service with dependency injection
 - **PatternRegistry**: Registry of workload patterns (attention, KV cache, convolution)
 - **WorkloadClassifier**: Classifies workloads by type and characteristics
@@ -1104,7 +1087,7 @@ The Genie frontend provides **transparent semantic capture** for GPU disaggregat
 ✅ **Effective tensor interception** with prioritized dispatch mechanisms  
 ✅ **Local metadata** without remote queries  
 ✅ **Graph caching** for repeated workloads  
-✅ **Hybrid graph representation** (FX + LazyTensor DAG)  
+✅ **Unified graph representation** (LazyTensor DAG)  
 ✅ **Three-tier semantic analysis** (operation + structural + hooks)  
 ✅ **Production-ready architecture**
 
