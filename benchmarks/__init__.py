@@ -30,13 +30,13 @@ Expected Results:
 
 # Framework components (optional - may not exist yet)
 try:
-from .framework import (
-    BenchmarkRunner,
-    AblationStudyRunner,
-    BenchmarkConfig,
-    BenchmarkResult,
-    ComparativeAnalysis
-)
+    from .framework import (
+        BenchmarkRunner,
+        AblationStudyRunner,
+        BenchmarkConfig,
+        BenchmarkResult,
+        ComparativeAnalysis
+    )
     _FRAMEWORK_AVAILABLE = True
 except ImportError:
     _FRAMEWORK_AVAILABLE = False

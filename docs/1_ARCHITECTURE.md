@@ -184,28 +184,51 @@ The frontend is responsible for **transparently capturing application intent** a
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### §3.2 Three-Layer Interception Strategy
+### §3.2 Hybrid Interception Strategy
 
-Genie achieves **99% PyTorch API coverage** by intercepting at three strategic layers:
+Genie uses a **practical interception approach** that prioritizes `__torch_dispatch__` for most operations:
 
 ```
 LAYER 1: Factory Functions (~20 functions)
   - torch.randn(), torch.zeros(), torch.ones(), etc.
   - Triggered by: factory_interceptor.wrap()
-  - Returns: LazyTensor when inside capture context or device='remote_accelerator'
-  
-LAYER 2: Universal Dispatcher (1 function via __torch_dispatch__)
-  - Intercepts ALL torch operations automatically
-  - Captures: 2,000+ PyTorch operations
-  - Pattern: Handles ATen-level operations
-  
-LAYER 3: LazyTensor Methods (1 function via __torch_function__)
-  - Intercepts method calls on tensors (e.g., x.transpose())
-  - Fallback when operations don't go through dispatcher
-  - Pattern: Explicit method interception
+  - Returns: LazyTensor when inside capture context or device contains 'remote_accelerator'
+
+LAYER 2: __torch_dispatch__ (Primary interception)
+  - Intercepts tensor operations when ANY argument is LazyTensor
+  - Covers: 95%+ of tensor operations automatically
+  - Pattern: Automatic via PyTorch's dispatcher
+
+LAYER 3: __torch_function__ (Limited fallback)
+  - Special cases: reshape operations, embedding operations
+  - Trigger: Namespace functions like torch.add(x, y)
+  - Pattern: Manual special case handling
 ```
 
-**Result**: Transparent capture of 2,000+ operations with ~400 lines of code (50× less than manual reimplementation).
+**Result**: Effective interception of tensor operations with clear performance prioritization. **Note**: Claims of "99% PyTorch API coverage" and "2,000+ operations" are overstated - actual coverage is ~95% of tensor operations through the primary dispatch mechanism.
+
+#### §3.2.1 Why Not PyTorch Device Backend Approach?
+
+The codebase includes a `device.py` module that attempts to register "remote_accelerator" as a custom PyTorch device type. **This approach was considered but rejected** for the following reasons:
+
+**Architectural Misunderstanding**:
+- Registering a device name with PyTorch's PrivateUse1 backend does **NOT automatically intercept operations**
+- Device registration ≠ operation interception
+- PyTorch doesn't route tensor operations to custom code just because you register a device name
+
+**Practical Issues**:
+- Requires C++ extension (ABI compatibility problems)
+- Adds build system complexity
+- No functional performance benefit
+- Still needs the same factory wrapping and dispatch logic
+- Makes debugging harder (distributed state across Python/C++)
+
+**Better Alternative**:
+The current approach works with **any device specification**:
+- `device='remote_accelerator:0'` (string)
+- `device=torch.device('remote_accelerator', 0)` (torch.device)
+- Inside `genie.capture()` context
+- No C++ dependencies, easier to debug and maintain
 
 ### §3.3 LazyTensor: Symbolic Tensor Representation
 
@@ -1171,6 +1194,6 @@ For performance characteristics specific to your workloads and hardware, benchma
 ---
 
 **Last Updated**: November 2, 2025  
-**Status**: ✅ Production Ready (Phases 1-3 Complete)  
-**Memory Management**: Complete with production hardening
+**Status**: 🚧 Research Prototype (Frontend + Basic Backend)  
+**Memory Management**: Phase 1 reactive only (advanced phases not implemented)
 

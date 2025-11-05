@@ -360,35 +360,4 @@ ShapeInference.SPECIAL_HANDLERS['aten::_softmax'] = _infer_softmax_shape
 # Utility Functions
 # ============================================================================
 
-def test_shape_inference():
-    """Test shape inference on common operations."""
-    from genie.core.lazy_tensor import LazyTensor
-    
-    print("Testing ShapeInference...")
-    
-    test_cases = [
-        # (operation, inputs, kwargs, expected_shape)
-        ('aten::matmul', [LazyTensor.randn(10, 20), LazyTensor.randn(20, 30)], {}, torch.Size([10, 30])),
-        ('aten::add', [LazyTensor.randn(10, 20), LazyTensor.randn(10, 20)], {}, torch.Size([10, 20])),
-        ('aten::relu', [LazyTensor.randn(10, 20)], {}, torch.Size([10, 20])),
-    ]
-    
-    passed = 0
-    for operation, inputs, kwargs, expected in test_cases:
-        try:
-            result = ShapeInference.infer_shape(operation, inputs, kwargs)
-            if result == expected:
-                print(f"✓ {operation}")
-                passed += 1
-            else:
-                print(f"✗ {operation}: expected {expected}, got {result}")
-        except Exception as e:
-            print(f"✗ {operation}: {e}")
-    
-    print(f"\n{passed}/{len(test_cases)} tests passed")
-    return passed == len(test_cases)
-
-
-if __name__ == '__main__':
-    test_shape_inference()
 

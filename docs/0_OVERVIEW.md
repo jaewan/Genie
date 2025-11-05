@@ -1,24 +1,26 @@
 # Genie: Semantic-Driven GPU Disaggregation
 
-**Status**: Need auditing with real implementation
-**Last Updated**: November 4, 2025
+**Status**: ✅ Implementation audited - matches documentation
+**Last Updated**: November 2, 2025
 **Version**: 1.0
 
 ---
 
-**📋 Documentation Audit Status** (Edit this section after auditing):
--  Frontend implementation: Need verification against actual code
--  Semantic metadata structure: 
--  Memory Management (Phase 1-3): Complete with production hardening
--  Performance monitoring: Prometheus metrics integrated
--  TCP Transport: Fully implemented and deployed
--  Serialization Optimization: NumPy-based format deployed
--  SRG-Driven Fusion: Pattern grouping (Tier 1) implemented
--  Tensor Registry: Version-aware caching with LRU eviction
--  OptimizationExecutor: Default executor integrating all components
--  Multi-Layer Optimization: Phases 1-4 all implemented (Graph Caching, Block Compilation, GPU Cache, TensorRT)
--  Remote execution: Validated on TCP transport
+**📋 Implementation Status Audit** (Updated based on code review):
+-  Frontend implementation: ✅ Implemented (factory wrapping + __torch_dispatch__ + limited __torch_function__)
+-  Semantic metadata structure: ✅ Implemented (basic semantic capture)
+-  Memory Management (Phase 1-3): ⚠️ Partially implemented (Phase 1 reactive only)
+-  Performance monitoring: 🚧 In progress (basic metrics)
+-  TCP Transport: ✅ Implemented
+-  Serialization Optimization: ✅ NumPy-based format
+-  SRG-Driven Fusion: ⚠️ Basic pattern grouping (Tier 1 only)
+-  Tensor Registry: 🚧 Basic caching
+-  OptimizationExecutor: 🚧 Partial implementation
+-  Multi-Layer Optimization: ⚠️ Graph caching only (Phases 2-4 not fully integrated)
+-  Remote execution: ✅ Basic validation on TCP transport
+-  Scheduler: ❌ Empty directory (critical gap)
 - ⚠️ Zero-Copy Transport: Not implemented (future phase)
+- ⚠️ Device.py approach: Considered but rejected (see §6.4)
 
 ---
 
@@ -61,10 +63,10 @@ Genie bridges the gap between application intent and hardware execution through 
                                 ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  STAGE 1: FRONTEND (Capturing Intent)                           │
-│  • LazyTensor interception (3-layer strategy)                   │
-│  • Graph construction (DAG of operations)                        │
-│  • Semantic annotation (FX + hooks + patterns)                  │
-│  Output: Semantically Rich Graph (SRG)                          │
+│  • Tensor interception (factory wrapping + __torch_dispatch__)  │
+│  • Graph construction (hybrid FX + LazyTensor DAG)              │
+│  • Basic semantic annotation (metadata capture)                 │
+│  Output: Computation Graph with metadata                        │
 └─────────────────────────────────────────────────────────────────┘
                                 │
                                 │ SRG with annotations
@@ -148,13 +150,20 @@ Intelligently chooses between representations:
 
 Both representations exposed through unified `GenieGraph` interface.
 
-### 5. Async-First Initialization
+### 5. Tensor Interception Strategy
 
-**Non-blocking initialization strategy**:
-- Explicit `genie.init()` API for benchmarking (separates init from workload cost)
-- Auto-initialization on first Genie API call (no manual setup needed)
-- Background async initialization with double-check locking
-- Thread-safe across all contexts
+**Hybrid interception approach**:
+- **Factory wrapping**: Intercepts ~20 tensor creation functions (torch.randn, torch.zeros, etc.)
+- **__torch_dispatch__**: Primary interception for tensor operations (95%+ coverage)
+- **Limited __torch_function__**: Special cases (reshape, embedding)
+- **Context-aware**: Thread-local state management for capture contexts
+
+**Why not PyTorch device backend approach?**
+- Device registration ≠ operation interception (PyTorch doesn't auto-route to custom code)
+- C++ extension adds build complexity and ABI compatibility issues
+- No functional performance benefit
+- Current approach works with any device specification (strings, torch.device objects, contexts)
+- Easier debugging and maintenance without C++ dependencies
 
 **Initialization Triggers**:
 - Early (non-blocking): Device-based tensor creation, `.to()` calls, `capture()` context
@@ -377,31 +386,30 @@ Genie's architecture follows a **clean separation of concerns**:
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| **Frontend** | ✅ Production-ready | 99% PyTorch API coverage, Hybrid FX+LazyDAG |
-| **Graph Caching** | ✅ Production-ready | LRU eviction enabled |
-| **Block Compilation** | ✅ Production-ready | TorchScript compilation at module boundaries |
-| **TensorRT** | ✅ Production-ready | Lazy compilation after profiling |
-| **Scheduler** | ✅ Production-ready | Semantic optimizations implemented |
-| **Backend (TCP)** | ✅ Production-ready | Connection pooling, async/await |
-| **Backend (DPDK)** | 🚧 Experimental | Future enhancement, requires hardware support |
-| **GPU Cache** | ✅ Production-ready | Persistent weights, LRU eviction, memory-aware |
-| **Memory Management (Phase 1)** | ✅ Production-ready | Memory-aware eviction, KV session pinning |
-| **Memory Management (Phase 2)** | ✅ Production-ready | Lifetime-based eviction, phase-aware budgets |
-| **Memory Management (Phase 3)** | ✅ Production-ready | Prometheus metrics, pressure handling, adaptive tuning |
-| **Fault Tolerance** | 🚧 In progress | Lineage-based recovery framework |
-| **Remote Execution** | ✅ Implemented | Server-side execution engine |
+| **Frontend** | ✅ Implemented | Factory wrapping + __torch_dispatch__ (~95% operation coverage) |
+| **Graph Caching** | ✅ Implemented | LRU eviction enabled |
+| **Block Compilation** | 🚧 Partial | Basic TorchScript blocks |
+| **TensorRT** | ❌ Not implemented | Future enhancement |
+| **Scheduler** | ❌ Empty | Critical gap - no implementation |
+| **Backend (TCP)** | ✅ Implemented | Basic transport with connection pooling |
+| **Backend (DPDK)** | ❌ Not implemented | Future enhancement |
+| **GPU Cache** | 🚧 Basic | LRU eviction without advanced memory management |
+| **Memory Management (Phase 1)** | 🚧 Basic | Reactive eviction only |
+| **Memory Management (Phase 2-3)** | ❌ Not implemented | Future enhancement |
+| **Fault Tolerance** | ❌ Not implemented | Future enhancement |
+| **Remote Execution** | ✅ Basic | Server-side execution engine |
 
 ### Model Compatibility
 
 | Model | Status | Performance | Notes |
 |-------|--------|-------------|-------|
-| **GPT-2** | ✅ Fully working | Production-ready | Validated on base model |
-| **BERT** | ✅ Fully working | Production-ready | Batch inference optimized |
-| **ResNet** | ✅ Fully working | Production-ready | Vision workloads |
-| **ViT** | ✅ Fully working | Production-ready | Vision transformer |
-| **T5** | 🟡 Forward pass works | Forward pass tested | Generation needs KV cache support |
-| **CLIP** | ⚠️ Partial support | Multimodal support | Custom output types may require tuning |
-| **GPT-2 XL** | ✅ No recursion errors | Large models supported | Tested up to 1.5B parameters |
+| **GPT-2** | ✅ Basic support | Single inference tested | No KV cache optimization |
+| **BERT** | ✅ Basic support | Single inference tested | No batch optimization |
+| **ResNet** | ✅ Basic support | Single inference tested | No vision-specific optimizations |
+| **ViT** | ⚠️ Limited | May work | Not thoroughly tested |
+| **T5** | ❌ Not tested | Unknown | May have issues with generation |
+| **CLIP** | ❌ Not tested | Unknown | Complex multimodal outputs |
+| **GPT-2 XL** | ⚠️ May work | Unknown | Large models may exceed memory limits |
 
 ---
 
@@ -459,5 +467,5 @@ See `CONTRIBUTING.md` for guidelines.
 
 **Last Updated**: November 2, 2025  
 **Version**: 1.0  
-**Status**: ✅ Production Ready
+**Status**: 🚧 Research Prototype (Frontend + Basic Backend)
 

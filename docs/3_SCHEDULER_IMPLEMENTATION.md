@@ -72,14 +72,21 @@ Output: ExecutionSchedule
 |-----------|------|-------|---------|
 | **Scheduler** | `genie/semantic/scheduling.py` | 1,011 | Main orchestrator |
 | **Cost Estimator** | `genie/semantic/cost_estimator.py` | 600 | Latency prediction |
+| **Semantic Analyzer** | `genie/semantic/analyzer.py` | ~170 | Multi-tier semantic analysis (dynamic, FX, hooks) |
+| **Pattern Matchers** | `genie/semantic/pattern_matcher.py` | ~270 | Graph pattern recognition for workload analysis |
+| **Fusion Compiler** | `genie/semantic/fusion_compiler.py` | 280+ | SRG-driven pattern grouping |
 | **Network Topology** | `genie/core/network_topology.py` | 260 | Network info & device management |
 | **Graph Interface** | `genie/core/graph_interface.py` | 497 | Unified graph abstraction |
 | **Placement Policy** | `genie/semantic/placement.py` | 499 | Device assignment & constraints |
 | **Tensor Registry** | `genie/server/tensor_registry.py` | 400+ | Smart tensor caching (integration) |
-| **Fusion Compiler** | `genie/semantic/fusion_compiler.py` | 280+ | SRG-driven pattern grouping |
 | **Performance Monitor** | `genie/server/performance_monitor.py` | 417 | Metrics collection for optimization |
 
-**Note on Integration**: The scheduler works in conjunction with Tensor Registry and Fusion Compiler. Registry provides version-aware invalidation, Fusion provides operation grouping hints, and Performance Monitor tracks effectiveness of scheduling decisions.
+**Note on Integration**: The scheduler works with multiple components for optimization:
+- **Semantic Analyzer** provides multi-tier analysis (dynamic hooks, FX tracing, runtime context)
+- **Pattern Matchers** identify optimization opportunities (attention patterns, KV cache, convolution stages)
+- **Fusion Compiler** groups operations based on semantic patterns
+- **Tensor Registry** provides smart caching with version-aware invalidation
+- **Performance Monitor** tracks optimization effectiveness and feeds back to improve future decisions
 
 **Note on NetworkTopology**: The component has a dual-layer design:
 - **Bridge wrapper** in `genie/semantic/cost_estimator.py` (~40 lines): Acts as a facade to avoid circular imports
@@ -635,7 +642,94 @@ The Genie scheduler provides **semantic-driven optimization** for GPU disaggrega
 
 ---
 
-**Last Updated**: November 2, 2025  
-**Status**: ✅ Production Ready  
-**Architecture**: See `1_ARCHITECTURE.md` §4
+## §11. Unintegrated Codes.
+
+Take a look at these codes and consider integrating them with careful design decisions.
+
+
+### **3. `genie/core/materialization_optimizer.py`**
+
+**Status**: **🟡 UNIMPLEMENTED OPTIMIZATION** - High-value performance optimization
+
+**Analysis**:
+- **Purpose**: Materialization optimization to address the 75ms bottleneck (71% of total overhead)
+- **Features**: 
+  - Topological scheduling to eliminate recursive overhead
+  - CUDA streams for computation/transfer overlap  
+  - Pinned memory for faster CPU↔GPU transfers
+- **Quality**: Production-ready with proper CUDA stream management and error handling
+- **Business Value**: Could reduce materialization time significantly
+
+**Recommendation**: **INTEGRATE** this optimization
+```python
+# Hook into LazyTensor.materialize() method
+# Replace recursive execution with optimized batch execution
+```
+
+---
+
+### **4. `genie/core/differential_graph.py`**
+
+**Status**: **🟡 UNIMPLEMENTED OPTIMIZATION** - Network efficiency optimization
+
+**Analysis**:
+- **Purpose**: Differential graph transfer for iterative workloads (LLM decoding)
+- **Value**: Reduces network traffic from 5MB → ~500KB per request (10x reduction)
+- **Use Case**: Critical for LLM generation where graphs change minimally between steps
+- **Quality**: Well-architected with proper delta computation and expansion logic
+
+**Recommendation**: **INTEGRATE** this optimization
+```python
+# Add to scheduler when sending graphs to remote server
+# Enable via config: differential_graph_transfer=True
+```
+
+---
+
+### **5. `genie/core/block_serializer.py`**
+
+**Status**: **🟡 UNIMPLEMENTED OPTIMIZATION** - Part of block compilation system
+
+**Analysis**:
+- **Purpose**: Serialization for TorchScript blocks (part of the block compilation optimization mentioned in docs)
+- **Status**: Related to the block compilation feature that's supposed to be implemented but not integrated
+- **Quality**: Comprehensive serialization with metadata preservation
+
+**Recommendation**: **INTEGRATE** if block compilation is planned, otherwise **REMOVE**
+
+---
+
+### **6. `genie/core/batch_protocol.py`**
+
+**Status**: **🟡 UNIMPLEMENTED OPTIMIZATION** - Network batching protocol
+
+**Analysis**:
+- **Purpose**: Batch multiple operations into single network request for 3-5x speedup on small operations
+- **Quality**: Well-designed binary protocol with proper error handling
+- **Use Case**: Micro-batch inference scenarios
+
+**Recommendation**: **INTEGRATE** this optimization
+```python
+# Add batching option to network transport layer
+# Enable via config: enable_operation_batching=True
+```
+
+---
+
+### **7. `genie/core/batching_coordinator.py`**
+
+**Status**: **🟡 UNIMPLEMENTED OPTIMIZATION** - Operation batching coordinator
+
+**Analysis**:
+- **Purpose**: Automatic batching of remote operations with configurable batch size and timeout
+- **Features**: Async/await support, statistics tracking, proper Future handling
+- **Quality**: Production-ready with proper threading and async handling
+
+**Recommendation**: **INTEGRATE** this optimization
+```python
+# Hook into the executor to batch operations automatically
+# This would work well with the batch_protocol.py above
+```
+
+---
 

@@ -496,16 +496,7 @@ class LazyTensor(torch.Tensor):
         - Critical for LLM generation and sequential processing
     """
     
-    # Map of ATen operations to handler methods
-    _OPERATION_HANDLERS = {
-        # NOTE: Removed simplified add/sub/mul/div - they need proper broadcasting support
-        # which requires FakeTensor mode for accurate shape inference
-    }
 
-    # OPTIMIZATION: Graph checkpointing to fix long sequence failures
-    _operation_counter = 0
-    _checkpoint_interval = 100  # Materialize graph every 100 operations
-    _checkpoint_lock = threading.Lock()
 
     # Track metadata without breaking tensor subclass protocol
     @staticmethod
@@ -2699,14 +2690,7 @@ class LazyTensor(torch.Tensor):
 
         return cls(operation=op_name, inputs=inputs, kwargs=kwargs)
 
-    # ===================================================================
-    # ADDITIONAL UTILITIES FOR TESTING
-    # ===================================================================
 
-    @classmethod
-    def reset_id_counter(cls):
-        """Reset ID counter for testing."""
-        pass  # No longer needed with proper tensor subclass
 
     # ===================================================================
     # WEEK 2 OPTIMIZATION: Pattern-Based Shape Caching

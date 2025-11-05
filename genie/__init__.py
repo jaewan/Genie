@@ -107,6 +107,10 @@ def _initialize():
         from .core.graph_builder import initialize_global_builder
         initialize_global_builder()
 
+        # Step 4: Warm up shape inference cache (performance optimization)
+        from .core.warmup import _warmup_shape_inference
+        _warmup_shape_inference()
+
         logger.info("Genie initialized successfully")
 
     except Exception as e:
