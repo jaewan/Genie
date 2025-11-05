@@ -1,4 +1,4 @@
-# Genie: Semantic-Aware AI Accelerator Disaggregation
+# Djinn: Semantic-Aware AI Accelerator Disaggregation
 
 **Framework-level disaggregation for AI accelerators with semantic awareness.**
 
@@ -50,7 +50,7 @@ pip install -e .
 # example/simple_remote_demo.py
 import asyncio
 import torch
-from genie.core.coordinator import GenieCoordinator, CoordinatorConfig
+from djinn.core.coordinator import DjinnCoordinator, CoordinatorConfig
 
 async def demo():
     # Start client coordinator
@@ -62,7 +62,7 @@ async def demo():
     await coordinator.start()
 
     # Start server (in another terminal)
-    # python3 -m genie.server.server --node-id server --control-port 5555 --data-port 5556
+    # python3 -m djinn.backend.server.server --node-id server --control-port 5555 --data-port 5556
 
     # Execute operations remotely
     x = torch.randn(100, 100)
@@ -326,17 +326,25 @@ The system can utilize RTX 50-series GPUs for:
 ## Project Structure
 
 ```
-genie/
-├── core/           # Main coordination and execution logic
-├── semantic/       # Pattern recognition and semantic analysis
-├── scheduler/      # Semantic-aware placement decisions
-├── transport/      # TCP and DPDK transport implementations
-├── server/         # Remote execution server
-├── runtime/        # Transport and protocol implementations
-└── tests/          # Comprehensive test suite
+djinn/
+├── frontend/       # Stage 1: Intent capture and LazyTensor
+│   ├── core/       # LazyTensor, interception, capture
+│   ├── semantic/   # Pattern recognition and metadata
+│   └── patterns/   # Pattern definitions
+├── scheduler/      # Stage 2: Optimization and placement
+│   ├── core/       # Cost estimation and scheduling
+│   └── strategies/ # Placement algorithms
+├── backend/        # Stage 3: Execution and transport
+│   ├── server/     # GPU server and executors
+│   ├── transport/  # TCP/DPDK transport
+│   ├── runtime/    # Control plane and initialization
+│   └── memory/     # Memory management
+└── core/           # Shared infrastructure and types
 
-docs/               # Documentation and research materials
+tests/              # Comprehensive test suite
 examples/           # Usage examples and demos
+benchmarks/         # Performance evaluation suite
+docs/               # Documentation and research materials
 results/            # Performance measurements and benchmarks
 ```
 
@@ -355,7 +363,7 @@ python3 -m pytest tests/integration/ -v
 python3 -m pytest tests/performance/ -v
 
 # All tests with coverage
-python3 -m pytest tests/ --cov=genie
+python3 -m pytest tests/ --cov=djinn
 ```
 
 ### Development Setup

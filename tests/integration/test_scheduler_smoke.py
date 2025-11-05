@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 import pytest
 import logging
-import genie
+import djinn
 
 logger = logging.getLogger(__name__)
 
@@ -126,9 +126,9 @@ class TestSchedulerIntegration:
 
     def test_scheduler_consults_coordinator(self):
         """Test that coordinator actually consults scheduler."""
-        import genie
-        from genie.core.coordinator import GenieCoordinator, CoordinatorConfig
-        from genie.semantic.scheduling import Scheduler
+        import djinn
+        from djinn.core.coordinator import GenieCoordinator, CoordinatorConfig
+        from djinn.scheduler.core.scheduling import Scheduler
         import asyncio
 
         async def test_integration():
@@ -185,7 +185,7 @@ class TestSchedulerIntegration:
 
     def test_scheduler_semantic_awareness(self):
         """Test scheduler makes semantic-aware decisions."""
-        from genie.semantic.scheduling import Scheduler
+        from djinn.scheduler.core.scheduling import Scheduler
 
         scheduler = Scheduler()
 

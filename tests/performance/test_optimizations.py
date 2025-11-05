@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 @pytest_asyncio.fixture
 async def optimization_server():
     """Start server for optimization testing."""
-    from genie.server.server import GenieServer, ServerConfig
+    from djinn.server.server import GenieServer, ServerConfig
 
     config = ServerConfig(
         node_id='opt-server',
@@ -53,7 +53,7 @@ async def optimization_server():
 @pytest_asyncio.fixture
 async def optimization_coordinator():
     """Create coordinator with optimizations enabled."""
-    from genie.core.coordinator import GenieCoordinator, CoordinatorConfig
+    from djinn.core.coordinator import GenieCoordinator, CoordinatorConfig
 
     config = CoordinatorConfig(
         node_id='opt-client',

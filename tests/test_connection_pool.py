@@ -17,7 +17,7 @@ from unittest.mock import Mock, patch, AsyncMock, MagicMock
 import sys
 sys.path.insert(0, '/home/jae/Genie')
 
-from genie.transport.connection_pool import ConnectionPool
+from djinn.transport.connection_pool import ConnectionPool
 
 logger = logging.getLogger(__name__)
 

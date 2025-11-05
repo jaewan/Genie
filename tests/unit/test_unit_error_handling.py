@@ -10,7 +10,7 @@ Validates:
 
 import torch
 import pytest
-import genie
+import djinn
 
 
 class TestErrorHandling:

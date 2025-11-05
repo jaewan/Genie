@@ -12,8 +12,8 @@ Validates:
 import torch
 import pytest
 import logging
-import genie
-from genie.core.lazy_tensor import LazyTensor
+import djinn
+from djinn.frontend.core.lazy_tensor import LazyTensor
 
 logger = logging.getLogger(__name__)
 

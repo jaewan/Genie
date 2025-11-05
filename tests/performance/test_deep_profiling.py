@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 @pytest_asyncio.fixture
 async def profiling_server():
     """Start server for deep profiling tests."""
-    from genie.server.server import GenieServer, ServerConfig
+    from djinn.server.server import GenieServer, ServerConfig
 
     config = ServerConfig(
         node_id='profiling-server',
@@ -59,7 +59,7 @@ async def profiling_server():
 @pytest_asyncio.fixture
 async def profiling_coordinator():
     """Create coordinator with profiling enabled."""
-    from genie.core.coordinator import GenieCoordinator, CoordinatorConfig
+    from djinn.core.coordinator import GenieCoordinator, CoordinatorConfig
 
     config = CoordinatorConfig(
         node_id='profiling-client',

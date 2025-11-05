@@ -56,7 +56,7 @@ class ComplexModel(nn.Module):
 @pytest.fixture
 def fresh_cache():
     """Create fresh cache for each test."""
-    from genie.core.graph_cache import GraphCache
+    from djinn.core.graph_cache import GraphCache
     cache = GraphCache(max_entries=5, max_memory_mb=256)
     yield cache
     cache.clear()
@@ -169,7 +169,7 @@ class TestCacheEviction:
     
     def test_memory_based_eviction(self):
         """Test memory-based eviction when limit exceeded."""
-        from genie.core.graph_cache import GraphCache
+        from djinn.core.graph_cache import GraphCache
         
         # Small memory limit to trigger eviction
         cache = GraphCache(max_entries=100, max_memory_mb=1)
@@ -346,7 +346,7 @@ class TestGlobalCache:
     
     def test_global_cache_singleton(self):
         """Test that global cache is a singleton."""
-        from genie.core.graph_cache import get_graph_cache
+        from djinn.core.graph_cache import get_graph_cache
         
         cache1 = get_graph_cache()
         cache2 = get_graph_cache()
@@ -355,7 +355,7 @@ class TestGlobalCache:
     
     def test_global_cache_public_api(self):
         """Test public API for cache management."""
-        import genie
+        import djinn
         
         model = SimpleModel()
         input_tensor = torch.randn(4, 10)

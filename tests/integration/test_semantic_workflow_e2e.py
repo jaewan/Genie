@@ -11,7 +11,7 @@ Tests complete pipeline:
 
 import torch
 import torch.nn as nn
-import genie
+import djinn
 
 
 def test_complete_semantic_workflow():
@@ -69,7 +69,7 @@ def test_complete_semantic_workflow():
     # Step 4: Pattern detection
     print("4. Running pattern detection...")
 
-    from genie.semantic.annotator import annotate_graph
+    from djinn.frontend.semantic.annotator import annotate_graph
     annotated = annotate_graph(graph)
 
     print(f"   ✓ Patterns detected: {list(annotated.patterns.keys())}")
@@ -144,7 +144,7 @@ def test_semantic_workflow_with_colocation():
     print(f"Graph: {len(list(graph.nodes()))} nodes")
 
     # Annotate
-    from genie.semantic.annotator import annotate_graph
+    from djinn.frontend.semantic.annotator import annotate_graph
     annotated = annotate_graph(graph)
     print(f"Patterns: {list(annotated.patterns.keys())}")
 

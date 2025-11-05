@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 @pytest_asyncio.fixture
 async def profiled_coordinator():
     """Create coordinator with profiling enabled for detailed measurements."""
-    from genie.core.coordinator import GenieCoordinator, CoordinatorConfig
+    from djinn.core.coordinator import GenieCoordinator, CoordinatorConfig
 
     config = CoordinatorConfig(
         node_id='perf-test-client',
@@ -53,7 +53,7 @@ async def profiled_coordinator():
 @pytest_asyncio.fixture
 async def performance_server():
     """Start performance test server."""
-    from genie.server.server import GenieServer, ServerConfig
+    from djinn.server.server import GenieServer, ServerConfig
 
     config = ServerConfig(
         node_id='perf-test-server',

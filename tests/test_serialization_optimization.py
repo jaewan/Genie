@@ -10,7 +10,7 @@ import torch
 import numpy as np
 import io
 import time
-from genie.core.serialization import (
+from djinn.core.serialization import (
     serialize_tensor,
     deserialize_tensor,
     measure_serialization_overhead,

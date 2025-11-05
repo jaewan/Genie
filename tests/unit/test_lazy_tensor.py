@@ -11,7 +11,7 @@ Validates:
 import torch
 import pytest
 import numpy as np
-import genie
+import djinn
 
 
 class TestLazyTensorCorrectness:

@@ -13,7 +13,7 @@ Validates network resilience for:
 import torch
 import pytest
 import logging
-import genie
+import djinn
 import time
 from unittest.mock import patch, MagicMock
 

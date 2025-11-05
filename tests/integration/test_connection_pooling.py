@@ -25,7 +25,7 @@ class TestConnectionPoolBasic:
     @pytest.mark.asyncio
     async def test_pool_reuses_connections(self):
         """Verify connections are actually reused with a working server."""
-        from genie.transport.connection_pool import ConnectionPool
+        from djinn.transport.connection_pool import ConnectionPool
 
         # Create a simple mock server for testing
         async def mock_server():
@@ -82,7 +82,7 @@ class TestConnectionPoolBasic:
     @pytest.mark.asyncio
     async def test_pool_handles_concurrent_load(self):
         """Test pool under high concurrency."""
-        from genie.core.coordinator import GenieCoordinator, CoordinatorConfig
+        from djinn.core.coordinator import GenieCoordinator, CoordinatorConfig
 
         config = CoordinatorConfig(
             node_id='test-client',
@@ -126,7 +126,7 @@ class TestConnectionPoolBasic:
     @pytest.mark.asyncio
     async def test_pool_recovers_from_errors(self):
         """Test pool handles connection failures gracefully."""
-        from genie.core.coordinator import GenieCoordinator, CoordinatorConfig
+        from djinn.core.coordinator import GenieCoordinator, CoordinatorConfig
 
         config = CoordinatorConfig(
             node_id='test-client',
@@ -170,7 +170,7 @@ class TestConnectionPoolPerformance:
         This is PHASE 1 of performance measurement - just pooling impact.
         Full profiling comes in Week 2.
         """
-        from genie.core.coordinator import GenieCoordinator, CoordinatorConfig
+        from djinn.core.coordinator import GenieCoordinator, CoordinatorConfig
 
         config = CoordinatorConfig(
             node_id='test-client',
@@ -231,7 +231,7 @@ class TestConnectionPoolStress:
     @pytest.mark.asyncio
     async def test_pool_under_heavy_load(self):
         """Stress test connection pool with many concurrent operations."""
-        from genie.core.coordinator import GenieCoordinator, CoordinatorConfig
+        from djinn.core.coordinator import GenieCoordinator, CoordinatorConfig
 
         config = CoordinatorConfig(
             node_id='test-client',
@@ -284,7 +284,7 @@ class TestConnectionPoolStress:
 
         This demonstrates the >20% improvement claimed in the plan.
         """
-        from genie.core.coordinator import GenieCoordinator, CoordinatorConfig
+        from djinn.core.coordinator import GenieCoordinator, CoordinatorConfig
 
         # Create a mock server for testing
         async def mock_server():

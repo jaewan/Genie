@@ -27,7 +27,7 @@ class TestTimeoutHandling:
     @pytest.mark.asyncio
     async def test_timeout_actually_works(self):
         """Verify timeout is enforced."""
-        from genie.core.coordinator import GenieCoordinator, CoordinatorConfig
+        from djinn.core.coordinator import GenieCoordinator, CoordinatorConfig
 
         config = CoordinatorConfig(
             node_id='test-client',
@@ -56,7 +56,7 @@ class TestTimeoutHandling:
     @pytest.mark.asyncio
     async def test_enhanced_timeout_messages(self):
         """Test enhanced timeout error messages."""
-        from genie.core.coordinator import GenieCoordinator, CoordinatorConfig
+        from djinn.core.coordinator import GenieCoordinator, CoordinatorConfig
 
         config = CoordinatorConfig(
             node_id='test-client',
@@ -92,7 +92,7 @@ class TestRetryLogic:
     @pytest.mark.asyncio
     async def test_retry_on_connection_reset(self):
         """Test automatic retry on transient errors."""
-        from genie.core.coordinator import GenieCoordinator, CoordinatorConfig
+        from djinn.core.coordinator import GenieCoordinator, CoordinatorConfig
 
         config = CoordinatorConfig(
             node_id='test-client',
@@ -132,7 +132,7 @@ class TestRetryLogic:
     @pytest.mark.asyncio
     async def test_connection_pool_error_recovery(self):
         """Test connection pool recovers from errors."""
-        from genie.transport.connection_pool import ConnectionPool
+        from djinn.transport.connection_pool import ConnectionPool
 
         pool = ConnectionPool(max_per_target=3)
 
@@ -157,7 +157,7 @@ class TestServerErrorHandling:
     async def test_unsupported_operation_error(self):
         """Test error propagation for unsupported operations."""
         # This test would need a real server - for now just verify error structure
-        from genie.core.coordinator import GenieCoordinator, CoordinatorConfig
+        from djinn.core.coordinator import GenieCoordinator, CoordinatorConfig
 
         config = CoordinatorConfig(
             node_id='test-client',
@@ -184,7 +184,7 @@ class TestServerErrorHandling:
     @pytest.mark.asyncio
     async def test_network_partition_handling(self):
         """Test handling of network partitions."""
-        from genie.core.coordinator import GenieCoordinator, CoordinatorConfig
+        from djinn.core.coordinator import GenieCoordinator, CoordinatorConfig
 
         config = CoordinatorConfig(
             node_id='test-client',
@@ -219,7 +219,7 @@ class TestRobustnessUnderLoad:
     @pytest.mark.asyncio
     async def test_multiple_concurrent_failures(self):
         """Test handling multiple concurrent failures."""
-        from genie.core.coordinator import GenieCoordinator, CoordinatorConfig
+        from djinn.core.coordinator import GenieCoordinator, CoordinatorConfig
 
         config = CoordinatorConfig(
             node_id='test-client',
@@ -259,7 +259,7 @@ class TestRobustnessUnderLoad:
     @pytest.mark.asyncio
     async def test_memory_cleanup_on_errors(self):
         """Test memory cleanup when operations fail."""
-        from genie.core.coordinator import GenieCoordinator, CoordinatorConfig
+        from djinn.core.coordinator import GenieCoordinator, CoordinatorConfig
 
         config = CoordinatorConfig(
             node_id='test-client',
@@ -306,7 +306,7 @@ class TestEdgeCases:
 
         # This is a complex test that requires simulating server crash
         # For now, we'll test the timeout behavior when server stops responding
-        from genie.core.coordinator import GenieCoordinator, CoordinatorConfig
+        from djinn.core.coordinator import GenieCoordinator, CoordinatorConfig
 
         config = CoordinatorConfig(
             node_id='test-client',
@@ -344,7 +344,7 @@ class TestEdgeCases:
 
         # This test requires a server that can actually run GPU operations
         # For now, we'll test the error propagation mechanism
-        from genie.core.coordinator import GenieCoordinator, CoordinatorConfig
+        from djinn.core.coordinator import GenieCoordinator, CoordinatorConfig
 
         config = CoordinatorConfig(
             node_id='test-client',
@@ -390,7 +390,7 @@ class TestEdgeCases:
 
         # This test simulates receiving malformed data
         # We can test this by sending invalid protocol data
-        from genie.transport.connection_pool import ConnectionPool
+        from djinn.transport.connection_pool import ConnectionPool
         import socket
 
         # Create a mock server that sends malformed data
@@ -452,7 +452,7 @@ class TestEdgeCases:
         logger.info("TEST: Connection hanging recovery")
         logger.info("="*70)
 
-        from genie.core.coordinator import GenieCoordinator, CoordinatorConfig
+        from djinn.core.coordinator import GenieCoordinator, CoordinatorConfig
 
         config = CoordinatorConfig(
             node_id='test-client',
@@ -518,7 +518,7 @@ class TestEdgeCases:
         logger.info("TEST: Partial message recovery")
         logger.info("="*70)
 
-        from genie.transport.connection_pool import ConnectionPool
+        from djinn.transport.connection_pool import ConnectionPool
         import socket
 
         async def partial_server():

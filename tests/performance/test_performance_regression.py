@@ -27,10 +27,10 @@ from typing import Dict, List, Optional
 
 import sys
 sys.path.insert(0, '.')
-import genie
-from genie.core.capture import capture, get_graph
-from genie.semantic.annotator import SemanticAnnotator
-from genie.semantic.pattern_registry import PatternRegistry, MatchingMode
+import djinn
+from djinn.core.capture import capture, get_graph
+from djinn.frontend.semantic.annotator import SemanticAnnotator
+from djinn.frontend.semantic.pattern_registry import PatternRegistry, MatchingMode
 
 logger = logging.getLogger(__name__)
 
@@ -176,7 +176,7 @@ class TestPerformanceRegression:
         """Set up clean state for each test."""
         # Clear any cached data if possible
         try:
-            import genie.core.graph_builder
+            import djinn.core.graph_builder
             if hasattr(genie.core.graph_builder, 'get_global_builder'):
                 builder = genie.core.graph_builder.get_global_builder()
                 if hasattr(builder, 'clear'):

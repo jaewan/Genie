@@ -119,8 +119,8 @@ def reset_random_seeds():
 def reset_genie_state():
     """Reset genie state before each test to prevent state accumulation."""
     # Clear any cached state
-    import genie
-    from genie.core import lazy_tensor
+    import djinn
+    from djinn.frontend.core import lazy_tensor
     
     # Reset shape inference cache
     if hasattr(lazy_tensor, '_shape_inference_cache'):

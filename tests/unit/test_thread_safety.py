@@ -15,7 +15,7 @@ import torch
 import pytest
 import time
 import logging
-import genie
+import djinn
 
 logger = logging.getLogger(__name__)
 

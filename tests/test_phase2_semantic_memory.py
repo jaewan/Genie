@@ -6,7 +6,7 @@ Tests lifetime-based eviction, phase-aware budgets, and recomputation decisions.
 
 import pytest
 
-from genie.server.semantic_memory_manager import (
+from djinn.server.semantic_memory_manager import (
     ExecutionPhase,
     DataResidency,
     EvictionPriority,

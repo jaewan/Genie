@@ -2,7 +2,7 @@
 
 import torch
 import torch.nn as nn
-import genie
+import djinn
 
 
 def test_metadata_captured_in_linear():

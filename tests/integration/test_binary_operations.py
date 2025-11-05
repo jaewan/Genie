@@ -11,8 +11,8 @@ Verifies:
 import asyncio
 import pytest
 import torch
-from genie.core.coordinator import GenieCoordinator, CoordinatorConfig
-from genie.server.server import GenieServer, ServerConfig
+from djinn.core.coordinator import GenieCoordinator, CoordinatorConfig
+from djinn.server.server import GenieServer, ServerConfig
 
 
 @pytest.mark.asyncio

@@ -30,7 +30,7 @@ class TestThreadSafety:
     
     def test_shape_cache_thread_safe(self):
         """Test that shape cache is thread-safe under concurrent access."""
-        from genie.core.lazy_tensor import _global_shape_cache, _global_cache_lock
+        from djinn.frontend.core.lazy_tensor import _global_shape_cache, _global_cache_lock
         
         # Shared cache
         cache = _global_shape_cache
@@ -71,7 +71,7 @@ class TestThreadSafety:
     
     def test_concurrent_lazy_tensor_creation(self):
         """Test creating LazyTensors concurrently is safe."""
-        from genie.core.lazy_tensor import LazyTensor
+        from djinn.frontend.core.lazy_tensor import LazyTensor
         
         tensors = []
         errors = []
@@ -104,7 +104,7 @@ class TestMemoryManagement:
     
     def test_graph_compactor_initialization(self):
         """Test GraphCompactor initializes correctly."""
-        from genie.memory import GraphCompactor
+        from djinn.memory import GraphCompactor
         
         # Mock graph builder
         class MockGraphBuilder:
@@ -121,7 +121,7 @@ class TestMemoryManagement:
     
     def test_memory_monitor_pressure_levels(self):
         """Test memory monitor correctly identifies pressure levels."""
-        from genie.memory import MemoryMonitor, MemoryPressure
+        from djinn.memory import MemoryMonitor, MemoryPressure
         
         monitor = MemoryMonitor(limit_mb=100)  # 100MB limit
         
@@ -147,7 +147,7 @@ class TestMemoryManagement:
     
     def test_compaction_removes_materialized_nodes(self):
         """Test that compaction removes materialized nodes."""
-        from genie.memory import GraphCompactor
+        from djinn.memory import GraphCompactor
         
         class MockLazyTensor:
             def __init__(self, node_id: str, materialized: bool = False):
@@ -191,7 +191,7 @@ class TestResultType:
     
     def test_ok_result(self):
         """Test Ok result construction and usage."""
-        from genie.core.exceptions import Ok
+        from djinn.core.exceptions import Ok
         
         result = Ok(42)
         assert result.is_ok()
@@ -201,7 +201,7 @@ class TestResultType:
     
     def test_err_result(self):
         """Test Err result construction and usage."""
-        from genie.core.exceptions import Err
+        from djinn.core.exceptions import Err
         
         error = ValueError("Test error")
         result = Err(error, context={"operation": "test"})
@@ -215,7 +215,7 @@ class TestResultType:
     
     def test_result_map(self):
         """Test Result.map() for transformations."""
-        from genie.core.exceptions import Ok, Err
+        from djinn.core.exceptions import Ok, Err
         
         # Ok mapping
         result = Ok(5)
@@ -231,7 +231,7 @@ class TestResultType:
     
     def test_result_and_then(self):
         """Test Result.and_then() for chaining."""
-        from genie.core.exceptions import Ok, Err
+        from djinn.core.exceptions import Ok, Err
         
         def divide(x):
             if x == 0:
@@ -249,7 +249,7 @@ class TestResultType:
     
     def test_collect_results(self):
         """Test collecting multiple results."""
-        from genie.core.exceptions import Ok, Err, collect_results
+        from djinn.core.exceptions import Ok, Err, collect_results
         
         # All Ok
         results = [Ok(1), Ok(2), Ok(3)]
@@ -272,7 +272,7 @@ class TestTypeSafety:
     
     def test_node_protocol_compliance(self):
         """Test that ConcreteNode complies with NodeProtocol."""
-        from genie.core.types import ConcreteNode, NodeProtocol
+        from djinn.core.types import ConcreteNode, NodeProtocol
         
         node = ConcreteNode(
             id="test_node",
@@ -290,7 +290,7 @@ class TestTypeSafety:
     
     def test_concrete_node_metadata_helpers(self):
         """Test ConcreteNode helper methods for metadata."""
-        from genie.core.types import ConcreteNode, ExecutionPhase, DataResidency, Modality
+        from djinn.core.types import ConcreteNode, ExecutionPhase, DataResidency, Modality
         
         node = ConcreteNode(id="test", operation="aten::add")
         
@@ -308,7 +308,7 @@ class TestTypeSafety:
     
     def test_dict_node_adapter(self):
         """Test adapter for legacy dict-based nodes."""
-        from genie.core.types import DictNodeAdapter
+        from djinn.core.types import DictNodeAdapter
         
         node_dict = {
             'id': 'legacy_node',
@@ -335,8 +335,8 @@ class TestGenieGraph:
     
     def test_concrete_graph_creation(self):
         """Test creating a concrete graph."""
-        from genie.core.graph_interface import ConcreteGraphImpl
-        from genie.core.types import ConcreteNode
+        from djinn.core.graph_interface import ConcreteGraphImpl
+        from djinn.core.types import ConcreteNode
         
         nodes = [
             ConcreteNode(id="n1", operation="aten::randn"),
@@ -352,8 +352,8 @@ class TestGenieGraph:
     
     def test_graph_topological_order(self):
         """Test topological ordering of graph nodes."""
-        from genie.core.graph_interface import ConcreteGraphImpl
-        from genie.core.types import ConcreteNode
+        from djinn.core.graph_interface import ConcreteGraphImpl
+        from djinn.core.types import ConcreteNode
         
         # Create DAG: n1 -> n2 -> n3
         nodes = [
@@ -373,8 +373,8 @@ class TestGenieGraph:
     
     def test_graph_roots_and_leaves(self):
         """Test finding root and leaf nodes."""
-        from genie.core.graph_interface import ConcreteGraphImpl
-        from genie.core.types import ConcreteNode
+        from djinn.core.graph_interface import ConcreteGraphImpl
+        from djinn.core.types import ConcreteNode
         
         nodes = [
             ConcreteNode(id="n1", operation="aten::randn"),  # Root
@@ -404,7 +404,7 @@ class TestPerformance:
     
     def test_shape_cache_performance(self):
         """Test shape cache lookup performance."""
-        from genie.core.lazy_tensor import get_shape_cache_stats, _global_shape_cache, _global_cache_lock
+        from djinn.frontend.core.lazy_tensor import get_shape_cache_stats, _global_shape_cache, _global_cache_lock
         
         cache = _global_shape_cache
         
@@ -432,8 +432,8 @@ class TestPerformance:
     
     def test_graph_construction_overhead(self):
         """Test overhead of creating concrete graph."""
-        from genie.core.graph_interface import ConcreteGraphImpl
-        from genie.core.types import ConcreteNode
+        from djinn.core.graph_interface import ConcreteGraphImpl
+        from djinn.core.types import ConcreteNode
         
         # Create large graph
         num_nodes = 1000
@@ -462,9 +462,9 @@ class TestIntegration:
     
     def test_error_handling_in_graph_construction(self):
         """Test error handling during graph operations."""
-        from genie.core.graph_interface import ConcreteGraphImpl
-        from genie.core.types import ConcreteNode
-        from genie.core.exceptions import Ok, Err
+        from djinn.core.graph_interface import ConcreteGraphImpl
+        from djinn.core.types import ConcreteNode
+        from djinn.core.exceptions import Ok, Err
         
         try:
             nodes = [ConcreteNode(id="n1", operation="aten::matmul")]
@@ -480,8 +480,8 @@ class TestIntegration:
     
     def test_concurrent_graph_operations(self):
         """Test concurrent graph operations with proper locking."""
-        from genie.core.graph_interface import ConcreteGraphImpl
-        from genie.core.types import ConcreteNode
+        from djinn.core.graph_interface import ConcreteGraphImpl
+        from djinn.core.types import ConcreteNode
         import threading
         
         results = []

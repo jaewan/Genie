@@ -10,8 +10,8 @@ Tests verify:
 
 import pytest
 import torch
-from genie.server.performance_monitor import PerformanceMonitor
-from genie.server.optimization_executor import OptimizationExecutor
+from djinn.server.performance_monitor import PerformanceMonitor
+from djinn.server.optimization_executor import OptimizationExecutor
 
 
 class TestPerformanceMonitor:

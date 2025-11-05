@@ -13,7 +13,7 @@ Validates:
 import torch
 import pytest
 import logging
-import genie
+import djinn
 from unittest.mock import patch, MagicMock
 
 logger = logging.getLogger(__name__)

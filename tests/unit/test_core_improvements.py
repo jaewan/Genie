@@ -13,11 +13,11 @@ import pytest
 import torch
 from concurrent.futures import ThreadPoolExecutor
 
-import genie
-from genie.core.lazy_tensor import LazyTensor
-from genie.core.executor import SimpleExecutor, _executor
-from genie.core.exceptions import MaterializationError, NotApplicableError
-from genie.core.capture import capture
+import djinn
+from djinn.frontend.core.lazy_tensor import LazyTensor
+from djinn.server.executor import SimpleExecutor, _executor
+from djinn.core.exceptions import MaterializationError, NotApplicableError
+from djinn.frontend.core.capture import capture
 
 
 # ============================================================================

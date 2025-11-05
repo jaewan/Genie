@@ -12,7 +12,7 @@ Validates:
 import torch
 import torch.nn as nn
 import pytest
-import genie
+import djinn
 
 
 class TestGraphBuilder:

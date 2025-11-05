@@ -6,9 +6,9 @@ This is a CRITICAL test - without it, semantic scheduling is silently broken.
 
 import pytest
 import torch
-import genie
-from genie.semantic.annotator import SemanticAnnotator
-from genie.core.graph import ComputationGraph
+import djinn
+from djinn.frontend.semantic.annotator import SemanticAnnotator
+from djinn.core.graph import ComputationGraph
 
 
 def test_pattern_nodes_populated():
@@ -17,8 +17,8 @@ def test_pattern_nodes_populated():
 
     This tests the fix for the critical bug where nodes=[] was hardcoded.
     """
-    # Create a computation graph using genie capture
-    with genie.capture():
+    # Create a computation graph using djinn capture
+    with djinn.capture():
         # Create attention-like pattern: Q @ K.T → softmax → @ V
         q = torch.randn(2, 8, 64)  # [batch, heads, dim]
         k = torch.randn(2, 8, 64)
@@ -30,7 +30,7 @@ def test_pattern_nodes_populated():
         output = attn @ v  # @ V
 
     # Get the captured graph
-    graph = genie.get_graph()
+    graph = djinn.get_graph()
 
     # Annotate (this should detect attention pattern)
     annotator = SemanticAnnotator(enable_cache=False)

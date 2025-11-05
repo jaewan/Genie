@@ -11,9 +11,9 @@ Tests for:
 import asyncio
 import pytest
 
-from genie.server.memory_metrics import MetricsCollector, get_metrics
-from genie.server.memory_pressure_handler import MemoryPressureHandler, MemoryPressureEvent
-from genie.server.adaptive_budget_tuner import AdaptiveBudgetTuner
+from djinn.server.memory_metrics import MetricsCollector, get_metrics
+from djinn.server.memory_pressure_handler import MemoryPressureHandler, MemoryPressureEvent
+from djinn.server.adaptive_budget_tuner import AdaptiveBudgetTuner
 
 
 # =============================================================================

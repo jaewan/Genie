@@ -1,8 +1,8 @@
-# Genie Frontend Implementation
+# Djinn Frontend Implementation
 
-**Status**: ✅ Implementation audited - Tested
+**Status**: ✅ Complete Implementation
 **Last Updated**: November 5, 2025
-**Based on**: Implementation in `genie/core` and `genie/semantic`
+**Based on**: Complete 3-Stage Implementation
 
 ---
 
@@ -29,7 +29,7 @@
 
 ### §1.1 Frontend Purpose
 
-The Genie frontend transparently captures application intent by intercepting PyTorch operations and translating them into a **Computation Graph** with attached **Semantic Metadata**.
+The Djinn frontend transparently captures application intent by intercepting PyTorch operations and translating them into a **Computation Graph** with attached **Semantic Metadata**.
 
 **Three-stage pipeline**:
 
@@ -64,18 +64,18 @@ The Genie frontend transparently captures application intent by intercepting PyT
 
 | Component | File | Purpose |
 |-----------|------|---------|
-| **LazyTensor** | `genie/core/lazy_tensor.py` | Symbolic tensor, torch.Tensor subclass, deferred execution |
-| **Initialization** | `genie/__init__.py` | Async-first API with background initialization |
-| **Graph Builder** | `genie/core/graph_builder.py` | LazyTensor DAG construction |
-| **Factory Interceptor** | `genie/core/factory_interceptor.py` | Intercept ~20 factory functions (torch.randn, torch.zeros, etc.) |
-| **Shape Inference** | `genie/core/shape_inference.py` | Production-grade shape inference using meta tensors |
-| **Automatic Dispatch** | `genie/core/automatic_dispatch.py` | Meta tensor-based automatic operation dispatch |
-| **Metadata Capture** | `genie/core/metadata_capture.py` | Basic semantic metadata capture during interception |
-| **Interception Control** | `genie/core/interception_control.py` | Thread-local state management for interception contexts |
+| **LazyTensor** | `djinn/frontend/core/lazy_tensor.py` | Symbolic tensor, torch.Tensor subclass, deferred execution |
+| **Initialization** | `djinn/__init__.py` | Async-first API with background initialization |
+| **Graph Builder** | `djinn/frontend/core/graph_builder.py` | LazyTensor DAG construction |
+| **Factory Interceptor** | `djinn/frontend/core/factory_interceptor.py` | Intercept ~20 factory functions (torch.randn, torch.zeros, etc.) |
+| **Shape Inference** | `djinn/frontend/core/shape_inference.py` | Production-grade shape inference using meta tensors |
+| **Automatic Dispatch** | `djinn/frontend/core/automatic_dispatch.py` | Meta tensor-based automatic operation dispatch |
+| **Metadata Capture** | `djinn/frontend/core/metadata_capture.py` | Basic semantic metadata capture during interception |
+| **Interception Control** | `djinn/frontend/core/interception_control.py` | Thread-local state management for interception contexts |
 
 ### §1.3 Why Not PyTorch Device Backend Approach?
 
-The codebase previously contained a `device.py` module (now archived at `genie/archive/device.py`) that attempted to register "remote_accelerator" as a custom PyTorch device type using the PrivateUse1 backend system. **This approach was considered but rejected** for practical reasons:
+The codebase previously contained a `device.py` module (now archived at `djinn/archive/device.py`) that attempted to register "remote_accelerator" as a custom PyTorch device type using the PrivateUse1 backend system. **This approach was considered but rejected** for practical reasons:
 
 **Architectural Reality**:
 - Device registration with PyTorch does **NOT automatically intercept operations**
@@ -102,17 +102,17 @@ The current hybrid interception strategy (factory wrapping + `__torch_dispatch__
 
 ### §2.1 Public API Exports & Initialization Design
 
-**File**: `genie/__init__.py` (500+ lines)
+**File**: `djinn/__init__.py` (500+ lines)
 
-The main Genie module implements **async-first initialization** with three phases of functionality:
+The main Djinn module implements **async-first initialization** with three phases of functionality:
 
 ```python
-# INITIALIZATION: Async-first design (non-blocking on first Genie API call)
+# INITIALIZATION: Async-first design (non-blocking on first Djinn API call)
 # Triggers: tensor creation, capture context, operations
 # Guarantee: Single initialization across all threads with double-check locking
 from .runtime.initialization import (
     init, init_async, ensure_initialized, get_runtime_state,
-    _ensure_async_init  # Auto-triggered on first Genie API use
+    _ensure_async_init  # Auto-triggered on first Djinn API use
 )
 
 # Phase 1: Core Graph Capture
@@ -142,22 +142,22 @@ from .scheduler import schedule
 ```
 
 **Key Design Philosophy** (Senior Engineer level):
-- **Path 1 (Recommended)**: Explicit `genie.init()` for benchmarking (user controls timing)
-- **Path 2 (Auto)**: Implicit initialization on first Genie API call via `_ensure_async_init()`
+- **Path 1 (Recommended)**: Explicit `djinn.init()` for benchmarking (user controls timing)
+- **Path 2 (Auto)**: Implicit initialization on first Djinn API call via `_ensure_async_init()`
 - **Non-blocking**: Uses asyncio.create_task() for background initialization
 - **Thread-safe**: Double-check locking + thread-local event loop detection
 - **Once-only**: Guarantee of single initialization across all threads/async tasks
 
 ### §2.2 Initialization on Import
 
-**File**: `genie/__init__.py` (lines 90-118) + `genie/core/__init__.py` (7 lines)
+**File**: `djinn/__init__.py` (lines 90-118) + `djinn/frontend/core/__init__.py` (7 lines)
 
-Genie initializes interception layers on import:
+Djinn initializes interception layers on import:
 
 ```python
-# genie/__init__.py - called at module import
+# djinn/__init__.py - called at module import
 def _initialize():
-    """Initialize Genie interception layer."""
+    """Initialize Djinn interception layer."""
     # Step 1: Try to register C++ backend (optional)
     try:
         from . import _C
@@ -177,7 +177,7 @@ def _initialize():
 _initialize()  # Runs at import time
 ```
 
-**Then genie/core/__init__.py** adds:
+**Then djinn/frontend/core/__init__.py** adds:
 
 ```python
 from .graph_builder import initialize_global_builder
@@ -194,7 +194,7 @@ The initialization happens in **two stages**:
 
 ### §3.1 ExecutionPhase Enum
 
-**File**: `genie/core/types.py` (lines 21-30)
+**File**: `djinn/frontend/core/types.py` (lines 21-30)
 
 ```python
 class ExecutionPhase(str, Enum):
@@ -211,7 +211,7 @@ class ExecutionPhase(str, Enum):
 
 ### §3.2 DataResidency Enum
 
-**File**: `genie/core/types.py` (lines 33-38)
+**File**: `djinn/frontend/core/types.py` (lines 33-38)
 
 ```python
 class DataResidency(str, Enum):
@@ -224,7 +224,7 @@ class DataResidency(str, Enum):
 
 ### §3.3 Modality Enum
 
-**File**: `genie/core/types.py` (lines 41-46)
+**File**: `djinn/frontend/core/types.py` (lines 41-46)
 
 ```python
 class Modality(str, Enum):
@@ -237,7 +237,7 @@ class Modality(str, Enum):
 
 ### §3.4 NodeProtocol
 
-**File**: `genie/core/types.py` (lines 54-100+)
+**File**: `djinn/frontend/core/types.py` (lines 54-100+)
 
 Standard interface for all graph nodes (LazyTensor DAG, etc):
 
@@ -274,7 +274,7 @@ class NodeProtocol(Protocol):
 
 ### §4.1 LazyTensor Design
 
-**File**: `genie/core/lazy_tensor.py` (2,669 lines)
+**File**: `djinn/frontend/core/lazy_tensor.py` (2,669 lines)
 
 LazyTensor is a **torch.Tensor subclass** that captures operations without executing them:
 
@@ -387,7 +387,7 @@ This is critical for avoiding the `"Multiple dispatch failed for detach()"` erro
 
 ### §5.1 Unified Interception Architecture
 
-**File**: `genie/core/interception_control.py`
+**File**: `djinn/frontend/core/interception_control.py`
 
 The frontend intercepts operations through **THREE coordinated mechanisms** with a clear decision hierarchy:
 
@@ -418,7 +418,7 @@ def should_intercept(operation, device, context):
 
 1. **Factory Interception** (torch.randn, torch.zeros, etc.)
    - Entry points: create first LazyTensor
-   - File: `genie/core/factory_interceptor.py` (246+ lines)
+   - File: `djinn/frontend/core/factory_interceptor.py` (246+ lines)
    - Overhead: ~1-2μs per call (negligible)
    - Coverage: ~20 factory functions
 
@@ -433,12 +433,12 @@ def should_intercept(operation, device, context):
    - Handles complex operations not covered by __torch_dispatch__
    - Includes torch.cat, torch.stack, torch.softmax, scaled_dot_product_attention
    - Comprehensive operation handling: reshape, embedding, unbind, split, chunk
-   - File: `genie/core/lazy_tensor.py` (500+ lines of __torch_function__ logic)
+   - File: `djinn/frontend/core/lazy_tensor.py` (500+ lines of __torch_function__ logic)
    - Coverage: Essential for model compatibility (HuggingFace, CLIP, vision models)
 
 ### §5.2 Factory Interception
 
-**File**: `genie/core/factory_interceptor.py` (246+ lines)
+**File**: `djinn/frontend/core/factory_interceptor.py` (246+ lines)
 
 Entry points for creating initial LazyTensors:
 
@@ -469,7 +469,7 @@ class FactoryInterceptor:
 
 **Behavior** (now with async init and lazy metadata):
 - Returns LazyTensor if `device='remote_accelerator'` specified ✅
-- Returns LazyTensor if inside `genie.capture()` context ✅
+- Returns LazyTensor if inside `djinn.capture()` context ✅
 - **NEW**: Triggers `_ensure_async_init()` on first remote tensor creation ✅
 - **NEW**: Uses lazy metadata via `MetadataPlaceholder` ✅
 - **NEW**: Integrates with executor for materialization mode ✅
@@ -516,7 +516,7 @@ return LazyTensor(
 
 ### §5.3 __torch_dispatch__ Mechanism
 
-**File**: `genie/core/lazy_tensor.py` (lines 667-750+)
+**File**: `djinn/frontend/core/lazy_tensor.py` (lines 667-750+)
 
 ```python
 class LazyTensor(torch.Tensor):
@@ -567,7 +567,7 @@ class LazyTensor(torch.Tensor):
         )
 ```
 
-**NEW: Interception Control** (`genie/core/interception_control.py`):
+**NEW: Interception Control** (`djinn/frontend/core/interception_control.py`):
 ```python
 def should_intercept() -> bool:
     """Check if we should intercept this operation."""
@@ -589,9 +589,9 @@ def disable_interception(context: InterceptionContext) -> ContextManager:
 
 ## §6. Graph Construction
 
-### §6.1 Hybrid Graph Builder
+### §6.1 Graph Builder
 
-**File**: `genie/core/graph_builder.py` (250+ lines)
+**File**: `djinn/frontend/core/graph_builder.py` (250+ lines)
 
 Strategy: LazyTensor DAG for all models
 
@@ -601,7 +601,7 @@ class GraphBuilder:
     Thread-local LazyTensor DAG graph builder.
 
     Strategy: Capture all tensor operations in LazyTensor DAG for remote execution.
-    FX was removed because it operates at module level while Genie needs operation-level
+    FX was removed because it operates at module level while Djinn needs operation-level
     capture, and FX fails on ~80% of real ML models due to dynamic control flow.
 
     Provides unified Graph interface through LazyDAGAdapter.
@@ -629,7 +629,7 @@ class GraphBuilder:
 
 ### §6.2 Unified Graph Interface
 
-**File**: `genie/core/graph_interface.py`
+**File**: `djinn/frontend/core/graph_interface.py`
 
 ```python
 @runtime_checkable
@@ -661,7 +661,7 @@ Implementation:
 
 ### §6.3 Graph Caching
 
-**File**: `genie/core/graph_cache.py`
+**File**: `djinn/frontend/core/graph_cache.py`
 
 **Purpose**: Eliminate repeated graph capture overhead
 
@@ -701,9 +701,9 @@ class GraphCache:
 
 ### §7.1 Meta Tensor Approach
 
-**File**: `genie/core/shape_inference.py` (350+ lines)
+**File**: `djinn/frontend/core/shape_inference.py` (350+ lines)
 
-Production-grade shape inference using PyTorch meta tensors:
+Shape inference using PyTorch meta tensors:
 
 ```python
 class ShapeInference:
@@ -779,7 +779,7 @@ Critical for efficient scheduling without network round-trips.
 
 ### §7.3 Automatic Dispatch Integration
 
-**File**: `genie/core/automatic_dispatch.py` (350+ lines)
+**File**: `djinn/frontend/core/automatic_dispatch.py` (350+ lines)
 
 The `AutomaticDispatch` class seamlessly integrates shape inference with operation dispatch:
 
@@ -835,7 +835,7 @@ class AutomaticDispatch:
 
 ### §8.1 MetadataPlaceholder for Scheduling: Lazy Metadata Capture
 
-**File**: `genie/core/metadata.py` (115 lines)
+**File**: `djinn/frontend/core/metadata.py` (115 lines)
 
 **Key Innovation**: Defer expensive semantic analysis until scheduling phase when full context is available.
 
@@ -890,7 +890,7 @@ class MetadataPlaceholder:
 
 ### §8.2 Three-Tier Semantic Analysis
 
-**File**: `genie/semantic/analyzer.py` (200+ lines)
+**File**: `djinn/semantic/analyzer.py` (200+ lines)
 
 Semantic analyzer combines three analysis mechanisms with performance tracking:
 
@@ -909,11 +909,11 @@ class SemanticAnalyzer:
             self.pattern_matcher = pattern_matcher
             self.pattern_registry = None
         elif pattern_registry is not None:
-            from genie.semantic.pattern_matcher import NetworkXPatternMatcher
+            from djinn.semantic.pattern_matcher import NetworkXPatternMatcher
             self.pattern_matcher = NetworkXPatternMatcher(pattern_registry)
             self.pattern_registry = pattern_registry
         else:
-            from genie.semantic.pattern_matcher import get_default_pattern_matcher
+            from djinn.semantic.pattern_matcher import get_default_pattern_matcher
             self.pattern_matcher = get_default_pattern_matcher()
             self.pattern_registry = None
         
@@ -955,13 +955,13 @@ Pattern matching framework recognizes domain-specific patterns in computation gr
 
 ```python
 import torch
-import genie
+import djinn
 
 # Step 1: Create model
 model = TransformerModel()
 
 # Step 2: Capture graph with semantic annotation
-with genie.capture(model) as captured:
+with djinn.capture(model) as captured:
     # Input on remote_accelerator device
     x = torch.randn(4, 128, 768, device='remote_accelerator:0')
     
@@ -979,11 +979,11 @@ metadata = captured.semantic_metadata
 patterns = captured.patterns
 
 # Step 4: Scheduler uses metadata for optimization
-scheduler = genie.Scheduler(graph, metadata)
+scheduler = djinn.Scheduler(graph, metadata)
 optimized_schedule = scheduler.schedule()
 
 # Step 5: Execute optimized schedule on cluster
-result = genie.execute(optimized_schedule, inputs=[x])
+result = djinn.execute(optimized_schedule, inputs=[x])
 ```
 
 ---
@@ -1015,7 +1015,7 @@ Prevents unbounded graph growth in long-running workloads:
 ```
 # LazyTensor automatically materializes every N operations
 # This prevents memory explosion in LLM generation loops
-# See genie/core/lazy_tensor.py for checkpointing logic
+# See djinn/frontend/core/lazy_tensor.py for checkpointing logic
 ```
 
 ### §11.3 Thread Safety
@@ -1024,39 +1024,14 @@ Prevents unbounded graph growth in long-running workloads:
 - Graph building uses thread-local storage
 - Metadata capture uses locks for thread safety
 
----
-
-## §12. Implementation Phases
-
-The implementation follows a modular approach:
-
-**Phase 1: Core Graph Capture** ✅ Complete
-- LazyTensor + __torch_dispatch__ + Factory interception
-- LazyTensor DAG graph builder
-- Basic semantic analysis
-
-**Phase 2: Smart Fragmentation & Semantic Analysis** ✅ Complete
-- Block compilation
-- Smart subgraph builder
-- Pattern matching and phase detection
-
-**Phase 3: Async-First Runtime Initialization** ✅ Complete
-- Background initialization
-- Thread pool management
-- Coordinator discovery
-
-**Phase 4: TensorRT Optimization** ✅ Complete
-- Lazy compilation after profiling
-- Adaptive optimization
-- Performance tracking
 
 ---
 
-## §13. Advanced Components
+## §12. Advanced Components
 
 **Note**: The following components exist in the codebase and are functional, but are advanced features beyond basic tensor interception. They are primarily used for semantic analysis and scheduling optimization.
 
-### §13.1 Semantic Analysis Stack
+### §12.1 Semantic Analysis Stack
 
 The semantic analysis components provide multi-tier pattern recognition and workload analysis:
 
@@ -1065,13 +1040,13 @@ The semantic analysis components provide multi-tier pattern recognition and work
 - **PatternRegistry**: Registry of workload patterns (attention, KV cache, convolution)
 - **WorkloadClassifier**: Classifies workloads by type and characteristics
 
-### §13.2 Serialization & Communication
+### §12.2 Serialization & Communication
 
 - **Serialization**: Dual-format tensor serialization (NumPy + torch.save) for 44% performance improvement
 - **TCP Transport**: Connection pooling and efficient tensor transfer
 - **Coordinator**: Remote execution coordination and load balancing
 
-### §13.3 Optimization Stack
+### §12.3 Optimization Stack
 
 - **Graph Cache**: LRU caching of computation graphs (450ms → 1-2ms speedup)
 - **Block Compiler**: TorchScript compilation of model blocks
@@ -1082,7 +1057,7 @@ The semantic analysis components provide multi-tier pattern recognition and work
 
 ## §14. Conclusion
 
-The Genie frontend provides **transparent semantic capture** for GPU disaggregation:
+The Djinn frontend provides **transparent semantic capture** for GPU disaggregation:
 
 ✅ **Effective tensor interception** with prioritized dispatch mechanisms  
 ✅ **Local metadata** without remote queries  
@@ -1097,7 +1072,7 @@ The Genie frontend provides **transparent semantic capture** for GPU disaggregat
 
 ## §13. Component Integration Status
 
-**All listed components are integrated and functional** in the current Genie implementation. The "core frontend interception components" are the essential building blocks for tensor interception, while the "advanced components" provide additional semantic analysis and optimization capabilities.
+**All listed components are integrated and functional** in the current Djinn implementation. The "core frontend interception components" are the essential building blocks for tensor interception, while the "advanced components" provide additional semantic analysis and optimization capabilities.
 
 **Integration Status**: ✅ All components are actively used in the codebase and properly integrated.
 

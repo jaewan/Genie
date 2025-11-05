@@ -89,7 +89,7 @@ __version__ = "0.2.0"
 
 # Core interception setup
 def _initialize():
-    """Initialize Genie interception layer."""
+    """Initialize Djinn interception layer."""
     try:
         # Step 1: Try to register C++ backend (optional)
         try:
@@ -100,33 +100,33 @@ def _initialize():
             logger.info("C++ backend not available (Python-only mode)")
 
         # Step 2: Wrap factory functions (REQUIRED)
-        from .core.factory_interceptor import wrap_factories
+        from .frontend.core.factory_interceptor import wrap_factories
         wrap_factories()
 
         # Step 3: Initialize graph builder
-        from .core.graph_builder import initialize_global_builder
+        from .frontend.core.graph_builder import initialize_global_builder
         initialize_global_builder()
 
         # Step 4: Warm up shape inference cache (performance optimization)
         from .core.warmup import _warmup_shape_inference
         _warmup_shape_inference()
 
-        logger.info("Genie initialized successfully")
+        logger.info("Djinn initialized successfully")
 
     except Exception as e:
-        logger.error(f"Genie initialization failed: {e}")
+        logger.error(f"Djinn initialization failed: {e}")
         raise
 
 # Initialize on import
 _initialize()
 
 # Public API - Phase 1 (Core)
-from .core.lazy_tensor import LazyTensor
-from .core.capture import capture, get_graph, is_capturing
-from .core.subgraph_builder import SubgraphBuilder, RemoteSubgraph
+from .frontend.core.lazy_tensor import LazyTensor
+from .frontend.core.capture import capture, get_graph, is_capturing
+from .backend.server.subgraph_builder import SubgraphBuilder, RemoteSubgraph
 
 # Public API - Phase 2 (Smart Fragmentation)
-from .core.smart_subgraph_builder import (
+from .backend.server.smart_subgraph_builder import (
     SmartSubgraphBuilder,
     FragmentationConfig,
     SubgraphFragment,
@@ -138,17 +138,19 @@ from .core.smart_subgraph_builder import (
 # Public API - Phase 2 (Semantic Analysis & Scheduling)
 from .semantic import (
     SemanticAnalyzer,
-    Scheduler,
     WorkloadProfile,
     WorkloadType,
     PatternRegistry,
+)
+from .scheduler import (
+    Scheduler,
     ExecutionSchedule,
     SchedulingStrategy,
 )
 from .semantic.annotator import annotate_graph, AnnotatedGraph
 
 # Public API - Phase 3 (Async-First Runtime Initialization)
-from .runtime.initialization import (
+from .backend.runtime.initialization import (
     init as init_sync,
     init_async,
     ensure_initialized,
@@ -251,9 +253,9 @@ def schedule(graph=None, profile=None):
     if profile is None:
         profile = analyze(graph)
 
-    # ✅ FIXED: Actually use the semantic scheduler
-    from .semantic.scheduling import Scheduler
-    from .semantic.cost_estimator import GraphCostEstimator, NetworkTopology
+    # ✅ FIXED: Actually use the scheduler
+    from .scheduler import Scheduler
+    from .scheduler.core.cost_estimator import GraphCostEstimator, NetworkTopology
 
     scheduler = Scheduler(
         cost_estimator=GraphCostEstimator(),
@@ -271,42 +273,42 @@ def schedule(graph=None, profile=None):
 def execute_model(model, inputs, use_cache=True, use_blocks=True, **kwargs):
     """
     Execute model with graph caching and block compilation.
-    
+
     Phase 1 (Graph Caching): Eliminate repeated graph capture (450ms)
     Phase 2 (Block Compilation): Reduce RPC calls from 1500 to 15 (285ms)
-    
+
     Args:
         model: PyTorch model
         inputs: Input tensor(s)
         use_cache: Whether to use graph cache (default: True)
         use_blocks: Whether to compile to blocks (default: True)
         **kwargs: Additional execution options
-    
+
     Returns:
         Model output (same as direct model call)
-        
+
     Performance:
         Cold start (first run):    ~550ms (capture + compile + execute)
         Warm with cache+blocks:    ~40ms (14x faster!)
-    
+
     Example:
         >>> model = GPT2LMHeadModel.from_pretrained('gpt2')
         >>> inputs = torch.randint(0, 50257, (8, 128))
-        >>> 
+        >>>
         >>> # First execution (cold)
-        >>> output = genie.execute_model(model, inputs)  # 550ms
-        >>> 
+        >>> output = djinn.execute_model(model, inputs)  # 550ms
+        >>>
         >>> # Subsequent executions (warm with caching + blocks)
-        >>> output = genie.execute_model(model, inputs)  # 40ms
-    
+        >>> output = djinn.execute_model(model, inputs)  # 40ms
+
     Notes:
         - Requires input shape to be constant for cache hits
         - After fine-tuning, call invalidate_model_cache(model)
         - Cache automatically evicts LRU entries when full (default 100 models)
     """
-    from .core.graph_cache import get_graph_cache
-    from .core.block_compiler import get_block_compiler
-    
+    from .backend.server.graph_cache import get_graph_cache
+    from .backend.server.block_compiler import get_block_compiler
+
     cache = get_graph_cache()
     
     # Phase 1: Get or capture graph (handles caching internally)
@@ -342,15 +344,15 @@ def execute_model(model, inputs, use_cache=True, use_blocks=True, **kwargs):
         except Exception as e:
             logger.debug(f"Block compilation failed: {e}, falling back to graph execution")
             # Fall through to standard execution
-    
+
     # Fallback: Execute full graph or direct model call
     try:
         # Try to use graph executor if available
-        from .core.executor import SimpleExecutor
+        from .backend.server.executor import SimpleExecutor
         executor = SimpleExecutor()
         return executor.execute_graph(graph, inputs)
     except Exception:
-        # Fallback: Direct model call (works without full Genie setup)
+        # Fallback: Direct model call (works without full Djinn setup)
         if isinstance(inputs, (list, tuple)):
             return model(*inputs)
         else:
@@ -360,26 +362,26 @@ def execute_model(model, inputs, use_cache=True, use_blocks=True, **kwargs):
 def invalidate_model_cache(model):
     """
     Invalidate cached graph for model.
-    
+
     Use after:
     - Fine-tuning (model parameters changed)
     - Model architecture modification
     - Manual cache refresh
-    
+
     Args:
         model: PyTorch model to invalidate
-        
+
     Example:
         >>> model = load_model('gpt2')
-        >>> genie.execute_model(model, inputs)  # Cache miss, captures
-        >>> genie.execute_model(model, inputs)  # Cache hit
-        >>> 
+        >>> djinn.execute_model(model, inputs)  # Cache miss, captures
+        >>> djinn.execute_model(model, inputs)  # Cache hit
+        >>>
         >>> fine_tune(model)  # Modify parameters
-        >>> genie.invalidate_model_cache(model)  # Clear cache
-        >>> genie.execute_model(model, inputs)  # Cache miss, recaptures
+        >>> djinn.invalidate_model_cache(model)  # Clear cache
+        >>> djinn.execute_model(model, inputs)  # Cache miss, recaptures
     """
-    from .core.graph_cache import get_graph_cache
-    
+    from .backend.server.graph_cache import get_graph_cache
+
     cache = get_graph_cache()
     cache.invalidate(model)
     logger.info(f"Invalidated cache for model: {model.__class__.__name__}")
@@ -388,41 +390,41 @@ def invalidate_model_cache(model):
 def get_graph_cache_stats():
     """
     Get current graph cache statistics.
-    
+
     Returns:
         Dictionary with cache statistics:
         - entries: Number of cached graphs
         - max_entries: Maximum cache size
         - hits: Number of cache hits
-        - misses: Number of cache misses  
+        - misses: Number of cache misses
         - hit_rate: Cache hit rate (0-1)
         - evictions: Number of evicted entries
         - invalidations: Number of manual invalidations
         - total_time_saved_ms: Total time saved by caching
-        
+
     Example:
-        >>> stats = genie.get_graph_cache_stats()
+        >>> stats = djinn.get_graph_cache_stats()
         >>> print(f"Hit rate: {stats['hit_rate']:.1%}")
         >>> print(f"Time saved: {stats['total_time_saved_ms']/1000:.1f}s")
     """
-    from .core.graph_cache import get_graph_cache
-    
+    from .backend.server.graph_cache import get_graph_cache
+
     cache = get_graph_cache()
     return cache.get_stats()
 
 
 def print_graph_cache_stats():
     """Print human-readable graph cache statistics."""
-    from .core.graph_cache import get_graph_cache
-    
+    from .backend.server.graph_cache import get_graph_cache
+
     cache = get_graph_cache()
     cache.print_stats()
 
 
 def clear_graph_cache():
     """Clear all cached graphs."""
-    from .core.graph_cache import get_graph_cache
-    
+    from .backend.server.graph_cache import get_graph_cache
+
     cache = get_graph_cache()
     cache.clear()
     logger.info("Graph cache cleared")
@@ -435,33 +437,33 @@ def clear_graph_cache():
 def compile_model_to_blocks(model, sample_input):
     """
     Compile model to TorchScript blocks for coarse-grained execution.
-    
+
     Reduces RPC calls from 1500 to 15 (100x) by batching operations
     into TorchScript blocks at module boundaries.
-    
+
     Args:
         model: PyTorch model to compile
         sample_input: Sample input tensor for shape inference
-    
+
     Returns:
         List of ExecutableBlock objects ready for execution
-        
+
     Example:
         >>> model = GPT2LMHeadModel.from_pretrained('gpt2')
         >>> inputs = torch.randint(0, 50257, (8, 128))
-        >>> blocks = genie.compile_model_to_blocks(model, inputs)
+        >>> blocks = djinn.compile_model_to_blocks(model, inputs)
         >>> print(f"Compiled to {len(blocks)} blocks")
     """
-    from .core.block_compiler import get_block_compiler
-    
+    from .backend.server.block_compiler import get_block_compiler
+
     compiler = get_block_compiler()
     return compiler.compile_model(model, sample_input)
 
 
 def get_block_compilation_stats():
     """Get statistics from last block compilation."""
-    from .core.block_compiler import get_block_compiler
-    
+    from .backend.server.block_compiler import get_block_compiler
+
     compiler = get_block_compiler()
     return {
         'total_blocks': compiler.stats['total_blocks'],
@@ -479,23 +481,23 @@ def get_block_compilation_stats():
 def profile_block_execution(block_id, execution_time_ms, torchscript_module=None):
     """
     Record block execution for TensorRT optimization profiling.
-    
+
     After 100 executions, block will be auto-compiled to TensorRT for 2-3x speedup.
-    
+
     Args:
         block_id: Identifier of the block being executed
         execution_time_ms: Time taken to execute (in milliseconds)
         torchscript_module: Optional TorchScript module for compilation
-        
+
     Example:
         >>> import time
         >>> start = time.perf_counter()
         >>> output = execute_block(block_id, inputs)
         >>> elapsed_ms = (time.perf_counter() - start) * 1000
-        >>> genie.profile_block_execution(block_id, elapsed_ms, block_module)
+        >>> djinn.profile_block_execution(block_id, elapsed_ms, block_module)
     """
-    from .core.tensorrt_compiler import get_tensorrt_compiler
-    
+    from .backend.server.tensorrt_compiler import get_tensorrt_compiler
+
     compiler = get_tensorrt_compiler()
     compiler.record_execution(block_id, execution_time_ms, torchscript_module)
 
@@ -503,28 +505,28 @@ def profile_block_execution(block_id, execution_time_ms, torchscript_module=None
 def try_tensorrt_compilation(block_id, torchscript_module, sample_input, use_fp16=True):
     """
     Attempt lazy TensorRT compilation of a block.
-    
+
     Automatically triggered after 100 executions (profiling threshold).
     Can also be called manually for immediate optimization.
-    
+
     Args:
         block_id: Block identifier
         torchscript_module: TorchScript module to compile
         sample_input: Sample input for compilation
         use_fp16: Enable FP16 optimization (2-3x speedup, default: True)
-        
+
     Returns:
         Compiled TensorRT module or None if compilation failed
-        
+
     Example:
-        >>> from genie.core.tensorrt_compiler import get_tensorrt_compiler
+        >>> from djinn.backend.server.tensorrt_compiler import get_tensorrt_compiler
         >>> compiler = get_tensorrt_compiler()
         >>> compiler.register_block(1, "attention_block")
         >>> # After sufficient executions...
-        >>> compiled = genie.try_tensorrt_compilation(1, ts_module, sample, use_fp16=True)
+        >>> compiled = djinn.try_tensorrt_compilation(1, ts_module, sample, use_fp16=True)
     """
-    from .core.tensorrt_compiler import get_tensorrt_compiler
-    
+    from .backend.server.tensorrt_compiler import get_tensorrt_compiler
+
     compiler = get_tensorrt_compiler()
     return compiler.try_compile_tensorrt(block_id, torchscript_module, sample_input, use_fp16)
 
@@ -532,7 +534,7 @@ def try_tensorrt_compilation(block_id, torchscript_module, sample_input, use_fp1
 def get_tensorrt_stats():
     """
     Get TensorRT compilation and optimization statistics.
-    
+
     Returns:
         Dictionary with:
         - total_compilations: Total attempted compilations
@@ -544,14 +546,14 @@ def get_tensorrt_stats():
         - blocks_compiled: Number of blocks with TensorRT
         - total_blocks: Total registered blocks
         - estimated_speedup: Expected speedup from TensorRT (typically 2.5x)
-        
+
     Example:
-        >>> stats = genie.get_tensorrt_stats()
+        >>> stats = djinn.get_tensorrt_stats()
         >>> print(f"Compiled {stats['blocks_compiled']}/{stats['total_blocks']} blocks")
         >>> print(f"Success rate: {stats['success_rate']:.1%}")
     """
-    from .core.tensorrt_compiler import get_tensorrt_compiler
-    
+    from .backend.server.tensorrt_compiler import get_tensorrt_compiler
+
     compiler = get_tensorrt_compiler()
     return compiler.get_stats()
 
@@ -559,16 +561,16 @@ def get_tensorrt_stats():
 def register_block_for_optimization(block_id, block_name):
     """
     Register a block for TensorRT optimization tracking.
-    
+
     Args:
         block_id: Unique block identifier
         block_name: Human-readable block name
-        
+
     Example:
-        >>> genie.register_block_for_optimization(1, "transformer_attention")
+        >>> djinn.register_block_for_optimization(1, "transformer_attention")
     """
-    from .core.tensorrt_compiler import get_tensorrt_compiler
-    
+    from .backend.server.tensorrt_compiler import get_tensorrt_compiler
+
     compiler = get_tensorrt_compiler()
     compiler.register_block(block_id, block_name)
 
@@ -576,22 +578,22 @@ def register_block_for_optimization(block_id, block_name):
 def get_optimization_hint(block_id):
     """
     Get adaptive optimization hint for a block.
-    
+
     Returns information about whether the block should use TensorRT/FP16.
-    
+
     Args:
         block_id: Block identifier
-        
+
     Returns:
         Dictionary with optimization recommendations
-        
+
     Example:
-        >>> hint = genie.get_optimization_hint(1)
+        >>> hint = djinn.get_optimization_hint(1)
         >>> if hint.get('use_tensorrt'):
         ...     use_compiled_version()
     """
-    from .core.tensorrt_compiler import get_tensorrt_compiler, AdaptiveOptimizer
-    
+    from .backend.server.tensorrt_compiler import get_tensorrt_compiler, AdaptiveOptimizer
+
     compiler = get_tensorrt_compiler()
     optimizer = AdaptiveOptimizer(compiler)
     return optimizer.get_optimization_hint(block_id)

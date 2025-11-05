@@ -1,7 +1,7 @@
-# Genie Backend Implementation
+# Djinn Backend Implementation
 
-**Status**: ✅ Production Ready  
-**Last Updated**: November 2, 2025  
+**Status**: ✅ Production Ready
+**Last Updated**: November 5, 2025
 **Focus**: Network transport, remote execution, GPU cache, result handling
 
 ---
@@ -41,18 +41,18 @@ The backend translates the scheduler's execution plan into **concrete execution*
 
 || Component | File | Purpose |
 ||-----------|------|---------|
-|| **TCP Transport** | `genie/transport/tcp_transport.py` | Production transport with connection pooling |
-|| **HTTP Transport** | `genie/runtime/simple_client.py` | Development/fallback transport |
-|| **Server** | `genie/runtime/simple_server.py` | FastAPI server (main entry point) |
-|| **TCP Server** | `genie/server/tcp_server.py` | Raw TCP server endpoint |
-|| **Executor** | `genie/server/subgraph_executor.py` | GPU execution engine |
-|| **Optimization Executor** | `genie/server/optimization_executor.py` | Integrated registry+fusion+monitor |
-|| **Tensor Registry** | `genie/server/tensor_registry.py` | Smart caching with version-aware keys |
-|| **Fusion Compiler** | `genie/semantic/fusion_compiler.py` | Pattern grouping (Tier 1) |
-|| **GPU Cache** | `genie/server/gpu_cache.py` | Weight caching (LRU) |
-|| **Graph Cache** | `genie/server/graph_cache.py` | Parsed graph caching |
-|| **Performance Monitor** | `genie/server/performance_monitor.py` | Metrics collection |
-|| **Serialization** | `genie/core/serialization.py` | Dual-format (NumPy + torch) |
+|| **TCP Transport** | `djinn/transport/tcp_transport.py` | Production transport with connection pooling |
+|| **HTTP Transport** | `djinn/runtime/simple_client.py` | Development/fallback transport |
+|| **Server** | `djinn/runtime/simple_server.py` | FastAPI server (main entry point) |
+|| **TCP Server** | `djinn/server/tcp_server.py` | Raw TCP server endpoint |
+|| **Executor** | `djinn/server/subgraph_executor.py` | GPU execution engine |
+|| **Optimization Executor** | `djinn/server/optimization_executor.py` | Integrated registry+fusion+monitor |
+|| **Tensor Registry** | `djinn/server/tensor_registry.py` | Smart caching with version-aware keys |
+|| **Fusion Compiler** | `djinn/server/fusion_compiler.py` | Pattern grouping (Tier 1) |
+|| **GPU Cache** | `djinn/server/gpu_cache.py` | Weight caching (LRU) |
+|| **Graph Cache** | `djinn/server/graph_cache.py` | Parsed graph caching |
+|| **Performance Monitor** | `djinn/server/performance_monitor.py` | Metrics collection |
+|| **Serialization** | `djinn/core/serialization.py` | Dual-format (NumPy + torch) |
 
 ---
 
@@ -60,7 +60,7 @@ The backend translates the scheduler's execution plan into **concrete execution*
 
 ### §2.1 Transport Overview
 
-Genie supports **three transport mechanisms** with different design tradeoffs:
+Djinn supports **three transport mechanisms** with different design tradeoffs:
 
 || Transport | Characteristics | Use Case | Status |
 ||-----------|-----------------|----------|--------|
@@ -74,7 +74,7 @@ Choose based on your infrastructure constraints and requirements.
 
 **Status**: Available for development/debugging, not used in production
 
-**File**: `genie/runtime/simple_client.py` (292 LOC)
+**File**: `djinn/runtime/simple_client.py` (292 LOC)
 
 Uses requests library for simplicity. For production, use TCP transport instead.
 
@@ -82,7 +82,7 @@ Uses requests library for simplicity. For production, use TCP transport instead.
 
 ### §2.3 TCP Transport (Production Primary)
 
-**File**: `genie/transport/tcp_transport.py` (400+ LOC)
+**File**: `djinn/server/transport/tcp_transport.py` (400+ LOC)
 
 **Architecture**: Async/await-based with connection pooling, length-prefixed protocol, and zero-copy optimizations
 
@@ -251,7 +251,7 @@ DPDK path (future):
 
 ### §2.5 TCP Transport Callbacks (NEW)
 
-**File**: `genie/transport/tcp_transport.py` (lines 61-64, 454-498)
+**File**: `djinn/server/transport/tcp_transport.py` (lines 61-64, 454-498)
 
 The TCP transport includes callback mechanisms for handling results and operations:
 
@@ -331,7 +331,7 @@ def _should_batch(self, target: str, metadata: Dict) -> bool:
 
 ### §2.7 DPDK Transport (Future)
 
-**File**: `genie/transport/dpdk_transport.py` (placeholder)
+**File**: `djinn/transport/dpdk_transport.py` (placeholder)
 
 **Status**: ⚠️ Not yet implemented (Phase 2)
 
@@ -364,17 +364,17 @@ DPDK + GPUDirect RDMA path:
 
 ### §2.8 Transport Selection Strategy
 
-**Current Implementation** (genie/core/coordinator.py):
+**Current Implementation** (djinn/core/coordinator.py):
 
 ```python
-# In GenieCoordinator.start()
+# In DjinnCoordinator.start()
 async def start(self):
     """Initialize coordinator and all transports."""
     
     # 1. Try DPDK first (if hardware available)
     if self.config.prefer_dpdk:
         try:
-            from genie.transport.dpdk_transport import DPDKTransport
+            from djinn.transport.dpdk_transport import DPDKTransport
             self.transports['dpdk'] = DPDKTransport(self.config)
             success = await self.transports['dpdk'].initialize()
             if success:
@@ -384,7 +384,7 @@ async def start(self):
     
     # 2. Initialize TCP fallback (always works)
     if self.config.tcp_fallback:
-        from genie.transport.tcp_transport import TCPTransport
+        from djinn.transport.tcp_transport import TCPTransport
         self.transports['tcp'] = TCPTransport(self.config)
         
         # Register callbacks BEFORE initialization
@@ -431,7 +431,7 @@ At send time:
 
 ### §3.2 Subgraph Serialization
 
-**File**: `genie/profiling/comprehensive_profiler.py` (lines 400-500)
+**File**: `djinn/profiling/comprehensive_profiler.py` (lines 400-500)
 
 ```python
 def _serialize_remote_subgraph(self, subgraph):
@@ -530,19 +530,19 @@ tensor = torch.from_numpy(numpy_array)
 
 ### §3.4 Optimized Serialization (NEW)
 
-**File**: `genie/core/serialization.py` (optional, high-performance mode)
+**File**: `djinn/core/serialization.py` (optional, high-performance mode)
 
 **Status**: Available, optional feature (can be disabled via environment variable)
 
 The server can optionally use optimized numpy-based serialization for 44% faster throughput:
 
 ```python
-# In genie/runtime/simple_server.py
+# In djinn/runtime/simple_server.py
 USE_OPTIMIZED_SERIALIZATION = os.getenv('GENIE_USE_OPTIMIZED_SERIALIZATION', 'true').lower() == 'true'
 
 if USE_OPTIMIZED_SERIALIZATION and OPTIMIZED_SERIALIZATION_AVAILABLE:
     logger.info("🚀 Using optimized numpy serialization (44% faster)")
-    from genie.core.serialization import serialize_tensor, deserialize_tensor
+    from djinn.core.serialization import serialize_tensor, deserialize_tensor
     result = deserialize_tensor(response.content)
 else:
     logger.info("📦 Using standard torch.save serialization")
@@ -566,10 +566,10 @@ else:
 
 ### §4.1 Server Architecture
 
-**File**: `genie/runtime/simple_server.py` (FastAPI)
+**File**: `djinn/runtime/simple_server.py` (FastAPI)
 
 ```python
-app = FastAPI(title="Genie Remote Execution Server")
+app = FastAPI(title="Djinn Remote Execution Server")
 
 # Feature flag for optimized serialization (can be disabled via environment variable)
 USE_OPTIMIZED_SERIALIZATION = os.getenv('GENIE_USE_OPTIMIZED_SERIALIZATION', 'true').lower() == 'true'
@@ -628,7 +628,7 @@ async def handle_subgraph_execution(request: Request):
 
 ### §4.2 Subgraph Executor
 
-**File**: `genie/server/subgraph_executor.py`
+**File**: `djinn/server/subgraph_executor.py`
 
 ```python
 class SubgraphExecutor:
@@ -725,7 +725,7 @@ class ExecutionContext:
 
 ### §5.2 GPU Cache Architecture (Enhanced)
 
-**File**: `genie/server/gpu_cache.py` (300+ LOC)
+**File**: `djinn/server/gpu_cache.py` (300+ LOC)
 
 ```python
 class SimpleGPUCache:
@@ -808,7 +808,7 @@ class SimpleGPUCache:
 
 ### §5.3 Memory Pressure Handler Integration (NEW)
 
-**File**: `genie/server/memory_pressure_handler.py`
+**File**: `djinn/server/memory_pressure_handler.py`
 
 The memory pressure handler provides:
 
@@ -840,7 +840,7 @@ class MemoryPressureHandler:
 
 ### §5.4 Adaptive Budget Tuning (NEW)
 
-**File**: `genie/server/adaptive_budget_tuner.py`
+**File**: `djinn/server/adaptive_budget_tuner.py`
 
 The adaptive budget tuner learns optimal phase-specific allocations:
 
@@ -879,7 +879,7 @@ class AdaptiveBudgetTuner:
 
 ### §5.5 Prometheus Metrics Integration (NEW)
 
-**File**: `genie/server/memory_metrics.py`
+**File**: `djinn/server/memory_metrics.py`
 
 Comprehensive metrics for production monitoring:
 
@@ -972,12 +972,12 @@ torch.save(result, result_buffer)
 
 # Add custom headers (timing breakdown)
 headers = {
-    'X-Genie-Server-Timing': json.dumps({
+    'X-Djinn-Server-Timing': json.dumps({
         'deserialize_ms': deserialize_time,
         'execute_ms': execute_time,
         'serialize_ms': serialize_time
     }),
-    'X-Genie-Result-Bytes': str(len(result_buffer.getvalue()))
+    'X-Djinn-Result-Bytes': str(len(result_buffer.getvalue()))
 }
 
 return Response(
@@ -995,8 +995,8 @@ return Response(
 response = client.execute_subgraph(subgraph, input_data)
 
 # Extract custom headers (server timing)
-server_timing = json.loads(response.headers.get('X-Genie-Server-Timing', '{}'))
-result_bytes = int(response.headers.get('X-Genie-Result-Bytes', 0))
+server_timing = json.loads(response.headers.get('X-Djinn-Server-Timing', '{}'))
+result_bytes = int(response.headers.get('X-Djinn-Result-Bytes', 0))
 
 # Deserialize result
 result = torch.load(io.BytesIO(response.content))
@@ -1151,16 +1151,16 @@ except RemoteExecutionError:
 **Use TCP for Production**:
 ```python
 # Initialize with TCP transport
-from genie.core.coordinator import GenieCoordinator
-from genie.transport import TCPTransport
+from djinn.core.coordinator import DjinnCoordinator
+from djinn.transport import TCPTransport
 
-config = GenieConfig(
+config = DjinnConfig(
     data_port=5556,
     connection_pool_size=4,
     connection_timeout=30.0
 )
 
-coordinator = GenieCoordinator(config)
+coordinator = DjinnCoordinator(config)
 coordinator.register_transport('tcp', TCPTransport(config))
 ```
 
@@ -1265,7 +1265,7 @@ Track these metrics in production:
 
 ## §10. Conclusion
 
-The Genie backend provides **production-ready remote execution** with:
+The Djinn backend provides **production-ready remote execution** with:
 
 ✅ **Multiple transports**: HTTP (dev), TCP (prod), DPDK (future)  
 ✅ **GPU cache**: Persistent weight storage with LRU eviction  

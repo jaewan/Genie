@@ -52,7 +52,7 @@ logger.info(f"Using ports: SERVER={TEST_SERVER_PORT}, DATA={TEST_DATA_PORT}")
 async def hero_server():
     """Start a full-featured test server for hero testing."""
     try:
-        from genie.server.server import GenieServer, ServerConfig
+        from djinn.server.server import GenieServer, ServerConfig
     except ImportError:
         pytest.skip("GenieServer not available")
 
@@ -92,7 +92,7 @@ async def hero_server():
 async def hero_coordinator():
     """Create a full-featured test coordinator for hero testing."""
     try:
-        from genie.core.coordinator import GenieCoordinator, CoordinatorConfig
+        from djinn.core.coordinator import GenieCoordinator, CoordinatorConfig
     except ImportError:
         pytest.skip("GenieCoordinator not available")
 

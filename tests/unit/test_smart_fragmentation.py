@@ -11,8 +11,8 @@ import torch
 import os
 from unittest.mock import Mock, patch
 
-import genie
-from genie.core.smart_subgraph_builder import (
+import djinn
+from djinn.core.smart_subgraph_builder import (
     SmartSubgraphBuilder,
     FragmentationConfig,
     CostEstimate,
@@ -20,7 +20,7 @@ from genie.core.smart_subgraph_builder import (
     MemoryEstimator,
     CostCalculator
 )
-from genie.core.lazy_tensor import LazyTensor
+from djinn.frontend.core.lazy_tensor import LazyTensor
 
 
 class TestMemoryEstimator:
@@ -98,7 +98,7 @@ class TestCostCalculator:
 
     def test_transfer_cost_estimation(self):
         """Test network transfer cost estimation."""
-        from genie.core.subgraph_builder import RemoteSubgraph
+        from djinn.core.subgraph_builder import RemoteSubgraph
 
         # Create subgraph with known input/output sizes
         with genie.capture():

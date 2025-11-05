@@ -12,7 +12,7 @@ import torch
 import pytest
 import gc
 import logging
-import genie
+import djinn
 
 logger = logging.getLogger(__name__)
 
@@ -125,10 +125,10 @@ class TestCacheBehavior:
     def test_shape_cache_bounded(self):
         """Test shape inference cache doesn't grow unbounded."""
         
-        from genie.core.lazy_tensor import LazyTensor
+        from djinn.frontend.core.lazy_tensor import LazyTensor
         
         # Get cache size before
-        from genie.core.lazy_tensor import _get_thread_local_shape_cache
+        from djinn.frontend.core.lazy_tensor import _get_thread_local_shape_cache
         cache_func = _get_thread_local_shape_cache()
         # The cache is a function, we can't get its size directly
         # For this test, we'll just check that repeated operations work

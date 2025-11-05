@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Setup script for Genie - GPU Disaggregation Framework for PyTorch."""
+"""Setup script for Djinn - GPU Disaggregation Framework for PyTorch."""
 
 from setuptools import setup, find_packages
 import os
@@ -20,22 +20,22 @@ def read_readme():
     return ""
 
 setup(
-    name="genie-gpu",
+    name="djinn-gpu",
     version="0.1.0",
     description="GPU Disaggregation Framework for PyTorch with Zero-Copy Transport",
     long_description=read_readme(),
     long_description_content_type="text/markdown",
-    author="Genie Team",
+    author="Djinn Team",
     author_email="",
-    url="https://github.com/yourusername/genie",
+    url="https://github.com/yourusername/djinn",
     license="MIT",
-    
+
     # Package discovery
     packages=find_packages(exclude=['tests', 'tests.*', 'benchmarks', 'example', 'docs', 'scripts']),
-    
+
     # Include pre-built C++ extensions
     package_data={
-        'genie': [
+        'djinn': [
             '*.so',
             '_C*.so',
             '_runtime*.so',
@@ -73,7 +73,7 @@ setup(
     entry_points={
         'console_scripts': [
             # Add command-line tools here if needed
-            # 'genie-server=genie.server:main',
+            # 'djinn-server=djinn.backend.server.server:main',
         ],
     },
 )

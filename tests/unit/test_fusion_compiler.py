@@ -11,12 +11,12 @@ Tests cover:
 import pytest
 from typing import List, Dict, Any
 
-from genie.semantic.fusion_compiler import (
+from djinn.server.fusion_compiler import (
     SRGFusionCompiler,
     FusedBlock,
     FusionStrategy
 )
-from genie.core.types import ExecutionPhase
+from djinn.core.types import ExecutionPhase
 
 
 @pytest.fixture

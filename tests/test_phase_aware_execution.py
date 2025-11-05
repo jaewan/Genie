@@ -19,14 +19,14 @@ import os
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from genie.semantic.phase_executor import (
+from djinn.server.phase_executor import (
     PhaseAwareExecutor,
     PrefillExecutionStrategy,
     DecodeExecutionStrategy,
     VisionExecutionStrategy,
     ExecutionPhase,
 )
-from genie.server.semantic_memory_manager import (
+from djinn.server.semantic_memory_manager import (
     PhaseAwareMemoryManager,
     LifetimeBasedEvictor,
 )

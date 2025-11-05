@@ -12,8 +12,8 @@ import pytest
 import pytest_asyncio
 import asyncio
 import torch
-from genie.server.server import GenieServer, ServerConfig
-from genie.core.coordinator import GenieCoordinator, CoordinatorConfig
+from djinn.server.server import GenieServer, ServerConfig
+from djinn.core.coordinator import GenieCoordinator, CoordinatorConfig
 
 
 @pytest.fixture(scope="module")

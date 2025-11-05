@@ -20,9 +20,9 @@ import gc
 import numpy as np
 from typing import List, Dict, Any
 
-from genie.server.server import GenieServer, ServerConfig
-from genie.core.coordinator import GenieCoordinator, CoordinatorConfig
-from genie.semantic.scheduling import Scheduler
+from djinn.server.server import GenieServer, ServerConfig
+from djinn.core.coordinator import GenieCoordinator, CoordinatorConfig
+from djinn.scheduler.core.scheduling import Scheduler
 
 logger = logging.getLogger(__name__)
 

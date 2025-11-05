@@ -1,9 +1,9 @@
-# Genie Scheduler Implementation
+# Djinn Scheduler Implementation
 
-**Status**: ✅ Production Ready  
-**Phase**: 🔵 Phase 2 (Semantic Analysis & Scheduling)  
-**Last Updated**: November 2, 2025  
-**Based on**: `research_proposal.tex` | `genie/semantic/scheduling.py`
+**Status**: ✅ Complete Implementation
+**Phase**: 🔵 Phase 2 (Semantic Analysis & Scheduling)
+**Last Updated**: November 5, 2025
+**Based on**: Complete 3-Stage Implementation
 
 ---
 
@@ -23,14 +23,14 @@
 
 ### §1.1 Scheduler Purpose
 
-The Genie scheduler is a **pluggable policy engine** that transforms a Semantically Rich Graph (SRG) from the frontend into an optimized execution plan.
+The Djinn scheduler is a **pluggable policy engine** that transforms a Semantically Rich Graph (SRG) from the frontend into an optimized execution plan.
 
 **Key Innovation**: The scheduler leverages **local metadata** from LazyTensor (shape, dtype, device) to make placement decisions **without remote calls**, enabling practical GPU disaggregation.
 
 **Core Interface**:
 ```python
-from genie.semantic.scheduling import Scheduler
-from genie.semantic.cost_estimator import GraphCostEstimator
+from djinn.scheduler.core.scheduling import Scheduler
+from djinn.scheduler.core.cost_estimator import GraphCostEstimator
 
 scheduler = Scheduler(
     cost_estimator=GraphCostEstimator(),
@@ -70,16 +70,16 @@ Output: ExecutionSchedule
 
 | Component | File | Lines | Purpose |
 |-----------|------|-------|---------|
-| **Scheduler** | `genie/semantic/scheduling.py` | 1,011 | Main orchestrator |
-| **Cost Estimator** | `genie/semantic/cost_estimator.py` | 600 | Latency prediction |
-| **Semantic Analyzer** | `genie/semantic/analyzer.py` | ~170 | Multi-tier semantic analysis (dynamic hooks, pattern matching) |
-| **Pattern Matchers** | `genie/semantic/pattern_matcher.py` | ~270 | Graph pattern recognition for workload analysis |
-| **Fusion Compiler** | `genie/semantic/fusion_compiler.py` | 280+ | SRG-driven pattern grouping |
-| **Network Topology** | `genie/core/network_topology.py` | 260 | Network info & device management |
-| **Graph Interface** | `genie/core/graph_interface.py` | 497 | Unified graph abstraction |
-| **Placement Policy** | `genie/semantic/placement.py` | 499 | Device assignment & constraints |
-| **Tensor Registry** | `genie/server/tensor_registry.py` | 400+ | Smart tensor caching (integration) |
-| **Performance Monitor** | `genie/server/performance_monitor.py` | 417 | Metrics collection for optimization |
+| **Scheduler** | `djinn/scheduler/core/scheduling.py` | 1,011 | Main orchestrator |
+| **Cost Estimator** | `djinn/scheduler/core/cost_estimator.py` | 600 | Latency prediction |
+| **Semantic Analyzer** | `djinn/frontend/semantic/analyzer.py` | ~170 | Multi-tier semantic analysis (dynamic hooks, pattern matching) |
+| **Pattern Matchers** | `djinn/frontend/semantic/pattern_matcher.py` | ~270 | Graph pattern recognition for workload analysis |
+| **Fusion Compiler** | `djinn/backend/server/fusion_compiler.py` | 280+ | SRG-driven pattern grouping |
+| **Network Topology** | `djinn/core/network_topology.py` | 260 | Network info & device management |
+| **Graph Interface** | `djinn/core/graph_interface.py` | 497 | Unified graph abstraction |
+| **Placement Policy** | `djinn/scheduler/strategies/placement.py` | 499 | Device assignment & constraints |
+| **Tensor Registry** | `djinn/backend/server/tensor_registry.py` | 400+ | Smart tensor caching (integration) |
+| **Performance Monitor** | `djinn/backend/server/performance_monitor.py` | 417 | Metrics collection for optimization |
 
 **Note on Integration**: The scheduler works with multiple components for optimization:
 - **Semantic Analyzer** provides multi-tier analysis (dynamic hooks, pattern matching, runtime context)
@@ -89,10 +89,10 @@ Output: ExecutionSchedule
 - **Performance Monitor** tracks optimization effectiveness and feeds back to improve future decisions
 
 **Note on NetworkTopology**: The component has a dual-layer design:
-- **Bridge wrapper** in `genie/semantic/cost_estimator.py` (~40 lines): Acts as a facade to avoid circular imports
-- **Manager implementation** in `genie/core/network_topology.py` (~260 lines): Actual topology management with device/link registration
+- **Bridge wrapper** in `djinn/scheduler/core/cost_estimator.py` (~40 lines): Acts as a facade to avoid circular imports
+- **Manager implementation** in `djinn/core/network_topology.py` (~260 lines): Actual topology management with device/link registration
 
-This design allows the cost estimator to access network information without importing from `genie/core/network_topology.py` directly.
+This design allows the cost estimator to access network information without importing from `djinn/core/network_topology.py` directly.
 
 ---
 
@@ -102,7 +102,7 @@ This design allows the cost estimator to access network information without impo
 
 The scheduler needs to make device placement decisions based on tensor metadata. 
 
-**Genie's Solution**: LazyTensor stores metadata locally, enabling fast scheduling decisions without remote metadata queries.
+**Djinn's Solution**: LazyTensor stores metadata locally, enabling fast scheduling decisions without remote metadata queries.
 
 This allows the scheduler to evaluate placement options efficiently based on:
 - Tensor shape and dtype
@@ -136,7 +136,7 @@ This allows the scheduler to evaluate placement options efficiently based on:
 
 ```python
 # 1. Capture with local device
-with genie.capture():
+with djinn.capture():
     x = torch.randn(8, 10)  # LazyTensor: _logical_device='cpu'
     output = model(x)
 
@@ -163,7 +163,7 @@ The scheduler's decision-making is guided by a cost model:
 Total Latency = Compute Time + Transfer Time + Queueing Delay
 ```
 
-**File**: `genie/semantic/cost_estimator.py` (600 lines)
+**File**: `djinn/scheduler/core/cost_estimator.py` (600 lines)
 
 ### §3.2 Compute Cost Estimation
 
@@ -237,7 +237,7 @@ transfer_time_ms = (tensor_size_bytes / network_bandwidth_gbps) + latency_overhe
 
 ### §4.1 Core Scheduler Implementation
 
-**File**: `genie/semantic/scheduling.py` (1,011 lines)
+**File**: `djinn/scheduler/core/scheduling.py` (1,011 lines)
 
 ```python
 class Scheduler:
@@ -270,7 +270,7 @@ class Scheduler:
 
 ### §4.2 Scheduling Strategies
 
-**File**: `genie/semantic/scheduling.py` (lines 21-27)
+**File**: `djinn/scheduler/core/scheduling.py` (lines 21-27)
 
 ```python
 class SchedulingStrategy(Enum):
@@ -450,12 +450,12 @@ schedule = scheduler.create_schedule(graph, profile)
 
 The scheduler integrates with advanced memory management components:
 
-**From Phase 2** (`genie/server/semantic_memory_manager.py`):
+**From Phase 2** (`djinn/server/semantic_memory_manager.py`):
 - `LifetimeBasedEvictor`: Provides tensor lifetime information
 - `PhaseAwareMemoryManager`: Suggests memory budgets per phase
 - `RecomputationVsStorageDecider`: Cost model for cache vs compute
 
-**From Phase 3** (`genie/server/memory_pressure_handler.py`):
+**From Phase 3** (`djinn/server/memory_pressure_handler.py`):
 - `MemoryPressureHandler`: Adapts thresholds under pressure
 - Budget adjustment signals for tight memory situations
 
@@ -517,7 +517,7 @@ class MemoryConstraintSolver:
 
 ## §7. Conclusion (Updated)
 
-The Genie scheduler provides **semantic-driven optimization with memory awareness**:
+The Djinn scheduler provides **semantic-driven optimization with memory awareness**:
 
 ✅ **Semantic optimizations**: Co-location, pipelining, recomputation  
 ✅ **Local metadata**: No remote network calls required  
@@ -594,22 +594,22 @@ The network topology component uses a **bridge pattern** to avoid circular impor
 
 ```
 Dependency Flow:
-├─ genie/semantic/cost_estimator.py
+├─ djinn/scheduler/core/cost_estimator.py
 │  └─ Uses: NetworkTopology (bridge wrapper, ~40 lines)
 │     └─ Delegates to: NetworkTopologyManager (via import)
 │
-└─ genie/core/network_topology.py
+└─ djinn/core/network_topology.py
    └─ Contains: NetworkTopologyManager (actual implementation, 260 lines)
 ```
 
-**Why**: The cost estimator needs network information, but importing from `genie/core/network_topology` would create a circular dependency. The bridge wrapper in `cost_estimator.py` is a lightweight facade that delegates to the actual manager.
+**Why**: The cost estimator needs network information, but importing from `djinn/core/network_topology` would create a circular dependency. The bridge wrapper in `cost_estimator.py` is a lightweight facade that delegates to the actual manager.
 
 ### §9.2 Graph Interface Abstraction
 
-The `GenieGraph` abstract base class provides a **unified interface** over multiple graph representations:
+The `DjinnGraph` abstract base class provides a **unified interface** over multiple graph representations:
 
 ```
-GenieGraph (Abstract Interface)
+DjinnGraph (Abstract Interface)
 ├─ ConcreteGraphImpl (efficient for materialized DAGs)
 ├─ LazyTensor DAG (deferred execution)
 └─ Other backends (extensible)
@@ -630,7 +630,7 @@ This scheduler is a **Phase 2 component** that builds on Phase 1's graph capture
 
 ## §10. Conclusion
 
-The Genie scheduler provides **semantic-driven optimization** for GPU disaggregation:
+The Djinn scheduler provides **semantic-driven optimization** for GPU disaggregation:
 
 ✅ **Local metadata**: No remote network calls required  
 ✅ **Semantic optimizations**: Co-location, pipelining, recomputation  
@@ -646,7 +646,7 @@ The Genie scheduler provides **semantic-driven optimization** for GPU disaggrega
 Take a look at these codes and consider integrating them with careful design decisions.
 
 
-### **3. `genie/core/materialization_optimizer.py`**
+### **3. `djinn/core/materialization_optimizer.py`**
 
 **Status**: **🟡 UNIMPLEMENTED OPTIMIZATION** - High-value performance optimization
 
@@ -667,7 +667,7 @@ Take a look at these codes and consider integrating them with careful design dec
 
 ---
 
-### **4. `genie/core/differential_graph.py`**
+### **4. `djinn/core/differential_graph.py`**
 
 **Status**: **🟡 UNIMPLEMENTED OPTIMIZATION** - Network efficiency optimization
 
@@ -685,7 +685,7 @@ Take a look at these codes and consider integrating them with careful design dec
 
 ---
 
-### **5. `genie/core/block_serializer.py`**
+### **5. `djinn/core/block_serializer.py`**
 
 **Status**: **🟡 UNIMPLEMENTED OPTIMIZATION** - Part of block compilation system
 
@@ -698,7 +698,7 @@ Take a look at these codes and consider integrating them with careful design dec
 
 ---
 
-### **6. `genie/core/batch_protocol.py`**
+### **6. `djinn/core/batch_protocol.py`**
 
 **Status**: **🟡 UNIMPLEMENTED OPTIMIZATION** - Network batching protocol
 
@@ -715,7 +715,7 @@ Take a look at these codes and consider integrating them with careful design dec
 
 ---
 
-### **7. `genie/core/batching_coordinator.py`**
+### **7. `djinn/core/batching_coordinator.py`**
 
 **Status**: **🟡 UNIMPLEMENTED OPTIMIZATION** - Operation batching coordinator
 

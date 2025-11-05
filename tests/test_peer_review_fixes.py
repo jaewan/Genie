@@ -12,11 +12,11 @@ import pytest
 import torch
 import logging
 import time
-from genie.core.interception_control import InterceptionContext, get_current_context, disable_interception
-from genie.core.capture import capture, is_capturing
-from genie.core.lazy_tensor import LazyTensor
-from genie.core.subgraph_builder import SemanticGraphCompactor, SemanticNodeType, MegaNode
-from genie.core.differential_graph import DifferentialGraphProtocol, GraphDelta
+from djinn.core.interception_control import InterceptionContext, get_current_context, disable_interception
+from djinn.core.capture import capture, is_capturing
+from djinn.frontend.core.lazy_tensor import LazyTensor
+from djinn.core.subgraph_builder import SemanticGraphCompactor, SemanticNodeType, MegaNode
+from djinn.core.differential_graph import DifferentialGraphProtocol, GraphDelta
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)

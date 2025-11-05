@@ -2,7 +2,6 @@ from .analyzer import SemanticAnalyzer  # noqa: F401
 from .pattern_registry import PatternRegistry  # noqa: F401
 from .workload import WorkloadProfile, WorkloadType  # noqa: F401
 from .hooks import HookManager  # noqa: F401
-from .scheduling import Scheduler, ExecutionSchedule, SchedulingStrategy  # noqa: F401
 
 # Phase 3 modules
 try:
@@ -52,9 +51,6 @@ __all__ = [
     'WorkloadProfile',
     'WorkloadType',
     'HookManager',
-    'Scheduler',
-    'ExecutionSchedule',
-    'SchedulingStrategy',
     # Phase 3 exports
     'SemanticAnnotator',
     'AnnotatedGraph',

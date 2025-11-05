@@ -15,12 +15,12 @@ import time
 import threading
 from unittest.mock import Mock, patch
 
-import genie
-from genie.server.subgraph_executor import SubgraphExecutor
+import djinn
+from djinn.server.subgraph_executor import SubgraphExecutor
 
 # Handle FastAPI dependency gracefully
 try:
-    from genie.runtime.simple_server import app
+    from djinn.runtime.simple_server import app
     HAS_FASTAPI = True
 except ImportError:
     HAS_FASTAPI = False

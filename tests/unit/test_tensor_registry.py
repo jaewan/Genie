@@ -18,7 +18,7 @@ import uuid
 from typing import Tuple
 
 # Import the components to test
-from genie.server.tensor_registry import (
+from djinn.server.tensor_registry import (
     SmartTensorRegistry,
     RemoteHandle,
     TensorRegistryStats

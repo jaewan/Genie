@@ -61,7 +61,7 @@ logger.info(f"Using ports: SERVER={TEST_SERVER_PORT}, DATA={TEST_DATA_PORT}")
 async def test_server():
     """Start test server on localhost."""
     try:
-        from genie.server.server import GenieServer, ServerConfig
+        from djinn.server.server import GenieServer, ServerConfig
     except ImportError:
         pytest.skip("GenieServer not available")
     
@@ -99,7 +99,7 @@ async def test_server():
 async def test_coordinator():
     """Create test coordinator (client)."""
     try:
-        from genie.core.coordinator import GenieCoordinator, CoordinatorConfig
+        from djinn.core.coordinator import GenieCoordinator, CoordinatorConfig
     except ImportError:
         pytest.skip("GenieCoordinator not available")
     

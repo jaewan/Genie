@@ -13,10 +13,10 @@ import json
 import tempfile
 from unittest.mock import Mock, patch
 
-import genie
-from genie.core.subgraph_builder import SubgraphBuilder, RemoteSubgraph
-from genie.core.lazy_tensor import LazyTensor
-from genie.server.subgraph_executor import SubgraphExecutor, ExecutionContext
+import djinn
+from djinn.core.subgraph_builder import SubgraphBuilder, RemoteSubgraph
+from djinn.frontend.core.lazy_tensor import LazyTensor
+from djinn.server.subgraph_executor import SubgraphExecutor, ExecutionContext
 
 
 class TestSubgraphBuilder:

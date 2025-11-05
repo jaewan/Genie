@@ -1,70 +1,75 @@
-# Genie System Architecture
+# Djinn System Architecture & Implementation
 
-**Status**: ✅ Production Ready  
-**Last Updated**: November 2, 2025  
-**Based on**: `research_proposal.tex` §X (The Genie Platform)
+**Status**: Pending Peer Review
+**Last Updated**: November 5, 2025
 
 ---
 
 ## Table of Contents
 
-1. [Introduction](#1-introduction)
+1. [Code Structure Overview](#1-code-structure-overview)
 2. [The Semantically Rich Graph (SRG)](#2-the-semantically-rich-graph-srg)
-3. [Frontend: Capturing Intent](#3-frontend-capturing-intent)
-4. [Scheduler: Semantic-Driven Optimization](#4-scheduler-semantic-driven-optimization)
-5. [Backend: High-Performance Execution](#5-backend-high-performance-execution)
-6. [Lineage-Based Fault Tolerance](#6-lineage-based-fault-tolerance)
-7. [Global Scheduling at Datacenter Scale](#7-global-scheduling-at-datacenter-scale)
-8. [End-to-End Request Lifecycle](#8-end-to-end-request-lifecycle)
+3. [Layer 1: Frontend - Intent Capture & Semantic Enrichment](#3-layer-1-frontend---intent-capture--semantic-enrichment)
+4. [Layer 2: Scheduler - Semantic-Driven Optimization](#4-layer-2-scheduler---semantic-driven-optimization)
+5. [Layer 3: Server - Distributed Execution Coordination](#5-layer-3-server---distributed-execution-coordination)
+6. [Layer 4: Backend - Core Execution Runtime](#6-layer-4-backend---core-execution-runtime)
+7. [Data Flow & Request Lifecycle](#7-data-flow--request-lifecycle)
+8. [Implementation Details](#8-implementation-details)
+9. [Global Scheduling at Datacenter Scale](#9-global-scheduling-at-datacenter-scale)
+10. [End-to-End Request Lifecycle](#10-end-to-end-request-lifecycle)
+11. [Design Principles](#11-design-principles)
 
 ---
 
-## §1. Introduction
+## §1. Code Structure Overview
 
-### §1.1 The Problem: GPU Underutilization
+Djinn follows a clean **four-layer architecture** with corresponding code organization:
 
-Real-world AI accelerator fleets report **55-60% average GPU idleness** despite massive investment ($150B+ in 2023). This severe underutilization stems from:
+```
+djinn/
+├── frontend/           # Layer 1: Intent Capture & Semantic Enrichment
+│   ├── core/          # Tensor interception, LazyTensor DAG, shape inference
+│   ├── patterns/      # Pattern recognition (attention, conv, KV cache)
+│   └── semantic/      # Multi-tier analysis, phase detection, cost estimation
+├── scheduler/         # Layer 2: Semantic-Driven Optimization
+│   ├── core/          # Cost modeling, device placement, execution ordering
+│   └── strategies/    # Stateful co-location, pipelined execution, memory-aware placement
+├── server/            # Layer 3: Distributed Execution Coordination
+│   ├── server.py      # Request handling, multi-tenancy, load balancing
+│   ├── executors/     # GPU execution engines (subgraph, block, real_gpu)
+│   ├── compilers/     # JIT compilation (TensorRT, TorchScript, fusion)
+│   ├── coordination/  # Batching, fairness, fault tolerance
+│   ├── transport/     # TCP connections, serialization, connection pooling
+│   ├── memory/        # Execution-time memory management
+│   └── cache/         # GPU cache, graph cache, tensor registry
+├── backend/           # Layer 4: Core Execution Runtime
+│   ├── runtime/       # GPU initialization, basic protocols, device management
+│   └── memory/        # Low-level memory utilities
+└── core/              # Shared utilities
+    ├── types.py       # Common type definitions (ExecutionPhase, etc.)
+    ├── exceptions.py  # Error handling
+    ├── config.py      # Configuration management
+    └── coordinator.py # Cluster coordination primitives
+```
 
-1. **Coarse-grained allocation**: Applications claim entire GPUs even when using <50% capacity
-2. **Tightly-coupled architecture**: GPUs locked to specific servers, cannot be shared dynamically
-3. **Fluctuating demands**: Training, inference, and interactive workloads have vastly different resource profiles
-4. **Stranded capacity**: Expensive accelerators sit idle between jobs or during low-utilization phases
+### Key Design Principles
 
-### §1.2 Why Existing Disaggregation Approaches Fail
-
-**Low-level approaches** (PCIe, driver-level):
-- ❌ Blind to application semantics (cannot distinguish prefill vs decode)
-- ❌ Treat all data equally (cannot prioritize KV cache over activations)
-- ❌ Cannot exploit phase-specific optimizations
-- ❌ High overhead from unnecessary data movement
-
-**Application-level approaches**:
-- ❌ Require extensive hand-tuning for each workload
-- ❌ Tightly coupled to specific model architectures
-- ❌ Not generalizable across diverse AI workloads
-
-### §1.3 Genie's Thesis: ML Frameworks as the Narrow Waist
-
-**Key Insight**: ML frameworks (PyTorch, JAX, TensorFlow) are the ideal layer for disaggregation because they:
-
-✅ **General enough**: Support vast range of AI models and hardware  
-✅ **Semantic-rich**: Observe model structure, execution phases, data dependencies  
-✅ **Transparent**: Can intercept operations without application changes  
-✅ **Optimizable**: Enable phase-aware, data-aware optimizations
-
-**Genie's approach**: Leverage framework-level semantics to make disaggregation practical and efficient.
+1. **Clear Layer Separation**: Each layer has single responsibility
+2. **Framework Transparency**: Zero application code changes required
+3. **Semantic-Driven**: ML framework semantics enable intelligent decisions
+4. **Memory-Aware**: Three-phase memory management (reactive → semantic → adaptive)
+5. **Production Hardened**: Comprehensive monitoring, fault tolerance, performance optimization
 
 ---
-
 ## §2. The Semantically Rich Graph (SRG)
 
 ### §2.1 Core Abstraction
 
-The **Semantically Rich Graph (SRG)** is Genie's central abstraction—a **portable intermediate representation** that cleanly separates:
+The **Semantically Rich Graph (SRG)** is Djinn's central abstraction—a **portable intermediate representation** that cleanly separates:
 - **What**: The application's computational intent (operations, dependencies)
 - **How/Where**: The physical execution strategy (device placement, scheduling)
 
-**Key Property**: The SRG is a **declarative data structure**, not executable code. It serves as a durable "narrow waist" between frontend and scheduler.
+**Key Property**: The SRG is a **declarative data structure**, not executable code. It serves as abstraction between frontend and scheduler.
 
 ### §2.2 SRG Structure
 
@@ -108,7 +113,7 @@ Each node carries a **common annotation schema**:
 | **Modality** | Data type | `vision`, `text`, `fusion` | Specialized accelerator placement |
 | **Cost Hints** | Resource estimates | FLOPs, memory bytes, intensity | Scheduling and load balancing |
 
-**Implementation**: See `genie/core/types.py` for enum definitions.
+**Implementation**: See `djinn/core/types.py` for enum definitions.
 
 ### §2.4 Edge Annotations
 
@@ -127,66 +132,88 @@ The SRG's semantic richness enables optimizations **invisible to lower layers**:
 **Example 1: Stateful Co-location**
 ```
 Traditional (blind): Transfer KV cache every decode step (costly)
-Genie (semantic): Detect KV_CACHE residency → co-locate with decoder
+Djinn (semantic): Detect KV_CACHE residency → co-locate with decoder
 Result: Eliminate repeated transfers
 ```
 
 **Example 2: Pipelined CNN**
 ```
 Traditional (blind): Execute conv layers sequentially
-Genie (semantic): Detect consecutive conv stages → pipeline across GPUs
+Djinn (semantic): Detect consecutive conv stages → pipeline across GPUs
 Result: Overlap communication and computation
 ```
 
 **Example 3: Dynamic Recomputation**
 ```
 Traditional (blind): Always transfer intermediate results
-Genie (semantic): Detect cheap recomputation + network congestion → recompute
+Djinn (semantic): Detect cheap recomputation + network congestion → recompute
 Result: Avoid network bottleneck
 ```
 
 ---
 
-## §3. Frontend: Capturing Intent
+## §3. Layer 1: Frontend - Intent Capture & Semantic Enrichment
 
 ### §3.1 Frontend Architecture
 
 The frontend is responsible for **transparently capturing application intent** and translating it into an SRG.
 
-**Three-stage pipeline** (from `research_proposal.tex` §X.1):
+**Two-phase pipeline** with clear separation between capture and analysis:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  STAGE 1: Transparent Interception & Graph Capture              │
-│  • Factory function wrapping (torch.randn, torch.zeros, etc.)   │
-│  • __torch_dispatch__ for all operations                        │
-│  • LazyTensor deferred execution (no computation)               │
-│  • LazyTensor DAG construction (operations + dependencies)      │
+│  PHASE 1: Core Tensor Interception & Graph Construction         │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │ Factory Function Wrapping                                   ││
+│  │ • ~20 tensor creation functions (torch.randn, torch.zeros)  ││
+│  │ • Triggered by: factory_interceptor.wrap()                  ││
+│  │ • Returns: LazyTensor with deferred execution               ││
+│  └─────────────────────────────────────────────────────────────┘│
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │ __torch_dispatch__ Interception                             ││
+│  │ • Primary mechanism for tensor operations                   ││
+│  │ • Covers: 95%+ of tensor operations automatically           ││
+│  │ • LazyTensor DAG construction with dependencies             ││
+│  └─────────────────────────────────────────────────────────────┘│
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │ Shape Inference & Metadata                                  ││
+│  │ • Meta-tensor execution for shape inference                 ││
+│  │ • Lazy metadata capture via MetadataPlaceholder             ││
+│  │ • Cost estimation (FLOPs, memory, intensity)                ││
+│  └─────────────────────────────────────────────────────────────┘│
+│  Output: Computation Graph with basic metadata                  │
 └─────────────────────────────────────────────────────────────────┘
                                 │
                                 ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  STAGE 2: LazyTensor DAG Construction                           │
-│  • LazyTensor DAG construction (works for all models)           │
-│  • Operation-level granularity for remote execution             │
-│  • Unified GenieGraph interface                                  │
-│  • Static analysis of module hierarchy                          │
-└─────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  STAGE 3: Semantic Annotation                                   │
-│  • Pattern recognition (LLM prefill/decode, CNN stages)         │
-│  • Module path annotation (e.g., "encoder.layer.0.attention")  │
-│  • Data lineage tracking (source modules, modality)             │
-│  • Execution phase detection (forward, LLM phases, vision)      │
-│  • Cost hint estimation (FLOPs, memory, intensity)             │
+│  PHASE 2: Semantic Enrichment & Annotation                      │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │ Pattern Recognition Framework                               ││
+│  │ • Attention patterns (Q@K.T → softmax → @V)                 ││
+│  │ • KV cache patterns (stateful data tracking)                ││
+│  │ • Convolution patterns (stage detection)                    ││
+│  │ • Multi-modal fusion patterns                               ││
+│  └─────────────────────────────────────────────────────────────┘│
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │ Execution Phase Detection                                   ││
+│  │ • LLM prefill (parallel attention, compute-bound)           ││
+│  │ • LLM decode (sequential, memory-bound)                     ││
+│  │ • Vision encoding/decoding (convolution patterns)           ││
+│  │ • Multimodal fusion (cross-attention)                       ││
+│  └─────────────────────────────────────────────────────────────┘│
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │ Workload Classification                                     ││
+│  │ • Model architecture analysis (transformer, CNN, RNN)       ││
+│  │ • Task type detection (classification, generation, etc.)    ││
+│  │ • Resource requirement estimation                           ││
+│  └─────────────────────────────────────────────────────────────┘│
+│  Output: Semantically Rich Graph (SRG) with full annotations    │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ### §3.2 Hybrid Interception Strategy
 
-Genie uses a **practical interception approach** that prioritizes `__torch_dispatch__` for most operations:
+Djinn uses a **practical interception approach** that prioritizes `__torch_dispatch__` for most operations:
 
 ```
 LAYER 1: Factory Functions (~20 functions)
@@ -227,7 +254,7 @@ The codebase includes a `device.py` module that attempts to register "remote_acc
 The current approach works with **any device specification**:
 - `device='remote_accelerator:0'` (string)
 - `device=torch.device('remote_accelerator', 0)` (torch.device)
-- Inside `genie.capture()` context
+- Inside `djinn.capture()` context
 - No C++ dependencies, easier to debug and maintain
 
 ### §3.3 LazyTensor: Symbolic Tensor Representation
@@ -278,7 +305,7 @@ class GraphBuilder:
 ```
 
 **Unified Graph Interface**:
-- LazyDAGAdapter exposes LazyTensor DAG through `GenieGraph` abstraction
+- LazyDAGAdapter exposes LazyTensor DAG through `DjinnGraph` abstraction
 - All graph algorithms work with the LazyTensor representation
 - Pattern recognition works on operation-level DAG
 - Semantic metadata stored separately (MetadataRegistry)
@@ -289,7 +316,7 @@ class GraphBuilder:
 @dataclass
 class SemanticMetadata:
     # Structural information
-    operation_type: str                    # Operation name
+    operation_type: str                   # Operation name
     tensor_shape: Optional[torch.Size]    # Output shape
     dtype: Optional[torch.dtype]          # Output dtype
     
@@ -312,7 +339,7 @@ class SemanticMetadata:
     priority: int                        # Execution priority
 ```
 
-**Node Annotations** (from genie/core/types.py):
+**Node Annotations** (from djinn/core/types.py):
 
 | Annotation | Description | Example Values | Purpose |
 |------------|-------------|-----------------|---------|
@@ -344,7 +371,7 @@ class SemanticMetadata:
 
 ---
 
-## §4. Scheduler: Semantic-Driven Optimization
+## §4. Layer 2: Scheduler - Semantic-Driven Optimization
 
 ### §4.1 Scheduler Architecture
 
@@ -373,7 +400,7 @@ The scheduler leverages SRG annotations to apply **context-aware optimizations**
 
 **Pattern**: Sequential operations with stateful data (e.g., LLM decode with KV cache)
 
-**Traditional approach**:
+**Naive approach without Leveraging Semantics**:
 ```
 Step 1: Transfer KV cache to GPU A
 Step 2: Execute decode on GPU A
@@ -381,7 +408,7 @@ Step 3: Transfer updated KV cache back
 Repeat for generation steps
 ```
 
-**Genie approach**:
+**Djinn approach**:
 ```
 Detect: KV_CACHE residency + LLM_DECODE phase
 Action: Pin KV cache and decoder to same GPU
@@ -398,7 +425,7 @@ GPU A: Conv1 → Conv2 → Conv3 (sequential)
 Result: Underutilized GPUs, no parallelism
 ```
 
-**Genie approach**:
+**Djinn approach**:
 ```
 Detect: Consecutive conv stages (from module hierarchy)
 Action: Pipeline across GPUs (Conv1 on A, Conv2 on B, Conv3 on C)
@@ -415,7 +442,7 @@ Always transfer intermediate results
 Result: Network bottleneck
 ```
 
-**Genie approach**:
+**Djinn approach**:
 ```
 Detect: Low FLOPs + high network latency
 Action: Recompute on remote device instead of transfer
@@ -456,207 +483,187 @@ The scheduler supports **multiple placement policies**:
 
 ---
 
-## §5. Backend: High-Performance Execution
+## §5. Layer 3: Server - Distributed Execution Coordination
 
-### §5.1 Backend Architecture
+### §5.1 Server Architecture
 
-The backend translates the scheduler's execution plan into **concrete execution** on remote GPUs through multiple transport layers and optimization components.
+The server layer handles **distributed execution coordination** - orchestrating requests across multiple GPUs while managing multi-tenancy, load balancing, and fault tolerance.
 
-**Current Implementation Stack**:
+**Key Components** (`djinn/server/`):
+
+**Request Coordination:**
+- `server.py`: Main server loop, request routing, multi-tenancy
+- `tcp_server.py`: TCP server implementation with async handling
+- `multi_tenant_coordinator.py`: Fairness, priority queues, resource allocation
+
+**Execution Engines:**
+- `subgraph_executor.py`: Fine-grained operation execution
+- `block_executor.py`: Coarse-grained block execution
+- `real_gpu_executor.py`: Direct GPU execution with memory management
+
+**JIT Compilation:**
+- `tensorrt_compiler.py`: TensorRT optimization with profiling
+- `fusion_compiler.py`: Operation fusion based on SRG patterns
+- `block_compiler.py`: TorchScript block compilation
+
+**Caching Systems:**
+- `gpu_cache.py`: Persistent GPU weight storage
+- `graph_cache.py`: Compiled graph caching with LRU eviction
+- `tensor_registry.py`: Remote tensor lifecycle management
+
+### §5.2 Execution Strategies
+
+**Smart Fragmentation** (Default):
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    BACKEND ARCHITECTURE                          │
-├─────────────────────────────────────────────────────────────────┤
-│  1. Network Transport: TCP with connection pooling              │
-│  2. Serialization: Dual-format (NumPy + torch.save)            │
-│  3. Remote Execution: Subgraph executor on remote GPU           │
-│  4. GPU Cache: Persistent weight storage (LRU)                  │
-│  5. Tensor Registry: Smart caching with version-aware keys      │
-│  6. SRG Fusion: Pattern-based grouping (Tier 1 active)          │
-│  7. Fault Tolerance: Error recovery and retry logic            │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### §5.2 Network Transport Layer
-
-Genie implements **TCP as the production transport** with HTTP fallback for development.
-
-#### TCP Transport (Production)
-
-**Architecture**: Async/await-based with connection pooling and length-prefixed framing
-
-**Key Features**:
-- ✅ Connection pooling (max 5 per target, automatic reuse)
-- ✅ Length-prefixed protocol (efficient, zero-copy capable)
-- ✅ Automatic health checking and adaptive timeouts
-- ✅ Multi-tensor batching support
-- ✅ Zero-copy serialization via memoryview
-- ✅ Connection warming for hot targets
-
-**Protocol Design**:
-```
-Frame 1: Transfer ID [4 bytes length] [N bytes: transfer_id]
-Frame 2: Metadata   [4 bytes length] [N bytes: metadata JSON]
-Frame 3: Tensor     [8 bytes: size]  [N bytes: tensor data]
+Client Request → Server → Subgraph Execution → Result
+    ↓              ↓            ↓
+Cached Graph → JIT Compile → GPU Execute
 ```
 
-**Connection Management**:
-- Pools managed per-target (host:port)
-- Intelligent reuse with health checks
-- Automatic connection warming for frequent targets
-- Statistics tracking (created, reused, closed, errors)
-
-### §5.3 Serialization Protocol
-
-**Dual-Format Design**: System automatically handles both optimized and standard formats
-
-#### Format Selection Strategy
-
-```python
-# Serialization (server → client)
-serialize_tensor(result, use_numpy=True)  # Uses NumPy format by default
-  ├─ Format: NUMPY001 header + numpy.save buffer
-  ├─ Speed: 44% faster than torch.save
-  └─ Fallback: Automatic torch.save if numpy fails
-
-# Deserialization (client receives)
-deserialize_tensor(data)  # Auto-detects format
-  ├─ If header == NUMPY001: Use np.load (fast path)
-  ├─ If header == TORCH001: Use torch.load
-  └─ If no header: Try torch.load (legacy compatibility)
+**Block Compilation** (Large graphs):
+```
+Client Request → Server → Block Execution → Result
+    ↓              ↓            ↓
+TorchScript → TensorRT → GPU Execute
 ```
 
-**Benefits**:
-- ✅ Transparent format detection
-- ✅ Backward compatible with old data
-- ✅ 44% speedup on serialization/deserialization
-- ✅ Gradual migration (no schema changes needed)
+**Multi-Tenant Coordination:**
+- **Fair Queuing**: Prevents starvation across tenants
+- **Load Balancing**: Distributes work across GPU cluster
+- **Resource Isolation**: Memory and compute quotas per tenant
 
-### §5.4 GPU Cache & Tensor Registry Integration
+### §5.3 Fault Tolerance & Recovery
 
-**Two-Layer Caching Strategy**:
+**Lineage-Based Recovery:**
+- Track operation dependencies for partial re-execution
+- Resume from last successful checkpoint
+- Minimize redundant computation on failures
 
-1. **GPU Cache** (genie/server/gpu_cache.py)
-   - Persistent model weight storage
-   - LRU eviction by model count
-   - Memory-aware capacity tracking
-
-2. **Tensor Registry** (genie/server/tensor_registry.py)
-   - Smart caching avoiding hashing overhead
-   - Version-aware keys: (model_id, tensor_name, version)
-   - Prevents redundant transfers across requests
-
-**Registry Design Principles**:
-```python
-# Key insight: Use metadata, not content hash
-cache_key = (model_id, tensor_name, version)  # ← Fast, no hashing
-# NOT: hashlib.sha256(tensor.tobytes())  # ← 50ms overhead!
-
-# Scope: Only persistent tensors (weights, KV cache)
-# Type: torch.nn.Parameter, persistent activations
-# NOT: Ephemeral activations (request-scoped)
-
-# Memory tracking: Track bytes per model
-# Refuse registration if exceeds per-model budget
-# Integration: Synced with GPU cache eviction
-```
-
-### §5.5 SRG-Driven Fusion
-
-**Current Implementation**: Tier 1 (Pattern Grouping) active
-
-**Architecture**:
-```python
-class SRGFusionCompiler:
-    """Tier 1: Pattern-based grouping without kernel compilation."""
-    
-    def fuse_subgraph(operations, semantic_metadata):
-        1. Group operations by execution phase
-        2. Identify fusable patterns (attention, conv blocks)
-        3. Create FusedBlock metadata (no actual fusion yet)
-        4. Return grouped blocks for efficient execution
-```
-
-**Pattern Recognition**:
-- ✅ Attention blocks: matmul → softmax → matmul chains
-- ✅ Convolution blocks: conv → batchnorm → activation
-- ✅ Phase-aware grouping: llm_prefill vs llm_decode vs vision_*
-
-**Data-Driven Compilation Policy** (for Tier 2/3):
-- ✅ Instrumentation: Track execution counts and latency per block
-- ✅ Profile-guided: Trigger compilation only for hot blocks (>1000 executions)
-- ✅ A/B testing: Validate improvements before promotion
-- ✅ Persistent caching: Store compiled artifacts (TorchScript, TensorRT)
-
-**Safety Guards**:
-```python
-# Pre-execution validation
-- No in-place operations
-- No side-effectful modules
-- No control-flow across fusion boundary
-
-# Runtime fallback
-- Detect unsupported ops at execution time
-- Fall back to unfused execution transparently
-```
-
-### §5.6 Optimization Executor
-
-**Purpose**: Integrate registry, fusion, and monitoring into unified execution pipeline
-
-**Flow**:
-```
-Request arrives
-  ↓
-1. Check Tensor Registry (cached weights? Skip transfer)
-  ↓
-2. Apply SRG Fusion (group operations by pattern)
-  ↓
-3. Execute fused blocks on GPU
-  ↓
-4. Track metrics (cache hits, fusion effectiveness, latency)
-  ↓
-5. Return result
-```
-
-**Configuration**:
-```python
-OptimizationConfig:
-  enable_tensor_registry: bool = True
-  tensor_registry_max_models: int = 5
-  tensor_registry_max_bytes_per_model: Optional[int] = None
-  
-  enable_srg_fusion: bool = True
-  enable_fusion_torchscript: bool = False  # Tier 2, disabled by default
-  enable_fusion_compilation: bool = False  # Tier 3, disabled by default
-  
-  profile_registry_overhead: bool = True
-  profile_fusion_overhead: bool = True
-```
-
-### §5.7 Zero-Copy Transport (Future)
-
-**Current**: TCP with serialization (10ms latency)
-
-**Planned**: DPDK + GPUDirect RDMA (sub-1ms latency)
-
-**Requirements**:
-- DPDK-compatible NIC (Mellanox ConnectX-5+)
-- GPUDirect RDMA support
-- IOMMU configuration
-- Kernel module integration
+**Automatic Failover:**
+- Detect GPU failures via heartbeat monitoring
+- Migrate execution to healthy GPUs
+- Preserve execution state where possible
 
 ---
 
-## §6. Lineage-Based Fault Tolerance
+## §6. Layer 4: Backend - Core Execution Runtime
 
-### §6.1 Fault Tolerance Model
+### §6.1 Backend Architecture
 
-Genie provides **lineage-based fault tolerance** inspired by dataflow systems (Spark, Ray).
+The backend provides **core execution runtime primitives** - the fundamental building blocks for GPU execution that are used by the server layer. Unlike the server layer which handles coordination and optimization, the backend focuses on low-level GPU management and basic protocols.
+
+**Key Components** (`djinn/backend/`):
+
+**Runtime Primitives** (`backend/runtime/`):
+- `initialization.py`: GPU setup, CUDA context management, async initialization
+- `gpu_memory.py`: Low-level GPU memory allocation and tracking
+- `interfaces.py`: Device abstraction layer
+- `transfer_manager.py`: Basic tensor transfer operations
+- `tcp_client.py`: Low-level TCP communication primitives
+
+**Memory Management** (`backend/memory/`):
+- `allocator.py`: Memory allocation strategies
+- `metrics.py`: Memory usage tracking and reporting
+
+**Core Abstractions**:
+- **Device Management**: GPU discovery, health monitoring, capability detection
+- **Memory Primitives**: Allocation, deallocation, transfer tracking
+- **Basic Protocols**: Low-level communication patterns used by server layer
+
+**Design Philosophy**: The backend is intentionally minimal - it provides the essential runtime infrastructure without making execution decisions. All intelligence (scheduling, optimization, coordination) lives in the layers above.
+
+---
+
+## §7. Data Flow & Request Lifecycle
+
+### §7.1 Four-Layer Data Flow
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    USER APPLICATION (PyTorch)                   │
+│                    No code changes required                     │
+└─────────────────────────────────────────────────────────────────┘
+                                │
+                                │ Transparent Interception
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  LAYER 1: FRONTEND (Intent Capture & Semantic Enrichment)      │
+│  • Tensor interception → LazyTensor DAG construction           │
+│  • Pattern recognition (attention, KV cache, convolution)      │
+│  • Phase detection (prefill/decode/vision)                     │
+│  • Cost estimation and workload classification                  │
+│  Output: Semantically Rich Graph (SRG)                          │
+└─────────────────────────────────────────────────────────────────┘
+                                │
+                                │ SRG (framework-agnostic)
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  LAYER 2: SCHEDULER (Semantic-Driven Optimization)              │
+│  • Cost-aware device placement using SRG annotations           │
+│  • Execution ordering with topological + semantic hints        │
+│  • Stateful co-location (KV cache with decoder)                │
+│  • Memory-aware placement with phase-specific budgets          │
+│  Output: ExecutionSchedule (device bindings + transfers)        │
+└─────────────────────────────────────────────────────────────────┘
+                                │
+                                │ Execution plan
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  LAYER 3: SERVER (Distributed Execution Coordination)           │
+│  • Request routing and multi-tenancy management                │
+│  • JIT compilation (TorchScript, TensorRT)                     │
+│  • Execution orchestration across distributed GPUs             │
+│  • Caching systems (GPU cache, graph cache, tensor registry)   │
+│  Output: Coordinated execution results                          │
+└─────────────────────────────────────────────────────────────────┘
+                                │
+                                │ Coordinated execution
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  LAYER 4: BACKEND (Core Execution Runtime)                      │
+│  • GPU memory management and device primitives                 │
+│  • Low-level execution and communication                       │
+│  Output: Concrete tensor results                                │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### §7.2 Request Lifecycle (12 Phases)
+
+**Phase 1-2: Frontend Processing**
+1. **Tensor Interception**: PyTorch operations transparently captured
+2. **LazyTensor Construction**: Symbolic tensors created for remote execution
+
+**Phase 3-4: Semantic Enrichment**
+3. **Graph Construction**: DAG built from tensor operations
+4. **Pattern Recognition**: Attention, KV cache, convolution patterns detected
+
+**Phase 5-6: Optimization**
+5. **Cost Estimation**: FLOPs, memory, operational intensity calculated
+6. **Device Placement**: Scheduler assigns operations to optimal GPUs
+
+**Phase 7-8: Execution Coordination**
+7. **Request Routing**: Server receives and queues execution requests
+8. **JIT Compilation**: TorchScript/TensorRT compilation as needed
+
+**Phase 9-10: Distributed Execution**
+9. **GPU Execution**: Operations executed on assigned devices
+10. **Result Coordination**: Partial results gathered and merged
+
+**Phase 11-12: Result Delivery**
+11. **Serialization**: Results formatted for network transfer
+12. **Client Delivery**: Final tensors returned to application
+
+---
+
+## §8. Implementation Details
+
+### §8.1 Fault Tolerance Model
+
+Djinn provides **lineage-based fault tolerance** inspired by dataflow systems (Spark, Ray).
 
 **Key Insight**: The SRG is the unit of lineage—nodes are deterministic operations, edges are explicit dependencies.
 
-### §6.2 Failure Detection and Recovery
+### §8.2 Failure Detection and Recovery
 
 **Failure types**:
 1. **Remote GPU failure**: GPU crashes, OOM, hardware error
@@ -679,7 +686,7 @@ Genie provides **lineage-based fault tolerance** inspired by dataflow systems (S
 - **Idempotent**: Side effects scoped to handle+epoch
 - **Cross-phase**: Lineage spans phases (can recover decode without rerunning prefill)
 
-### §6.3 Implementation
+### §8.3 Implementation
 
 **Remote object handles**:
 ```python
@@ -715,9 +722,9 @@ except RemoteExecutionError:
 
 ---
 
-## §7. Global Scheduling at Datacenter Scale
+## §9. Global Scheduling at Datacenter Scale
 
-### §7.1 Vision: Datacenter-Wide Optimization
+### §9.1 Vision: Datacenter-Wide Optimization
 
 The SRG enables a **broader vision** of autonomous resource management at datacenter scale.
 
@@ -732,20 +739,20 @@ The SRG enables a **broader vision** of autonomous resource management at datace
                         │           │           │
                         ▼           ▼           ▼
               ┌─────────────┬─────────────┬─────────────┐
-              │  Genie      │  Genie      │  Genie      │
+              │  Djinn      │  Djinn      │  Djinn      │
               │  Client 1   │  Client 2   │  Client N   │
               │  (SRG)      │  (SRG)      │  (SRG)      │
               └─────────────┴─────────────┴─────────────┘
 ```
 
-### §7.2 Semantic-Aware Global Decisions
+### §9.2 Semantic-Aware Global Decisions
 
 Armed with fleet-wide semantic context, the global scheduler can make **intelligent placement decisions**:
 
 #### Where: Heterogeneous Placement
 
 **Traditional**: Treat all GPUs as homogeneous  
-**Genie**: Analyze SRG to identify workload classes
+**Djinn**: Analyze SRG to identify workload classes
 
 ```
 Vision workloads (VISION_ENCODING phase):
@@ -761,7 +768,7 @@ Recommendation models (MULTIMODAL_FUSION):
 #### When: Elastic Scaling
 
 **Traditional**: Static resource allocation  
-**Genie**: Dynamic provisioning based on phase annotations
+**Djinn**: Dynamic provisioning based on phase annotations
 
 ```
 LLM Prefill (LLM_PREFILL phase):
@@ -776,7 +783,7 @@ LLM Decode (LLM_DECODE phase):
 #### How: Cross-Workload Orchestration
 
 **Traditional**: Isolated per-tenant scheduling  
-**Genie**: Cross-tenant optimization using semantic metadata
+**Djinn**: Cross-tenant optimization using semantic metadata
 
 ```
 Detect: Two users requesting same LLM (from SRG model_id)
@@ -788,7 +795,7 @@ Action: Preempt batch training job
 Result: Meet SLA for interactive workload
 ```
 
-### §7.3 Implementation Status
+### §9.3 Implementation Status
 
 **Current**: Local scheduler (single-client optimization)  
 **Future**: Global scheduler (fleet-wide optimization)
@@ -801,9 +808,9 @@ Result: Meet SLA for interactive workload
 
 ---
 
-## §8. End-to-End Request Lifecycle
+## §10. End-to-End Request Lifecycle
 
-### §8.1 Complete Flow (12 Phases)
+### §10.1 Complete Flow (12 Phases)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -893,7 +900,7 @@ Result: Meet SLA for interactive workload
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### §8.2 Performance Breakdown (GPT-2 Tiny, Warm)
+### §10.2 Performance Breakdown (GPT-2 Tiny, Warm)
 
 **⚠️ IMPORTANT: Performance measurements are environment-specific**
 
@@ -929,9 +936,9 @@ For specific performance characteristics, run the benchmarking suite on your har
 
 ---
 
-## §9. Design Principles
+## §11. Design Principles
 
-### §9.1 Separation of Concerns
+### §11.1 Separation of Concerns
 
 **Principle**: Cleanly separate "what" from "how/where"
 
@@ -942,7 +949,7 @@ For specific performance characteristics, run the benchmarking suite on your har
 
 **Benefit**: Each component can be developed, tested, and optimized independently.
 
-### §9.2 Pluggability
+### §11.2 Pluggability
 
 **Principle**: Support multiple implementations at each layer
 
@@ -953,7 +960,7 @@ For specific performance characteristics, run the benchmarking suite on your har
 
 **Benefit**: Adapt to different hardware, workloads, and deployment scenarios.
 
-### §9.3 Transparency
+### §11.3 Transparency
 
 **Principle**: No application code changes required
 
@@ -964,7 +971,7 @@ For specific performance characteristics, run the benchmarking suite on your har
 
 **Benefit**: Easy adoption, backward compatibility.
 
-### §9.4 Semantic-Awareness
+### §11.4 Semantic-Awareness
 
 **Principle**: Leverage application semantics for optimization
 
@@ -1014,7 +1021,7 @@ For specific performance characteristics, run the benchmarking suite on your har
 - **Gimbal** [OSDI'22]: Network-attached GPUs (driver-level)
 - **Prism** [SOSP'25]: Application-level disaggregation (manual tuning)
 
-**Genie's advantage**: Framework-level semantics enable automatic optimization.
+**Djinn's advantage**: Framework-level semantics enable automatic optimization.
 
 ### §11.2 ML Frameworks
 
@@ -1022,7 +1029,7 @@ For specific performance characteristics, run the benchmarking suite on your har
 - **JAX**: Functional transformations, JIT compilation
 - **TensorFlow**: Static graphs, distributed execution
 
-**Genie's approach**: Leverage framework abstractions for disaggregation.
+**Djinn's approach**: Leverage framework abstractions for disaggregation.
 
 ### §11.3 Dataflow Systems
 
@@ -1030,7 +1037,7 @@ For specific performance characteristics, run the benchmarking suite on your har
 - **Ray**: Distributed task execution (futures)
 - **Dask**: Lazy evaluation (task graphs)
 
-**Genie's inspiration**: Lineage-based recovery, lazy evaluation.
+**Djinn's inspiration**: Lineage-based recovery, lazy evaluation.
 
 ---
 
@@ -1038,7 +1045,7 @@ For specific performance characteristics, run the benchmarking suite on your har
 
 ### §11.1 Three-Phase Memory Optimization Timeline
 
-Genie's memory management evolves across three phases:
+Djinn's memory management evolves across three phases:
 
 **Phase 1: Reactive Optimization** ✅
 - Enhanced GPU cache with memory-aware eviction
@@ -1057,7 +1064,7 @@ Genie's memory management evolves across three phases:
 
 ### §11.2 Prometheus Metrics Integration
 
-**File**: `genie/server/memory_metrics.py` (800+ LOC)
+**File**: `djinn/server/memory_metrics.py` (800+ LOC)
 
 Comprehensive metrics across all memory operations:
 - GPU cache: hits, misses, evictions, memory usage, hit rates
@@ -1075,7 +1082,7 @@ Comprehensive metrics across all memory operations:
 
 ### §11.3 Memory Pressure Handling
 
-**File**: `genie/server/memory_pressure_handler.py` (400+ LOC)
+**File**: `djinn/server/memory_pressure_handler.py` (400+ LOC)
 
 Proactive detection and recovery from memory pressure:
 
@@ -1100,7 +1107,7 @@ OOM (100%)          → Recovery via all eviction sources
 
 ### §11.4 Adaptive Budget Tuning
 
-**File**: `genie/server/adaptive_budget_tuner.py` (300+ LOC)
+**File**: `djinn/server/adaptive_budget_tuner.py` (300+ LOC)
 
 Learns optimal phase-specific memory allocations from execution patterns:
 
@@ -1166,7 +1173,7 @@ Ongoing:     Gradually shift towards optimal allocation
 
 ## §13. Conclusion
 
-Genie demonstrates **complete memory management for semantic-driven GPU disaggregation**:
+Djinn demonstrates **complete memory management for semantic-driven GPU disaggregation**:
 
 ✅ **Phase 1**: Reactive optimization (memory-aware cache + session pinning)  
 ✅ **Phase 2**: Semantic intelligence (lifetime eviction + phase budgets + cost model)  
@@ -1188,8 +1195,3 @@ Genie demonstrates **complete memory management for semantic-driven GPU disaggre
 For performance characteristics specific to your workloads and hardware, benchmark using the provided testing suite.
 
 ---
-
-**Last Updated**: November 2, 2025  
-**Status**: 🚧 Research Prototype (Frontend + Basic Backend)  
-**Memory Management**: Phase 1 reactive only (advanced phases not implemented)
-

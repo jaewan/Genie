@@ -14,7 +14,7 @@ Validates:
 import torch
 import pytest
 import logging
-import genie
+import djinn
 
 logger = logging.getLogger(__name__)
 

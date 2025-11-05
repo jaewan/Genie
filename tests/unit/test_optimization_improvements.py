@@ -19,11 +19,11 @@ import torch.nn as nn
 import threading
 import time
 import logging
-import genie
-from genie.semantic.pattern_registry import PatternRegistry, MatchingMode
-from genie.semantic.annotator import SemanticAnnotator
-from genie.semantic.pattern_index import HierarchicalPatternIndex, PatternSignature
-from genie.core.capture import capture, get_graph
+import djinn
+from djinn.frontend.semantic.pattern_registry import PatternRegistry, MatchingMode
+from djinn.frontend.semantic.annotator import SemanticAnnotator
+from djinn.frontend.semantic.pattern_index import HierarchicalPatternIndex, PatternSignature
+from djinn.core.capture import capture, get_graph
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +112,7 @@ class TestHierarchicalPatternIndex:
 
     def test_real_pattern_metadata_extraction(self):
         """Test that real patterns have proper metadata for indexing."""
-        from genie.patterns.advanced_patterns import AdvancedLLMPattern
+        from djinn.patterns.advanced_patterns import AdvancedLLMPattern
 
         pattern = AdvancedLLMPattern()
         signature = PatternSignature.from_pattern_plugin(pattern)

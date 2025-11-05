@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 import torch
 
-from genie.server.kv_session_manager import KVSessionManager, KVSession
+from djinn.server.kv_session_manager import KVSessionManager, KVSession
 
 
 @pytest.mark.asyncio

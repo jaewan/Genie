@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 import torch
 
-from genie.server.gpu_cache import SimpleGPUCache
+from djinn.server.gpu_cache import SimpleGPUCache
 
 
 class TestGPUCacheMemoryAware:

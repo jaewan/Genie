@@ -20,10 +20,10 @@ import psutil
 import os
 from typing import List, Dict, Any
 
-import genie
-from genie.core.capture import capture, get_graph
-from genie.semantic.annotator import SemanticAnnotator
-from genie.semantic.pattern_registry import PatternRegistry, MatchingMode
+import djinn
+from djinn.core.capture import capture, get_graph
+from djinn.frontend.semantic.annotator import SemanticAnnotator
+from djinn.frontend.semantic.pattern_registry import PatternRegistry, MatchingMode
 
 # Optional memory profiling
 try:
@@ -227,7 +227,7 @@ class TestMemoryLeaks:
 
     def test_lazy_tensor_shape_cache_bounds(self):
         """Test that LazyTensor shape cache stays bounded."""
-        from genie.core.lazy_tensor import LazyTensor
+        from djinn.frontend.core.lazy_tensor import LazyTensor
 
         # Clear existing cache
         LazyTensor._shape_cache.clear()
