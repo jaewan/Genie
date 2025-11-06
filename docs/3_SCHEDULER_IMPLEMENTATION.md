@@ -2,7 +2,7 @@
 
 **Status**: ✅ Complete Implementation
 **Phase**: 🔵 Phase 2 (Semantic Analysis & Scheduling)
-**Last Updated**: November 5, 2025
+**Last Updated**: November 6, 2025
 **Based on**: Complete 3-Stage Implementation
 
 ---
@@ -74,12 +74,12 @@ Output: ExecutionSchedule
 | **Cost Estimator** | `djinn/scheduler/core/cost_estimator.py` | 600 | Latency prediction |
 | **Semantic Analyzer** | `djinn/frontend/semantic/analyzer.py` | ~170 | Multi-tier semantic analysis (dynamic hooks, pattern matching) |
 | **Pattern Matchers** | `djinn/frontend/semantic/pattern_matcher.py` | ~270 | Graph pattern recognition for workload analysis |
-| **Fusion Compiler** | `djinn/backend/server/fusion_compiler.py` | 280+ | SRG-driven pattern grouping |
+| **Fusion Compiler** | `djinn/server/fusion_compiler.py` | 280+ | SRG-driven pattern grouping |
 | **Network Topology** | `djinn/core/network_topology.py` | 260 | Network info & device management |
 | **Graph Interface** | `djinn/core/graph_interface.py` | 497 | Unified graph abstraction |
 | **Placement Policy** | `djinn/scheduler/strategies/placement.py` | 499 | Device assignment & constraints |
-| **Tensor Registry** | `djinn/backend/server/tensor_registry.py` | 400+ | Smart tensor caching (integration) |
-| **Performance Monitor** | `djinn/backend/server/performance_monitor.py` | 417 | Metrics collection for optimization |
+| **Tensor Registry** | `djinn/server/tensor_registry.py` | 400+ | Smart tensor caching (integration) |
+| **Performance Monitor** | `djinn/server/performance_monitor.py` | 417 | Metrics collection for optimization |
 
 **Note on Integration**: The scheduler works with multiple components for optimization:
 - **Semantic Analyzer** provides multi-tier analysis (dynamic hooks, pattern matching, runtime context)
