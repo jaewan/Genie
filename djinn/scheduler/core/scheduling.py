@@ -108,7 +108,7 @@ class Scheduler:
         schedule.strategy = self._determine_strategy(groups)
 
         # Add metadata
-        schedule.metadata['total_nodes'] = len(list(graph.graph.nodes))
+        schedule.metadata['total_nodes'] = len(list(graph.nodes()))
         schedule.metadata['total_groups'] = len(groups)
 
         logger.info(f"Created basic schedule with {schedule.total_stages} stages and {len(groups)} groups")

@@ -311,9 +311,15 @@ class SubgraphBuilder:
     - Optimize transfer vs compute tradeoff
     """
 
-    def build_remote_subgraph(self, target_tensor: LazyTensor) -> RemoteSubgraph:
+    def build_remote_subgraph(self, target_tensor: LazyTensor,
+                             defer_metadata: bool = True) -> RemoteSubgraph:
         """
         Extract subgraph for remote execution.
+
+        Args:
+            target_tensor: Final tensor to compute
+            defer_metadata: If True, don't access shape/metadata during building
+                           to avoid triggering expensive lazy computation
 
         Algorithm:
         1. Start from target tensor
@@ -326,24 +332,25 @@ class SubgraphBuilder:
         visited = set()
         input_tensors = {}
 
+        # ✅ CRITICAL: Don't access shape/metadata during traversal to avoid triggering computation
         # Iterative post-order traversal to avoid recursion limit (fixes GPT-2 XL)
         stack = [(target_tensor, False)]  # (tensor, children_processed)
         pending = set()  # Track nodes waiting for children to be processed
-        
+
         while stack:
             tensor, children_processed = stack.pop()
-            
+
             if not isinstance(tensor, LazyTensor):
                 continue
-            
+
             tensor_id = id(tensor)
-            
+
             # Skip if already fully processed
             if tensor_id in visited:
                 continue
-            
-            # Check if this is an external input
-            if self._is_external_input(tensor):
+
+            # ✅ Check if this is an external input WITHOUT accessing shape
+            if self._is_external_input_by_operation(tensor):
                 input_tensors[tensor_id] = tensor
                 visited.add(tensor_id)
                 continue
@@ -385,6 +392,24 @@ class SubgraphBuilder:
             'aten::eye', 'aten::full'
         }
         return tensor.operation in factory_ops
+
+    def _is_external_input_by_operation(self, tensor: LazyTensor) -> bool:
+        """
+        Check if tensor is an external input WITHOUT accessing shape.
+
+        This avoids triggering expensive lazy shape computation during subgraph building.
+        """
+        # ✅ Access operation directly to avoid property triggers
+        operation = object.__getattribute__(tensor, '_operation')
+
+        # Factory operations create tensors from nothing
+        factory_ops = {
+            'aten::randn', 'aten::zeros', 'aten::ones', 'aten::empty',
+            'aten::tensor', 'aten::as_tensor', 'aten::from_numpy',
+            'aten::arange', 'aten::linspace', 'aten::logspace',
+            'aten::eye', 'aten::full'
+        }
+        return operation in factory_ops
 
     def _should_include_in_subgraph(self, tensor: LazyTensor) -> bool:
         """Check if tensor should be included in remote subgraph."""

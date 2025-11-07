@@ -43,7 +43,7 @@ STATS = {
 
 # Import optimized serialization
 try:
-    from ..core.serialization import serialize_tensor, deserialize_tensor
+    from .serialization import serialize_tensor, deserialize_tensor
     OPTIMIZED_SERIALIZATION_AVAILABLE = True
     logger.info("✅ Optimized serialization module loaded")
 except ImportError:
@@ -146,8 +146,10 @@ async def handle_execute_subgraph(request_data: bytes, writer) -> None:
         # Serialize result
         try:
             if USE_OPTIMIZED_SERIALIZATION and OPTIMIZED_SERIALIZATION_AVAILABLE:
+                logger.info("✅ Using optimized numpy.save serialization")
                 result_bytes = serialize_tensor(result, use_numpy=True)
             else:
+                logger.warning("⚠️ Using fallback torch.save serialization")
                 result_buffer = io.BytesIO()
                 torch.save(result, result_buffer)
                 result_bytes = result_buffer.getvalue()

@@ -571,6 +571,128 @@ class DjinnCoordinator:
             # Normal execution without profiling
             return await self._execute_internal(operation, inputs, target, timeout)
 
+    async def execute_remote_subgraph(self,
+                                      subgraph: Dict[str, Any],
+                                      input_data: Dict[str, torch.Tensor],
+                                      target: str,
+                                      timeout: float = 30,
+                                      graph_id: Optional[str] = None,
+                                      enable_differential: bool = True) -> torch.Tensor:
+        """
+        Execute subgraph remotely (O(1) network transfer).
+
+        This is the KEY optimization - send entire graph once!
+        Reduces O(n) individual operations to O(1) subgraph execution.
+
+        Args:
+            subgraph: Serialized RemoteSubgraph from SmartSubgraphBuilder
+            input_data: Dict of tensor_id -> input tensor for external inputs
+            target: Server address ('hostname:port')
+            timeout: Max wait time in seconds
+
+        Returns:
+            Result tensor (on CPU)
+
+        Raises:
+            RuntimeError: If execution fails or times out
+        """
+        import pickle
+        import time
+
+        logger.info(f"🚀 Subgraph execution: {len(subgraph.get('operations', []))} ops, "
+                   f"{len(input_data)} inputs → {target}")
+
+        start_time = time.perf_counter()
+
+        try:
+            # ✅ Week 3: Use DifferentialGraphProtocol for iterative workloads
+            if enable_differential and graph_id:
+                from ...server.differential_graph import DifferentialGraphProtocol
+
+                # Initialize protocol if not exists
+                if not hasattr(self, '_differential_protocol'):
+                    self._differential_protocol = DifferentialGraphProtocol()
+
+                # Send graph using differential protocol
+                message_data = self._differential_protocol.send_graph(
+                    graph_id=graph_id,
+                    graph=subgraph,
+                    is_update=self._differential_protocol.client_versions.get(graph_id, 0) > 0
+                )
+
+                logger.debug(f"Differential protocol: {message_data.get('type', 'unknown')}")
+            else:
+                # Standard full subgraph transmission
+                message_data = {
+                    'type': 'full_subgraph',
+                    'subgraph': subgraph
+                }
+
+            # Establish connection
+            host, port_str = target.split(':')
+            port = int(port_str)
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port),
+                timeout=5.0
+            )
+
+            # Prepare message
+            message = {
+                'type': 0x03,  # EXECUTE_SUBGRAPH (from tcp_server.py)
+                'subgraph_data': message_data,  # Use processed graph data
+                'input_data': {
+                    k: pickle.dumps(v) for k, v in input_data.items()
+                },
+                'timeout': timeout
+            }
+
+            # Send subgraph request
+            data = pickle.dumps(message)
+            size_bytes = len(data).to_bytes(4, 'big')
+
+            writer.write(size_bytes)
+            writer.write(data)
+            await writer.drain()
+
+            # Receive result - read message type first
+            msg_type_bytes = await reader.readexactly(1)
+            msg_type = msg_type_bytes[0]
+
+            size_bytes = await reader.readexactly(4)
+            size = int.from_bytes(size_bytes, 'big')
+            result_data = await reader.readexactly(size)
+
+            if msg_type == 0x04:  # RESULT
+                # Result is tensor bytes - deserialize with optimized method
+                try:
+                    from ...server.serialization import deserialize_tensor
+                    response = deserialize_tensor(result_data)
+                except Exception as e:
+                    logger.warning(f"Optimized deserialization failed: {e}, falling back to torch.load")
+                    # Fallback to torch.load for tensor bytes
+                    import io
+                    result_buffer = io.BytesIO(result_data)
+                    response = torch.load(result_buffer)
+            elif msg_type == 0x05:  # ERROR
+                # Error is string bytes
+                response = result_data.decode()
+                raise RuntimeError(f"Server error: {response}")
+            else:
+                raise RuntimeError(f"Unknown message type: {msg_type}")
+
+            writer.close()
+            await writer.wait_closed()
+
+            execution_time = time.perf_counter() - start_time
+            logger.info(f"✅ Subgraph execution complete: {response.shape if hasattr(response, 'shape') else 'unknown'} in {execution_time:.3f}s")
+
+            return response
+
+        except Exception as e:
+            execution_time = time.perf_counter() - start_time
+            logger.error(f"❌ Subgraph execution failed after {execution_time:.3f}s: {e}")
+            raise RuntimeError(f"Subgraph execution failed: {e}") from e
+
     async def _execute_internal(
         self,
         operation: str,

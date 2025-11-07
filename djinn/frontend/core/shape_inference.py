@@ -348,12 +348,24 @@ def _infer_softmax_shape(inputs: List[Any], kwargs: Dict[str, Any]) -> torch.Siz
     return input_shape
 
 
+def _infer_factory_shape(inputs: List[Any], kwargs: Dict[str, Any]) -> torch.Size:
+    """Infer shape for factory functions like randn, zeros, ones."""
+    # For factory functions, inputs contain the shape arguments
+    # e.g., torch.randn(2, 3) -> inputs = [2, 3] -> shape = (2, 3)
+    if inputs and all(isinstance(x, int) for x in inputs):
+        return torch.Size(inputs)
+    return torch.Size([])
+
 # Register special handlers
 ShapeInference.SPECIAL_HANDLERS['aten::reshape'] = _infer_reshape_shape
 ShapeInference.SPECIAL_HANDLERS['aten::view'] = _infer_reshape_shape
 ShapeInference.SPECIAL_HANDLERS['aten::embedding'] = _infer_embedding_shape
 ShapeInference.SPECIAL_HANDLERS['aten::softmax'] = _infer_softmax_shape
 ShapeInference.SPECIAL_HANDLERS['aten::_softmax'] = _infer_softmax_shape
+ShapeInference.SPECIAL_HANDLERS['aten::randn'] = _infer_factory_shape
+ShapeInference.SPECIAL_HANDLERS['aten::zeros'] = _infer_factory_shape
+ShapeInference.SPECIAL_HANDLERS['aten::ones'] = _infer_factory_shape
+ShapeInference.SPECIAL_HANDLERS['aten::empty'] = _infer_factory_shape
 
 
 # ============================================================================

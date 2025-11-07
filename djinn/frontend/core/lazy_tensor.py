@@ -623,7 +623,10 @@ class LazyTensor(torch.Tensor):
         object.__setattr__(self, '_inputs', inputs)
         object.__setattr__(self, '_kwargs', kwargs or {})
         object.__setattr__(self, '_tensor_id', id(self))
-        object.__setattr__(self, '_shape', shape)
+
+        # ✅ OPTIMIZATION: Defer ALL shape computation until property access
+        # Never store computed shapes during capture - always compute lazily
+        object.__setattr__(self, '_shape', None)
         object.__setattr__(self, '_dtype', dtype)
         object.__setattr__(self, '_device', device)
         
@@ -811,38 +814,18 @@ class LazyTensor(torch.Tensor):
                                 inferred_device = arg._original_device or arg.device
                                 break
 
-            # ✅ NEW: Capture semantic metadata
-            from ..semantic.metadata_capture import get_metadata_capture
-            metadata = get_metadata_capture().capture_metadata(
-                operation=op_name,
-                inputs=list(args),
-                kwargs=kwargs
-            )
+            # ✅ OPTIMIZATION: Defer expensive computations until actually needed
+            # Don't compute shape, metadata, dtype, or device during capture
+            # These will be computed lazily when the corresponding properties are accessed
 
-            # ✅ NEW: Use ShapeInference system for local metadata
-            from .shape_inference import ShapeInference
-            
-            try:
-                inferred_shape = ShapeInference.infer_shape(op_name, list(args), kwargs)
-            except Exception:
-                # Fallback: use empty shape if inference fails
-                inferred_shape = torch.Size([])
-            
-            # Infer dtype using ShapeInference (not the old method)
+            # For now, keep basic metadata capture if needed for graph building
+            metadata = None  # Defer metadata computation
+
+            # Defer all shape/dtype/device inference until property access
+            inferred_shape = None
             inferred_dtype = None
-            if 'dtype' not in kwargs:
-                try:
-                    inferred_dtype = ShapeInference.infer_dtype(op_name, list(args), kwargs)
-                except Exception:
-                    inferred_dtype = torch.float32
-            else:
-                inferred_dtype = kwargs['dtype']
-            
             if inferred_device is None:
-                try:
-                    inferred_device = ShapeInference.infer_device(op_name, list(args), kwargs)
-                except Exception:
-                    inferred_device = torch.device('cpu')
+                inferred_device = torch.device('cpu')
             
             # Create LazyTensor with inferred metadata
             # Remove dtype from kwargs if we're providing it as a parameter to avoid conflicts
@@ -1822,61 +1805,110 @@ class LazyTensor(torch.Tensor):
 
     def _materialize_local(self) -> torch.Tensor:
         """
-        Materialize locally using the graph builder.
-        
-        This is the default execution path when remote is not available.
+        Materialize locally using optimized execution pipeline.
+
+        Week 3 Integration: Uses MaterializationOptimizer for:
+        - Topological sort for batch execution
+        - CUDA streams for pipelining
+        - Pinned memory for faster transfers
+        - Reduced Python overhead
+
+        Falls back to graph builder if optimization fails.
         """
-        from .graph_builder import get_global_builder
-        builder = get_global_builder()
-        return builder.materialize(self)
+        try:
+            # ✅ Week 3: Use MaterializationOptimizer for optimized local execution
+            from ...server.materialization_optimizer import MaterializationOptimizer
+            from ...server.executor import _executor
+
+            optimizer = MaterializationOptimizer(
+                enable_pinned_memory=True,
+                enable_streams=True
+            )
+
+            logger.debug("Using MaterializationOptimizer for local execution")
+            return optimizer.execute_optimized(self, _executor)
+
+        except Exception as e:
+            logger.warning(f"MaterializationOptimizer failed: {e}, falling back to graph builder")
+            # Fallback to original implementation
+            from .graph_builder import get_global_builder
+            builder = get_global_builder()
+            return builder.materialize(self)
 
     def _materialize_remote(self) -> torch.Tensor:
         """
-        Materialize remotely by sending to server.
-        
-        This uses a synchronous wrapper around async operations.
-        Handles:
-        1. Remote coordinator instance
-        2. Server connection
-        3. Tensor serialization/deserialization
+        Execute remotely using subgraph optimization.
+
+        KEY CHANGE: Send entire computation DAG instead of single operation!
+        This reduces O(n) network round-trips to O(1).
         """
         from ...backend.runtime.initialization import get_runtime_state
+        from ...server.smart_subgraph_builder import SmartSubgraphBuilder, FragmentationConfig
+        from ...server.subgraph_cache import get_subgraph_cache
         import asyncio
-        
+
         state = get_runtime_state()
         coordinator = state.coordinator
-        
+
         if not coordinator:
             logger.warning("No coordinator available, falling back to local execution")
             return self._materialize_local()
-        
+
         try:
-            # Extract operation and inputs from this tensor's DAG
-            operation = self.operation
-            inputs = self.inputs
-            
-            logger.debug(f"Remote execute: {operation}")
-            
-            # Create async function to execute remotely
-            async def execute_remote_async():
-                result = await coordinator.execute_remote_operation(
-                    operation=operation,
-                    inputs=inputs,
-                    target=state.server_address,
-                    timeout=30
+            # ✅ NEW: Use cached subgraph builder
+            builder = SmartSubgraphBuilder(
+                FragmentationConfig(
+                    memory_limit_gb=8.0,
+                    network_gbps=100.0,
+                    prefer_local_compute=False  # We want remote execution
                 )
-                return result
-            
-            # Run async operation in sync context
+            )
+
+            # ✅ Get or build subgraph (with caching!)
+            cache = get_subgraph_cache()
+            subgraph = cache.get_or_build(self, builder)
+
+            logger.info(f"🚀 Subgraph ready: {len(subgraph.operations)} ops, "
+                       f"{len(subgraph.input_tensors)} inputs")
+
+            # Prepare input data (materialize external inputs)
+            input_data = {}
+            for tensor_id, tensor in subgraph.input_tensors.items():
+                if isinstance(tensor, LazyTensor):
+                    # Materialize factory operations locally
+                    if self._is_factory_operation(tensor):
+                        materialized = self._materialize_factory_op(tensor)
+                        input_data[str(tensor_id)] = materialized
+                    else:
+                        # This shouldn't happen if builder works correctly
+                        logger.warning(f"Non-factory external input: {tensor.operation}")
+                        input_data[str(tensor_id)] = tensor._materialize_local()
+                else:
+                    input_data[str(tensor_id)] = tensor
+
+            # Send entire subgraph for execution
+            # ✅ Week 3: Enable differential updates for iterative workloads
+            graph_id = f"subgraph_{id(self)}"  # Use tensor ID as graph identifier
+
+            async def execute_subgraph_async():
+                return await coordinator.execute_remote_subgraph(
+                    subgraph=subgraph.serialize(),
+                    input_data=input_data,
+                    target=state.server_address,
+                    timeout=30,
+                    graph_id=graph_id,  # Enable differential protocol
+                    enable_differential=True
+                )
+
+            # Run async operation
             try:
-                # Try to get running event loop (we're in a thread or nested context)
                 loop = asyncio.get_running_loop()
             except RuntimeError:
                 # No running loop, create new one
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 try:
-                    result = loop.run_until_complete(execute_remote_async())
+                    result = loop.run_until_complete(execute_subgraph_async())
                     return result
                 finally:
                     loop.close()
@@ -1885,10 +1917,43 @@ class LazyTensor(torch.Tensor):
                 # This shouldn't happen in normal usage, but handle it gracefully
                 logger.warning("Nested event loop detected, falling back to local execution")
                 return self._materialize_local()
-        
+
         except Exception as e:
-            logger.warning(f"Remote execution failed: {e}", exc_info=True)
+            logger.warning(f"Subgraph execution failed: {e}, falling back to local", exc_info=True)
             return self._materialize_local()
+
+    def _is_factory_operation(self, tensor: LazyTensor) -> bool:
+        """Check if tensor represents a factory operation (creates data from scratch)."""
+        factory_ops = {
+            'aten::randn', 'aten::zeros', 'aten::ones', 'aten::empty',
+            'aten::tensor', 'aten::as_tensor', 'aten::from_numpy'
+        }
+        return tensor.operation in factory_ops
+
+    def _materialize_factory_op(self, tensor: LazyTensor) -> torch.Tensor:
+        """
+        Materialize a factory operation locally.
+
+        Factory operations create tensors from scratch, so we can execute them
+        locally without needing the remote GPU.
+        """
+        try:
+            # Execute the factory operation locally
+            from .shape_inference import ShapeInference
+
+            # Get operation function
+            op_func = getattr(torch.ops.aten, tensor.operation.split('::')[1])
+
+            # Execute with the stored arguments
+            result = op_func(*tensor.inputs, **tensor.kwargs)
+
+            logger.debug(f"Materialized factory op {tensor.operation} locally")
+            return result
+
+        except Exception as e:
+            logger.warning(f"Failed to materialize factory op {tensor.operation}: {e}")
+            # Fallback to local DAG execution
+            return tensor._materialize_local()
 
 
     # Operations that force materialization
@@ -2360,36 +2425,64 @@ class LazyTensor(torch.Tensor):
 
     @property
     def metadata(self) -> Dict[str, Any]:
-        """Get semantic metadata for this tensor."""
-        return object.__getattribute__(self, '_metadata')
+        """
+        Lazy metadata computation.
 
-    # Lazy shape inference - only compute when actually needed
-    def _ensure_shape(self):
-        """Ensure shape is properly inferred."""
-        current_shape = object.__getattribute__(self, '_shape')
-        if current_shape is None or (len(current_shape) == 0 and self.operation != 'aten::tensor'):
-            # Need to infer shape
-            # ✅ Use ShapeInference for consistent shape inference
-            from .shape_inference import ShapeInference
-            try:
-                inferred_shape = ShapeInference.infer_shape(self.operation, self.inputs, self.kwargs)
-                if inferred_shape is not None:
-                    object.__setattr__(self, '_shape', inferred_shape)
-            except Exception as e:
-                logger.debug(f"Shape inference failed for {self.operation}: {e}")
-                # Keep empty shape if inference fails
-                pass
+        Only computes when accessed (e.g., during scheduling).
+        Not computed during capture!
+        """
+        # Check if already computed (cached)
+        cached_metadata = object.__getattribute__(self, '_metadata')
+        if cached_metadata is not None:
+            return cached_metadata
+
+        # Compute now (only once) - LAZY COMPUTATION
+        from ..semantic.metadata_capture import get_metadata_capture
+        try:
+            computed_metadata = get_metadata_capture().capture_metadata(
+                operation=self.operation,
+                inputs=self.inputs,
+                kwargs=self.kwargs
+            )
+            # Cache the result
+            object.__setattr__(self, '_metadata', computed_metadata)
+            return computed_metadata
+        except Exception as e:
+            logger.debug(f"Metadata capture failed for {self.operation}: {e}")
+            # Cache empty dict to avoid repeated failures
+            empty_metadata = {}
+            object.__setattr__(self, '_metadata', empty_metadata)
+            return empty_metadata
+
 
     @property
     def shape(self) -> torch.Size:
-        """Get the shape of this tensor."""
-        # Prevent recursion when accessing shape
-        from .interception_control import get_current_context, InterceptionContext
-        if get_current_context() != InterceptionContext.NONE:
-            return object.__getattribute__(self, '_shape') or torch.Size([])
+        """
+        Lazy shape computation.
 
-        self._ensure_shape()
-        return object.__getattribute__(self, '_shape') or torch.Size([])
+        Only computes when accessed, not during capture!
+        Most operations never access shape during capture.
+        """
+        # Check if already computed (cached)
+        cached_shape = object.__getattribute__(self, '_shape')
+        if cached_shape is not None:
+            return cached_shape
+
+        # Compute now (only once) - LAZY COMPUTATION
+        from .shape_inference import ShapeInference
+        try:
+            inferred_shape = ShapeInference.infer_shape(self.operation, self.inputs, self.kwargs)
+            if inferred_shape is not None:
+                # Cache the result
+                object.__setattr__(self, '_shape', inferred_shape)
+                return inferred_shape
+        except Exception as e:
+            logger.debug(f"Shape inference failed for {self.operation}: {e}")
+
+        # Fallback to empty shape
+        fallback_shape = torch.Size([])
+        object.__setattr__(self, '_shape', fallback_shape)
+        return fallback_shape
 
     @property
     def dtype(self) -> torch.dtype:

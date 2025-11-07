@@ -153,7 +153,7 @@ class GraphBuilder:
             - Fallback for unsupported ops
             - Error handling and reporting
         """
-        from .executor import execute_subgraph
+        from ...server.executor import execute_subgraph
         
         # Execute the graph
         result = execute_subgraph(target_tensor)

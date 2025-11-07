@@ -37,6 +37,7 @@ class OptimizationStats:
     registry_lookup_ms: float = 0.0
     fusion_applied: bool = False
     fusion_grouping_ms: float = 0.0
+    tensorrt_compiled: bool = False
     execution_ms: float = 0.0
     transfer_ms: float = 0.0
     total_ms: float = 0.0
@@ -63,6 +64,9 @@ class OptimizationExecutor:
         # Optimization components
         self.registry: Optional[SmartTensorRegistry] = None
         self.compiler: Optional[SRGFusionCompiler] = None
+        self.memory_manager: Optional['PhaseAwareMemoryManager'] = None
+        self.pressure_handler: Optional['MemoryPressureHandler'] = None
+        self.tensorrt_compiler: Optional['TensorRTCompiler'] = None
         self.monitor = PerformanceMonitor()
         
         # Configuration
@@ -94,6 +98,43 @@ class OptimizationExecutor:
                 enable_compilation=self.opt_config.enable_fusion_compilation
             )
             logger.info("✓ SRGFusionCompiler initialized")
+
+        # ✅ Week 3: Initialize PhaseAwareMemoryManager
+        try:
+            # Get GPU memory info
+            if torch.cuda.is_available():
+                gpu_memory_mb = torch.cuda.get_device_properties(self.gpu_id).total_memory / (1024 * 1024)
+                from .semantic_memory_manager import PhaseAwareMemoryManager
+                self.memory_manager = PhaseAwareMemoryManager(total_gpu_memory_mb=gpu_memory_mb)
+                logger.info("✓ PhaseAwareMemoryManager initialized")
+            else:
+                logger.info("⚠️ CUDA not available, skipping PhaseAwareMemoryManager")
+        except Exception as e:
+            logger.warning(f"Failed to initialize PhaseAwareMemoryManager: {e}")
+
+        # ✅ Week 3: Initialize MemoryPressureHandler
+        try:
+            if torch.cuda.is_available():
+                gpu_memory_mb = torch.cuda.get_device_properties(self.gpu_id).total_memory / (1024 * 1024)
+                from .memory_pressure_handler import MemoryPressureHandler
+                self.pressure_handler = MemoryPressureHandler(
+                    total_gpu_memory_mb=gpu_memory_mb,
+                    warning_threshold_percent=80.0,
+                    critical_threshold_percent=95.0
+                )
+                logger.info("✓ MemoryPressureHandler initialized")
+            else:
+                logger.info("⚠️ CUDA not available, skipping MemoryPressureHandler")
+        except Exception as e:
+            logger.warning(f"Failed to initialize MemoryPressureHandler: {e}")
+
+        # ✅ Week 3: Initialize TensorRTCompiler
+        try:
+            from .tensorrt_compiler import TensorRTCompiler
+            self.tensorrt_compiler = TensorRTCompiler(gpu_id=self.gpu_id)
+            logger.info("✓ TensorRTCompiler initialized")
+        except Exception as e:
+            logger.warning(f"Failed to initialize TensorRTCompiler: {e}")
 
     async def execute(
         self,
@@ -169,7 +210,32 @@ class OptimizationExecutor:
                         # Note: Could store blocks in optimized_request for later use
                         # when actual kernel fusion (Tier 2/3) is implemented
             
-            # Step 3: Execute subgraph (with optimizations applied)
+            # Step 3: Apply TensorRT compilation for repeated executions
+            tensorrt_start = time.time()
+            if self.tensorrt_compiler and model_id:
+                # Check if we should compile to TensorRT
+                profile = self.tensorrt_compiler.get_profile(model_id)
+                if profile.should_compile_tensorrt():
+                    logger.info(f"Compiling {model_id} to TensorRT for optimization")
+                    try:
+                        self.tensorrt_compiler.compile_model(
+                            model_id=model_id,
+                            subgraph=optimized_request,
+                            input_shapes={k: v.shape for k, v in input_data.items()}
+                        )
+                        stats.tensorrt_compiled = True
+                        logger.info(f"✓ TensorRT compilation completed for {model_id}")
+                    except Exception as e:
+                        logger.warning(f"TensorRT compilation failed: {e}")
+                        stats.tensorrt_compiled = False
+                else:
+                    stats.tensorrt_compiled = False
+            else:
+                stats.tensorrt_compiled = False
+
+            tensorrt_ms = (time.time() - tensorrt_start) * 1000
+
+            # Step 4: Execute subgraph (with all optimizations applied)
             exec_start = time.time()
             result = self.executor.execute(
                 subgraph_request=optimized_request,
@@ -177,6 +243,10 @@ class OptimizationExecutor:
                 timeout=timeout
             )
             stats.execution_ms = (time.time() - exec_start) * 1000
+
+            # Add TensorRT time to execution time if compilation happened
+            if stats.tensorrt_compiled:
+                stats.execution_ms += tensorrt_ms
             
             # Step 4: Track end-to-end metrics
             stats.total_ms = (time.time() - total_start) * 1000
