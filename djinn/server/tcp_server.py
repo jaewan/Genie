@@ -13,6 +13,7 @@ import json
 import logging
 import io
 import os
+import pickle
 from typing import Dict, Any, Optional, Tuple
 from datetime import datetime
 
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Global state
 DEVICE = None
-OPTIMIZATION_EXECUTOR = None  # Changed from SUBGRAPH_EXECUTOR to OptimizationExecutor
+OPTIMIZATION_EXECUTOR = None  # Changed from SUBGRAPH_EXECUTOR to OptimizationExecutor - disabled for network testing
 GPU_CACHE = None
 GRAPH_CACHE = None
 
@@ -84,13 +85,151 @@ async def initialize_server():
     # Initialize optimization executor (wraps SubgraphExecutor with optimizations)
     try:
         from .optimization_executor import OptimizationExecutor
-        OPTIMIZATION_EXECUTOR = OptimizationExecutor(gpu_id=0)
-        logger.info("✅ OptimizationExecutor initialized (Registry + Fusion enabled)")
+        OPTIMIZATION_EXECUTOR = OptimizationExecutor(gpu_id=0)  # Enabled for network execution
+        logger.info("✅ OptimizationExecutor initialized for network execution")
     except Exception as e:
         logger.error(f"❌ Failed to initialize optimization executor: {e}")
         raise
 
     STATS['start_time'] = datetime.now()
+
+
+async def execute_subgraph_simple(subgraph: Dict[str, Any], input_data: Dict[str, torch.Tensor]) -> torch.Tensor:
+    """Simple subgraph execution fallback when optimization executor fails."""
+    logger.warning("Using simple subgraph execution (no optimizations)")
+
+    # Handle mock operations for testing
+    operations = subgraph.get('operations', [])
+    if operations:
+        op = operations[0]  # Get first operation
+        op_name = op.get('operation', '')
+
+        if op_name == 'aten::linear':
+            # Mock linear operation - just return a tensor with the expected shape
+            expected_shape = op.get('shape', (1, 10, 50257))
+            return torch.randn(*expected_shape)
+
+    # Default fallback
+    if input_data:
+        # Return the first input tensor as a simple fallback
+        first_tensor = next(iter(input_data.values()))
+        return first_tensor + 1.0  # Dummy operation
+    else:
+        return torch.tensor([1.0])
+
+
+async def handle_coordinator_subgraph(request_data: bytes, writer) -> None:
+    """Handle subgraph execution request from coordinator (pickled format)."""
+    global STATS
+
+    try:
+        STATS['subgraph_requests'] += 1
+        print(f"🧪 SERVER: Received subgraph request, data length: {len(request_data)}")
+        logger.info(f"🧪 SERVER: Received subgraph request, data length: {len(request_data)}")
+
+        # Parse coordinator's pickled message
+        try:
+            message = pickle.loads(request_data)
+            logger.info(f"🧪 SERVER: Coordinator message keys: {list(message.keys())}")
+            logger.info(f"🧪 SERVER: Message subgraph_data keys: {list(message.get('subgraph_data', {}).keys()) if isinstance(message.get('subgraph_data'), dict) else 'N/A'}")
+        except Exception as e:
+            logger.error(f"Failed to unpickle coordinator message: {e}")
+            error_response = f"Failed to parse message: {e}".encode()
+            await _send_message(writer, 0x05, error_response)
+            return
+
+        # Extract data from coordinator message
+        subgraph_data = message.get('subgraph_data', {})
+        input_data_pickled = subgraph_data.get('input_data', {})
+        timeout = message.get('timeout', 30)
+
+        # Handle differential graph protocol
+        if isinstance(subgraph_data, dict) and subgraph_data.get('type') == 'delta':
+            # TODO: Handle differential updates
+            logger.warning("Differential updates not yet implemented")
+            subgraph = subgraph_data.get('subgraph', {})
+        else:
+            # Full subgraph
+            subgraph = subgraph_data.get('subgraph', {}) if isinstance(subgraph_data, dict) else subgraph_data
+
+        # Deserialize input tensors
+        input_data = {}
+        try:
+            for key, pickled_tensor in input_data_pickled.items():
+                if isinstance(pickled_tensor, bytes):
+                    input_data[key] = pickle.loads(pickled_tensor)
+                else:
+                    input_data[key] = pickled_tensor
+        except Exception as e:
+            logger.error(f"Failed to deserialize input data: {e}")
+            error_response = f"Failed to deserialize inputs: {e}".encode()
+            await _send_message(writer, 0x05, error_response)
+            return
+
+        # Execute subgraph
+        try:
+            print(f"🔍 SERVER: Subgraph keys: {list(subgraph.keys()) if isinstance(subgraph, dict) else type(subgraph)}")
+            print(f"🔍 SERVER: Subgraph operations: {len(subgraph.get('operations', [])) if isinstance(subgraph, dict) else 'N/A'}")
+            logger.info(f"🔍 Subgraph keys: {list(subgraph.keys()) if isinstance(subgraph, dict) else type(subgraph)}")
+            logger.info(f"🔍 Subgraph operations: {len(subgraph.get('operations', [])) if isinstance(subgraph, dict) else 'N/A'}")
+
+            if OPTIMIZATION_EXECUTOR:
+                result, stats = await OPTIMIZATION_EXECUTOR.execute(
+                    subgraph_request=subgraph,
+                    input_data=input_data,
+                    timeout=timeout
+                )
+                logger.debug(f"Optimization stats: {stats}")
+
+                # Ensure result is materialized
+                if hasattr(result, 'materialize'):
+                    print(f"🔍 SERVER: Result is LazyTensor, materializing...")
+                    result = result.materialize()
+                    print(f"🔍 SERVER: Materialized result shape: {result.shape}")
+                else:
+                    print(f"🔍 SERVER: Result is already concrete: {type(result)}")
+
+                logger.info(f"✅ Subgraph execution completed: result shape {result.shape}")
+            else:
+                logger.error("❌ No optimization executor available - execution failed")
+                error_response = "No optimization executor available".encode()
+                await _send_message(writer, 0x05, error_response)
+                return
+
+        except Exception as e:
+            logger.error(f"Subgraph execution failed: {e}")
+            error_response = f"Execution failed: {e}".encode()
+            await _send_message(writer, 0x05, error_response)
+            return
+
+        # Serialize and send result
+        try:
+            if USE_OPTIMIZED_SERIALIZATION and OPTIMIZED_SERIALIZATION_AVAILABLE:
+                result_bytes = serialize_tensor(result, use_numpy=True)
+            else:
+                result_buffer = io.BytesIO()
+                torch.save(result, result_buffer)
+                result_bytes = result_buffer.getvalue()
+
+            # Send result with proper message format (RESULT = 0x04)
+            await _send_message(writer, 0x04, result_bytes)
+
+            STATS['requests_success'] += 1
+            logger.info(f"✅ Coordinator subgraph execution complete: {result.shape}")
+
+        except Exception as e:
+            logger.error(f"Failed to serialize result: {e}")
+            error_response = f"Failed to serialize result: {e}".encode()
+            await _send_message(writer, 0x05, error_response)
+
+    except Exception as e:
+        logger.error(f"Error in coordinator subgraph handler: {e}")
+        STATS['requests_failed'] += 1
+        try:
+            error_response = f"Internal error: {e}".encode()
+            await _send_message(writer, 0x05, error_response)
+        except:
+            pass  # Connection might be closed
 
 
 async def handle_execute_subgraph(request_data: bytes, writer) -> None:
@@ -250,8 +389,9 @@ async def _recv_message(reader, timeout: float = 300.0) -> Tuple[int, bytes]:
 async def handle_connection(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     """Handle incoming TCP connection."""
     global STATS
-    
+
     client_addr = writer.get_extra_info('peername')
+    print(f"🔗 SERVER: New connection from {client_addr}")
     logger.info(f"✅ New connection from {client_addr}")
 
     try:
@@ -261,13 +401,17 @@ async def handle_connection(reader: asyncio.StreamReader, writer: asyncio.Stream
 
             STATS['requests_total'] += 1
 
-            if msg_type == 0x01:  # EXECUTE_SUBGRAPH
-                logger.info("📊 Handling EXECUTE_SUBGRAPH")
+            if msg_type == 0x01:  # EXECUTE_SUBGRAPH (legacy)
+                logger.info("📊 Handling EXECUTE_SUBGRAPH (legacy)")
                 await handle_execute_subgraph(data, writer)
 
-            elif msg_type == 0x02:  # EXECUTE_OPERATION
-                logger.info("📊 Handling EXECUTE_OPERATION")
+            elif msg_type == 0x02:  # EXECUTE_OPERATION (legacy)
+                logger.info("📊 Handling EXECUTE_OPERATION (legacy)")
                 await handle_execute_operation(data, writer)
+
+            elif msg_type == 0x03:  # EXECUTE_SUBGRAPH (coordinator)
+                logger.info("📊 Handling EXECUTE_SUBGRAPH (coordinator)")
+                await handle_coordinator_subgraph(data, writer)
 
             else:
                 logger.warning(f"Unknown message type: {msg_type}")

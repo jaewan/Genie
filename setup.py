@@ -22,7 +22,7 @@ def read_readme():
 setup(
     name="djinn-gpu",
     version="0.1.0",
-    description="GPU Disaggregation Framework for PyTorch with Zero-Copy Transport",
+    description="GPU Disaggregation Framework for PyTorch (Python-only, Zero C++ Dependencies)",
     long_description=read_readme(),
     long_description_content_type="text/markdown",
     author="Djinn Team",
@@ -33,7 +33,7 @@ setup(
     # Package discovery
     packages=find_packages(exclude=['tests', 'tests.*', 'benchmarks', 'example', 'docs', 'scripts']),
 
-    # Include pre-built C++ extensions
+    # Include optional pre-built extensions (if available)
     package_data={
         'djinn': [
             '*.so',
@@ -64,7 +64,6 @@ setup(
         'Programming Language :: Python :: 3.10',
         'Programming Language :: Python :: 3.11',
         'Programming Language :: Python :: 3.12',
-        'Programming Language :: C++',
         'Topic :: Scientific/Engineering :: Artificial Intelligence',
         'Topic :: System :: Distributed Computing',
     ],

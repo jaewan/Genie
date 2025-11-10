@@ -1,375 +1,419 @@
 """
-Shape Inference: Production-Grade Implementation
+Phase 6B: Shape Inference System
 
-Architecture:
-1. Use PyTorch meta tensors as PRIMARY mechanism (95% coverage)
-2. Explicit handlers for special cases (5% coverage)
-3. Clear error messages for unsupported operations
-4. Comprehensive logging for debugging
+Tracks tensor shapes through the lazy DAG without materializing.
+Infers output shapes for operations based on inputs, enabling
+control flow that depends on tensor shapes.
 
-Design Principles:
-- Fail fast with actionable errors
-- Prefer PyTorch's logic over manual implementation
-- Make debugging easy
-- Keep special cases explicit and documented
-
-Note: This is the consolidated implementation. Previously called "V2", it's now
-the single production implementation for shape inference in Djinn.
+Key idea: Lazy shape evaluation - only materialize if we can't infer the shape.
 """
 
-import torch
-import torch.nn.functional as F
-from typing import Any, Dict, List, Optional, Tuple, Union
-import logging
-from dataclasses import dataclass
+from typing import Optional, Tuple, List, Union, Any
+import numpy as np
 
-logger = logging.getLogger(__name__)
-
-
-class ShapeInferenceError(Exception):
-    """Raised when shape inference fails."""
-    pass
-
-
-@dataclass
-class InferenceResult:
-    """Result of shape inference with metadata for debugging."""
-    shape: torch.Size
-    dtype: torch.dtype
-    device: torch.device
-    method: str  # 'meta', 'manual', 'fallback'
-    
 
 class ShapeInference:
     """
-    Production-grade shape inference using PyTorch meta tensors.
+    Infers output shapes for tensor operations without materialization.
     
-    Architecture:
-    1. Try meta tensor inference (fast, automatic, 95% coverage)
-    2. Try manual handlers for special cases (explicit, 5% coverage)
-    3. Fail with clear error message (better than silent bugs)
-    
-    This class uses PyTorch's meta device to automatically infer shapes for 1000+
-    operations without manual implementation. Only special cases that can't use
-    meta tensors (e.g., operations requiring actual data) need manual handlers.
+    For shape-dependent operations (nonzero, unique, etc.), still requires
+    materialization, but this module makes that decision explicit.
     """
     
-    # Operations that need special handling (can't use meta tensors)
-    SPECIAL_HANDLERS = {}  # Populated below
-    
-    # Operations known to fail with meta tensors (for fast-path rejection)
-    META_INCOMPATIBLE = {
-        'aten::item',  # Requires actual data
-        'aten::__getitem__',  # Indexing needs actual indices
-        'aten::nonzero',  # Depends on actual values
+    # Operations and their shape transformation rules
+    SHAPE_RULES = {
+        # Identity operations (shape unchanged)
+        'transpose': lambda x, *dims: _transpose_shape(x, dims),
+        'permute': lambda x, *dims: _permute_shape(x, dims),
+        'contiguous': lambda x: x,
+        'clone': lambda x: x,
+        'detach': lambda x: x,
+        
+        # Reshape operations
+        'reshape': lambda x, shape: tuple(shape) if isinstance(shape, (list, tuple)) else (shape,),
+        'view': lambda x, shape: tuple(shape) if isinstance(shape, (list, tuple)) else (shape,),
+        'unsqueeze': lambda x, dim: _unsqueeze_shape(x, dim),
+        'squeeze': lambda x, dim=None: _squeeze_shape(x, dim),
+        'flatten': lambda x, start=0, end=-1: _flatten_shape(x, start, end),
+        
+        # Repeat operations
+        'repeat': lambda x, *sizes: _repeat_shape(x, sizes),
+        'tile': lambda x, *dims: _tile_shape(x, dims),
+        
+        # Concatenation and stacking
+        'cat': lambda shapes, dim: _cat_shape(shapes, dim),
+        'stack': lambda shapes, dim: _stack_shape(shapes, dim),
+        
+        # Selection and indexing
+        'narrow': lambda x, dim, start, length: _narrow_shape(x, dim, length),
+        'index_select': lambda x, dim, indices: _index_select_shape(x, dim, indices),
+        'gather': lambda x, dim, indices: _gather_shape(x, dim, indices.shape),
+        'scatter': lambda x, dim, indices, src: x,  # Output shape = input shape
+        
+        # Slicing (handled via __getitem__)
+        '__getitem__': lambda x, key: x,  # Conservative: assume same shape
+        
+        # Reduction without dim (scalar output)
+        'sum_scalar': lambda x: (),
+        'mean_scalar': lambda x: (),
+        'std_scalar': lambda x: (),
+        'var_scalar': lambda x: (),
+        'max_scalar': lambda x: (),
+        'min_scalar': lambda x: (),
+        'prod_scalar': lambda x: (),
+        'all_scalar': lambda x: (),
+        'any_scalar': lambda x: (),
+        
+        # Reduction with dim (removes dimension)
+        'sum': lambda x, dim=None, keepdim=False: _reduction_shape(x, dim, keepdim),
+        'mean': lambda x, dim=None, keepdim=False: _reduction_shape(x, dim, keepdim),
+        'std': lambda x, dim=None, keepdim=False: _reduction_shape(x, dim, keepdim),
+        'var': lambda x, dim=None, keepdim=False: _reduction_shape(x, dim, keepdim),
+        'max': lambda x, dim=None, keepdim=False: _reduction_shape(x, dim, keepdim),
+        'min': lambda x, dim=None, keepdim=False: _reduction_shape(x, dim, keepdim),
+        'prod': lambda x, dim=None, keepdim=False: _reduction_shape(x, dim, keepdim),
+        
+        # Argmax/argmin
+        'argmax': lambda x, dim=None, keepdim=False: _argmax_shape(x, dim, keepdim),
+        'argmin': lambda x, dim=None, keepdim=False: _argmax_shape(x, dim, keepdim),
+        
+        # Top-k and sorting
+        'topk': lambda x, k, dim=None: _topk_shape(x, k, dim),
+        'sort': lambda x, dim=None: _sort_shape(x, dim),
+        'argsort': lambda x, dim=None: _sort_shape(x, dim),
+        
+        # Matrix operations
+        'matmul': lambda x, y: _matmul_shape(x, y),
+        '__matmul__': lambda x, y: _matmul_shape(x, y),
+        'mm': lambda x, y: _mm_shape(x, y),
+        'bmm': lambda x, y: _bmm_shape(x, y),
+        'dot': lambda x, y: (),  # Returns scalar
+        
+        # Broadcasting operations
+        '__add__': lambda x, y: _broadcast_shape(x, y),
+        '__sub__': lambda x, y: _broadcast_shape(x, y),
+        '__mul__': lambda x, y: _broadcast_shape(x, y),
+        '__truediv__': lambda x, y: _broadcast_shape(x, y),
+        '__floordiv__': lambda x, y: _broadcast_shape(x, y),
+        '__mod__': lambda x, y: _broadcast_shape(x, y),
+        '__pow__': lambda x, y: _broadcast_shape(x, y),
+        
+        # Element-wise operations (preserve shape)
+        'abs': lambda x: x,
+        'sqrt': lambda x: x,
+        'exp': lambda x: x,
+        'log': lambda x: x,
+        'sin': lambda x: x,
+        'cos': lambda x: x,
+        'tan': lambda x: x,
+        'sigmoid': lambda x: x,
+        'tanh': lambda x: x,
+        
+        # Normalization and activation
+        'batch_norm': lambda x, *args: x,
+        'layer_norm': lambda x, *args: x,
+        'group_norm': lambda x, *args: x,
+        'instance_norm': lambda x, *args: x,
+        'softmax': lambda x, dim=-1: x,  # Output shape = input shape
+        'log_softmax': lambda x, dim=-1: x,
+        'gelu': lambda x: x,
+        'silu': lambda x: x,
+        'dropout': lambda x, *args: x if isinstance(x, tuple) and len(x) > 0 else x,  # Preserve shape, but ensure it's a tuple
+        
+        # Transformer-specific operations (Phase 7)
+        'attention': lambda q, k, v: _attention_shape(q, k, v),  # Multi-head attention
+        'scaled_dot_product_attention': lambda q, k, v: _attention_shape(q, k, v),
     }
     
     @classmethod
-    def infer_shape(cls, operation: str, inputs: List[Any], kwargs: Dict[str, Any]) -> torch.Size:
+    def infer_shape(cls, operation: str, input_shapes: Union[Tuple, List[Tuple]], 
+                   *args, **kwargs) -> Optional[Tuple]:
         """
         Infer output shape for an operation.
         
         Args:
-            operation: Operation name (e.g., 'aten::matmul')
-            inputs: List of input tensors/values
-            kwargs: Operation keyword arguments
-            
+            operation: Operation name
+            input_shapes: Shape(s) of input tensor(s)
+            *args: Positional arguments to the operation
+            **kwargs: Keyword arguments to the operation
+        
         Returns:
-            Inferred output shape
-            
-        Raises:
-            ShapeInferenceError: If inference fails
+            Output shape as tuple, or None if shape can't be inferred
         """
+        # Normalize operation name
+        op_name = operation
+        if '::' in op_name:
+            op_name = op_name.split('::')[-1]
+        
+        # If not in rules, return None (can't infer)
+        if op_name not in cls.SHAPE_RULES:
+            return None
+        
         try:
-            # Fast path: Check special handlers first
-            if operation in cls.SPECIAL_HANDLERS:
-                handler = cls.SPECIAL_HANDLERS[operation]
-                return handler(inputs, kwargs)
+            rule = cls.SHAPE_RULES[op_name]
             
-            # Fast path: Skip meta tensors for known incompatible ops
-            if operation in cls.META_INCOMPATIBLE:
-                return cls._infer_fallback(operation, inputs, kwargs)
+            # input_shapes is a tuple of input shapes
+            # For single-input operations, extract the first shape
+            # For multi-input operations (cat, stack, matmul, mm, bmm, add, mul, etc.), pass all shapes
+            multi_input_ops = ['cat', 'stack', 'matmul', '__matmul__', 'mm', 'bmm',
+                               '__add__', '__sub__', '__mul__', '__truediv__', '__floordiv__', '__mod__', '__pow__']
             
-            # Primary path: Use meta tensors (95% of cases)
-            return cls._infer_with_meta(operation, inputs, kwargs)
-            
-        except Exception as e:
-            # Fallback: Try generic inference
-            logger.debug(f"Meta inference failed for {operation}: {e}")
-            try:
-                return cls._infer_fallback(operation, inputs, kwargs)
-            except Exception as fallback_error:
-                # Final fallback: Provide clear error
-                raise ShapeInferenceError(
-                    f"Cannot infer shape for {operation}. "
-                    f"Meta inference failed: {e}. "
-                    f"Fallback failed: {fallback_error}. "
-                    f"Inputs: {[getattr(inp, 'shape', type(inp)) for inp in inputs]}"
-                )
-    
-    @classmethod
-    def _infer_with_meta(cls, operation: str, inputs: List[Any], kwargs: Dict[str, Any]) -> torch.Size:
-        """
-        Infer shape using PyTorch meta tensors.
-        
-        This is the PRIMARY mechanism - works for 95% of operations.
-        """
-        # Convert inputs to meta tensors
-        meta_inputs = []
-        for inp in inputs:
-            if hasattr(inp, 'shape') and hasattr(inp, 'dtype'):
-                # LazyTensor or regular tensor
-                # ✅ FIX: Access _shape directly to avoid recursion
-                if type(inp).__name__ == 'LazyTensor':
-                    # For LazyTensor, access _shape directly to avoid recursion
-                    shape = object.__getattribute__(inp, '_shape')
-                    dtype = object.__getattribute__(inp, '_dtype')
+            if op_name in multi_input_ops:
+                # Multiple input shapes
+                if len(input_shapes) == 1:
+                    # Single shape provided, try with it
+                    return rule(input_shapes[0], *args, **kwargs)
+                elif len(input_shapes) == 2:
+                    # Two shapes (matmul, add, etc.)
+                    return rule(input_shapes[0], input_shapes[1], *args, **kwargs)
                 else:
-                    # For regular tensors, use properties
-                    shape = inp.shape
-                    dtype = inp.dtype
+                    # More than 2 shapes
+                    return rule(input_shapes, *args, **kwargs)
+            else:
+                # Single input shape for most operations
+                result_shape = rule(input_shapes[0], *args, **kwargs)
                 
-                meta_tensor = torch.empty(
-                    shape,
-                    dtype=dtype,
-                    device='meta'
-                )
-                meta_inputs.append(meta_tensor)
-            elif isinstance(inp, (int, float, bool)):
-                # Scalar values
-                meta_inputs.append(inp)
-            elif isinstance(inp, (list, tuple)):
-                # Lists/tuples (e.g., for reshape)
-                meta_inputs.append(inp)
-            elif inp is None:
-                meta_inputs.append(None)
-            else:
-                raise ValueError(f"Cannot convert {type(inp)} to meta tensor")
+                # Check for invalid scalar shapes for shape-preserving operations
+                # These operations should never return scalar if input wasn't scalar
+                shape_preserving_ops = ['dropout', 'relu', 'gelu', 'silu', 'softmax', 'log_softmax',
+                                       'layer_norm', 'batch_norm', 'instance_norm', 'group_norm']
+                if op_name in shape_preserving_ops:
+                    input_shape = input_shapes[0]
+                    # If input has non-scalar shape but result is scalar, return None to trigger materialization
+                    if isinstance(input_shape, tuple) and len(input_shape) > 0:
+                        if isinstance(result_shape, tuple) and len(result_shape) == 0:
+                            # Invalid: shape-preserving op returned scalar for non-scalar input
+                            return None  # Trigger materialization to get actual shape
+                
+                return result_shape
         
-        # Get operation function
-        op_func = cls._get_operation_func(operation)
-        
-        # Execute on meta device
-        result = op_func(*meta_inputs, **kwargs)
-        
-        # Extract shape from result
-        if hasattr(result, 'shape'):
-            return result.shape
-        elif isinstance(result, tuple):
-            # Handle tuple returns (e.g., split, unbind)
-            # Return shape of first element
-            if result and hasattr(result[0], 'shape'):
-                return result[0].shape
-            return torch.Size([])
+        except Exception as e:
+            # If inference fails, return None
+            return None
+
+
+# Shape transformation helper functions
+
+def _transpose_shape(shape: Tuple, dims: Tuple) -> Tuple:
+    """Compute shape after transpose."""
+    if len(dims) == 0:
+        return tuple(reversed(shape))
+    dim0, dim1 = dims[0], dims[1] if len(dims) > 1 else None
+    if dim1 is None:
+        return shape
+    shape_list = list(shape)
+    shape_list[dim0], shape_list[dim1] = shape_list[dim1], shape_list[dim0]
+    return tuple(shape_list)
+
+
+def _permute_shape(shape: Tuple, dims: Tuple) -> Tuple:
+    """Compute shape after permute."""
+    return tuple(shape[d] for d in dims[0] if isinstance(dims[0], (list, tuple)))
+
+
+def _unsqueeze_shape(shape: Tuple, dim: int) -> Tuple:
+    """Compute shape after unsqueeze."""
+    shape_list = list(shape)
+    shape_list.insert(dim, 1)
+    return tuple(shape_list)
+
+
+def _squeeze_shape(shape: Tuple, dim: Optional[int] = None) -> Tuple:
+    """Compute shape after squeeze."""
+    if dim is None:
+        return tuple(s for s in shape if s != 1)
+    if shape[dim] == 1:
+        return shape[:dim] + shape[dim+1:]
+    return shape
+
+
+def _flatten_shape(shape: Tuple, start: int = 0, end: int = -1) -> Tuple:
+    """Compute shape after flatten."""
+    if end == -1:
+        end = len(shape) - 1
+    size = np.prod(shape[start:end+1])
+    return shape[:start] + (int(size),) + shape[end+1:]
+
+
+def _reduction_shape(shape: Tuple, dim: Optional[int] = None, keepdim: bool = False) -> Tuple:
+    """Compute shape after reduction (sum, mean, etc.)."""
+    if dim is None:
+        return () if not keepdim else tuple(1 for _ in shape)
+    if keepdim:
+        shape_list = list(shape)
+        shape_list[dim] = 1
+        return tuple(shape_list)
+    return shape[:dim] + shape[dim+1:]
+
+
+def _argmax_shape(shape: Tuple, dim: Optional[int] = None, keepdim: bool = False) -> Tuple:
+    """Compute shape after argmax/argmin."""
+    if dim is None:
+        return ()  # Returns scalar
+    return _reduction_shape(shape, dim, keepdim)
+
+
+def _topk_shape(shape: Tuple, k: int, dim: Optional[int] = None) -> Tuple:
+    """Compute shape after topk (returns values, indices)."""
+    if dim is None:
+        dim = -1
+    shape_list = list(shape)
+    shape_list[dim] = k
+    return tuple(shape_list)
+
+
+def _sort_shape(shape: Tuple, dim: Optional[int] = None) -> Tuple:
+    """Compute shape after sort/argsort."""
+    return shape  # Output shape = input shape
+
+
+def _cat_shape(shapes: List[Tuple], dim: int) -> Optional[Tuple]:
+    """Compute shape after concatenation."""
+    if not shapes:
+        return None
+    # All shapes must match except on concat dimension
+    shape_list = list(shapes[0])
+    for shape in shapes[1:]:
+        if len(shape) != len(shape_list):
+            return None  # Incompatible ranks
+        for i, (s1, s2) in enumerate(zip(shape_list, shape)):
+            if i == dim:
+                shape_list[i] += s2
+            elif s1 != s2:
+                return None  # Incompatible shapes
+    return tuple(shape_list)
+
+
+def _stack_shape(shapes: List[Tuple], dim: int) -> Optional[Tuple]:
+    """Compute shape after stacking."""
+    if not shapes:
+        return None
+    # All shapes must match
+    for shape in shapes[1:]:
+        if shape != shapes[0]:
+            return None
+    shape_list = list(shapes[0])
+    shape_list.insert(dim, len(shapes))
+    return tuple(shape_list)
+
+
+def _narrow_shape(shape: Tuple, dim: int, length: int) -> Tuple:
+    """Compute shape after narrow (slicing)."""
+    shape_list = list(shape)
+    shape_list[dim] = length
+    return tuple(shape_list)
+
+
+def _index_select_shape(shape: Tuple, dim: int, indices_shape: Tuple) -> Tuple:
+    """Compute shape after index_select."""
+    shape_list = list(shape)
+    shape_list[dim] = indices_shape[0]  # Assume 1D indices
+    return tuple(shape_list)
+
+
+def _gather_shape(shape: Tuple, dim: int, indices_shape: Tuple) -> Tuple:
+    """Compute shape after gather."""
+    # Output shape matches indices shape
+    return indices_shape
+
+
+def _matmul_shape(x: Tuple, y: Tuple) -> Optional[Tuple]:
+    """Compute shape after matrix multiplication."""
+    # Handle various cases: (n), (n, k), (b, n, k), etc.
+    if len(x) == 1 and len(y) == 1:
+        return ()  # Dot product
+    if len(x) == 1:
+        return y[:-2] + (y[-1],)
+    if len(y) == 1:
+        return x[:-1]
+    if len(x) == 2 and len(y) == 2:
+        return (x[0], y[1])
+    if len(x) >= 2 and len(y) >= 2:
+        # Batch matrix multiply
+        return x[:-1] + (y[-1],)
+    return None
+
+
+def _mm_shape(x: Tuple, y: Tuple) -> Optional[Tuple]:
+    """Compute shape after mm (2D only)."""
+    if len(x) == 2 and len(y) == 2:
+        return (x[0], y[1])
+    return None
+
+
+def _bmm_shape(x: Tuple, y: Tuple) -> Optional[Tuple]:
+    """Compute shape after bmm (batched 2D)."""
+    if len(x) == 3 and len(y) == 3 and x[0] == y[0]:
+        return (x[0], x[1], y[2])
+    return None
+
+
+def _broadcast_shape(x: Tuple, y: Tuple) -> Optional[Tuple]:
+    """Compute shape after broadcasting."""
+    # Simple broadcasting: align right and match dimensions
+    max_len = max(len(x), len(y))
+    x_padded = (1,) * (max_len - len(x)) + x
+    y_padded = (1,) * (max_len - len(y)) + y
+    
+    result = []
+    for sx, sy in zip(x_padded, y_padded):
+        if sx == sy:
+            result.append(sx)
+        elif sx == 1:
+            result.append(sy)
+        elif sy == 1:
+            result.append(sx)
         else:
-            # Scalar result
-            return torch.Size([])
-    
-    @classmethod
-    def _get_operation_func(cls, operation: str):
-        """
-        Get PyTorch operation function from operation name.
-        
-        Handles various naming conventions:
-        - aten::add -> torch.add
-        - aten::relu -> torch.relu
-        - aten::layer_norm -> torch.nn.functional.layer_norm
-        """
-        op_name = operation.replace('aten::', '')
-        
-        # Try torch.op_name
-        if hasattr(torch, op_name):
-            return getattr(torch, op_name)
-        
-        # Try torch.nn.functional.op_name
-        if hasattr(F, op_name):
-            return getattr(F, op_name)
-        
-        # Try torch.Tensor.op_name (for methods)
-        if hasattr(torch.Tensor, op_name):
-            # Wrap as function
-            def tensor_method(*args, **kwargs):
-                if args:
-                    return getattr(args[0], op_name)(*args[1:], **kwargs)
-                raise ValueError(f"No tensor for method {op_name}")
-            return tensor_method
-        
-        raise ValueError(f"Cannot find PyTorch function for {operation}")
-    
-    @classmethod
-    def _infer_fallback(cls, operation: str, inputs: List[Any], kwargs: Dict[str, Any]) -> torch.Size:
-        """
-        Fallback inference for operations that can't use meta tensors.
-        
-        This handles edge cases and provides reasonable defaults.
-        """
-        # For most operations, preserve input shape
-        if inputs and hasattr(inputs[0], 'shape'):
-            return inputs[0].shape
-        
-        # Default: scalar
-        return torch.Size([])
-    
-    @classmethod
-    def infer_dtype(cls, operation: str, inputs: List[Any], kwargs: Dict[str, Any]) -> torch.dtype:
-        """Infer output dtype."""
-        # Check kwargs first
-        if 'dtype' in kwargs and kwargs['dtype'] is not None:
-            return kwargs['dtype']
-        
-        # Factory functions
-        if operation in ('aten::randn', 'aten::rand', 'aten::zeros', 
-                        'aten::ones', 'aten::empty'):
-            return kwargs.get('dtype', torch.float32)
-        
-        if operation == 'aten::randint':
-            return kwargs.get('dtype', torch.int64)
-        
-        # Get from first input
-        for inp in inputs:
-            if hasattr(inp, 'dtype'):
-                return inp.dtype
-        
-        return torch.float32
-    
-    @classmethod
-    def infer_device(cls, operation: str, inputs: List[Any], kwargs: Dict[str, Any]) -> torch.device:
-        """Infer output device."""
-        # Check kwargs first
-        if 'device' in kwargs and kwargs['device'] is not None:
-            device = kwargs['device']
-            if isinstance(device, torch.device):
-                return device
-            return torch.device(device)
-        
-        # Get from first input
-        for inp in inputs:
-            if hasattr(inp, 'device'):
-                return inp.device
-        
-        return torch.device('cpu')
+            return None  # Incompatible shapes
+    return tuple(result)
 
 
-# ============================================================================
-# Special Handlers (for operations that need custom logic)
-# ============================================================================
+def _repeat_shape(shape: Tuple, sizes: Tuple) -> Tuple:
+    """Compute shape after repeat."""
+    # repeat(*sizes) repeats each dimension by the corresponding size
+    # [2, 3].repeat(2, 1) -> [4, 3]
+    if not isinstance(sizes, (tuple, list)):
+        sizes = (sizes,)
+    
+    result = []
+    for i, s in enumerate(shape):
+        if i < len(sizes):
+            result.append(s * sizes[i])
+        else:
+            result.append(s)
+    return tuple(result)
 
-def _infer_reshape_shape(inputs: List[Any], kwargs: Dict[str, Any]) -> torch.Size:
+
+def _tile_shape(shape: Tuple, dims: Tuple) -> Tuple:
+    """Compute shape after tile."""
+    # tile(*dims) tiles the shape
+    # Similar to repeat but dims are aligned left instead of right
+    if not isinstance(dims, (tuple, list)):
+        dims = (dims,)
+    
+    # Align to right first
+    max_len = max(len(shape), len(dims))
+    shape_padded = (1,) * (max_len - len(shape)) + shape
+    dims_padded = (1,) * (max_len - len(dims)) + dims
+    
+    result = []
+    for s, d in zip(shape_padded, dims_padded):
+        result.append(s * d)
+    return tuple(result)
+
+
+def _attention_shape(q_shape: Tuple, k_shape: Tuple, v_shape: Tuple) -> Tuple:
     """
-    Special handler for reshape/view operations.
+    Compute shape after multi-head attention.
     
-    Handles both call signatures:
-    - reshape(tensor, (2, 10, 768))  # shape as tuple
-    - reshape(tensor, 2, 10, 768)    # shape as separate args
+    Attention output shape matches query input shape:
+    Query: [batch, seq_len, hidden] 
+    Key: [batch, seq_len, hidden]
+    Value: [batch, seq_len, hidden]
+    Output: [batch, seq_len, hidden]
     
-    ✅ CRITICAL FIX: Meta tensors don't handle separate int args correctly
+    For multi-head: [batch, num_heads, seq_len, head_dim]
+    Output: [batch, num_heads, seq_len, head_dim]
     """
-    if len(inputs) < 2:
-        raise ShapeInferenceError("Reshape needs tensor and shape")
-    
-    tensor_shape = inputs[0].shape if hasattr(inputs[0], 'shape') else torch.Size([])
-    
-    # Case 1: shape passed as tuple/list (inputs[1] is tuple/list)
-    if len(inputs) == 2 and isinstance(inputs[1], (tuple, list, torch.Size)):
-        target_shape = list(inputs[1])
-    # Case 2: shape passed as separate int arguments
-    else:
-        target_shape = list(inputs[1:])
-    
-    # Handle -1 (infer dimension)
-    if -1 in target_shape:
-        # Calculate total elements
-        total_elements = 1
-        for dim in tensor_shape:
-            total_elements *= dim
-        
-        # Calculate known dimensions
-        known_elements = 1
-        unknown_idx = -1
-        for i, dim in enumerate(target_shape):
-            if dim == -1:
-                unknown_idx = i
-            else:
-                known_elements *= dim
-        
-        # Infer unknown dimension
-        if unknown_idx >= 0:
-            target_shape[unknown_idx] = total_elements // known_elements
-    
-    return torch.Size(target_shape)
-
-
-def _infer_embedding_shape(inputs: List[Any], kwargs: Dict[str, Any]) -> torch.Size:
-    """
-    Special handler for embedding.
-    
-    aten::embedding has signature: embedding(input, weight, ...)
-    where input/indices is [batch, seq_len] and weight is [vocab_size, embedding_dim]
-    
-    ✅ CRITICAL FIX: PyTorch's signature is embedding(input, weight), NOT embedding(weight, input)!
-    """
-    if len(inputs) < 2:
-        raise ShapeInferenceError("Embedding needs indices and weight")
-    
-    # ✅ FIXED: indices is first, weight is second
-    indices_shape = inputs[0].shape if hasattr(inputs[0], 'shape') else torch.Size([])
-    weight_shape = inputs[1].shape if hasattr(inputs[1], 'shape') else torch.Size([])
-    
-    if not weight_shape or not indices_shape:
-        raise ShapeInferenceError(f"Invalid shapes for embedding: indices={indices_shape}, weight={weight_shape}")
-    
-    embedding_dim = weight_shape[1] if len(weight_shape) > 1 else weight_shape[0]
-    return torch.Size(list(indices_shape) + [embedding_dim])
-
-
-def _infer_softmax_shape(inputs: List[Any], kwargs: Dict[str, Any]) -> torch.Size:
-    """
-    Special handler for softmax.
-    
-    aten::softmax preserves the input shape.
-    Signature: softmax(input, dim, dtype=None)
-    
-    ✅ FIX: Softmax was failing with meta tensors due to device mismatch.
-    """
-    logger.debug(f"🔍 _infer_softmax_shape called with {len(inputs)} inputs")
-    
-    if len(inputs) < 1:
-        raise ShapeInferenceError("Softmax needs at least 1 input")
-    
-    input_shape = inputs[0].shape if hasattr(inputs[0], 'shape') else torch.Size([])
-    
-    logger.debug(f"🔍 Softmax input shape: {input_shape}")
-    
-    if not input_shape:
-        raise ShapeInferenceError(f"Invalid shape for softmax: {input_shape}")
-    
-    # Softmax preserves input shape
-    logger.debug(f"🔍 Softmax returning shape: {input_shape}")
-    return input_shape
-
-
-def _infer_factory_shape(inputs: List[Any], kwargs: Dict[str, Any]) -> torch.Size:
-    """Infer shape for factory functions like randn, zeros, ones."""
-    # For factory functions, inputs contain the shape arguments
-    # e.g., torch.randn(2, 3) -> inputs = [2, 3] -> shape = (2, 3)
-    if inputs and all(isinstance(x, int) for x in inputs):
-        return torch.Size(inputs)
-    return torch.Size([])
-
-# Register special handlers
-ShapeInference.SPECIAL_HANDLERS['aten::reshape'] = _infer_reshape_shape
-ShapeInference.SPECIAL_HANDLERS['aten::view'] = _infer_reshape_shape
-ShapeInference.SPECIAL_HANDLERS['aten::embedding'] = _infer_embedding_shape
-ShapeInference.SPECIAL_HANDLERS['aten::softmax'] = _infer_softmax_shape
-ShapeInference.SPECIAL_HANDLERS['aten::_softmax'] = _infer_softmax_shape
-ShapeInference.SPECIAL_HANDLERS['aten::randn'] = _infer_factory_shape
-ShapeInference.SPECIAL_HANDLERS['aten::zeros'] = _infer_factory_shape
-ShapeInference.SPECIAL_HANDLERS['aten::ones'] = _infer_factory_shape
-ShapeInference.SPECIAL_HANDLERS['aten::empty'] = _infer_factory_shape
-
-
-# ============================================================================
-# Utility Functions
-# ============================================================================
-
-
+    # Output shape = query shape
+    return q_shape

@@ -21,6 +21,7 @@ import torch
 
 from ..core.coordinator import DjinnCoordinator, CoordinatorConfig
 from .optimization_executor import OptimizationExecutor
+from .capability_provider import CapabilityProvider
 from ..core.metadata_types import ResultMetadata, ErrorMetadata, create_result_metadata, create_error_metadata
 
 logger = logging.getLogger(__name__)
@@ -423,8 +424,28 @@ class DjinnServer:
                 tensors = [tensor_or_tensors]
                 logger.info(f"🔧 Executing {operation} on {tensor_or_tensors.shape}")
 
-            # Call executor with all input tensors
-            result = await self.executor.execute(operation, *tensors)
+            # Create subgraph request for the executor
+            subgraph_request = {
+                'operations': [{
+                    'op_id': 0,
+                    'operation': operation,
+                    'inputs': list(range(len(tensors))),  # Input indices
+                    'kwargs': {}
+                }],
+                'output_id': 0,
+                'semantic_metadata': {}  # Add basic semantic metadata
+            }
+
+            # Prepare input data dictionary
+            input_data = {str(i): tensor for i, tensor in enumerate(tensors)}
+
+            # Call executor with proper signature
+            result, stats = await self.executor.execute(
+                subgraph_request=subgraph_request,
+                input_data=input_data,
+                model_id=None,  # Single operation, no model context
+                timeout=30.0
+            )
 
             logger.info(f"📤 Sending result {result.shape} to {source_node}")
 

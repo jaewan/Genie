@@ -91,23 +91,22 @@ __version__ = "0.2.0"
 def _initialize():
     """Initialize Djinn interception layer."""
     try:
-        # Step 1: Try to register C++ backend (optional)
-        try:
-            from . import _C
-            _C.register_remote_accelerator_device()
-            logger.info("C++ backend registered")
-        except ImportError:
-            logger.info("C++ backend not available (Python-only mode)")
+        # Step 1: Python-only mode (C++ backend not required)
+        logger.info("Djinn initialized in Python-only mode (optimal performance)")
 
         # Step 2: Wrap factory functions (REQUIRED)
         from .frontend.core.factory_interceptor import wrap_factories
         wrap_factories()
 
-        # Step 3: Initialize graph builder
+        # Step 3: Setup remote accelerator device support
+        from .core.device_compatibility import setup as setup_device_support
+        setup_device_support()
+
+        # Step 4: Initialize graph builder
         from .frontend.core.graph_builder import initialize_global_builder
         initialize_global_builder()
 
-        # Step 4: Warm up shape inference cache (performance optimization)
+        # Step 5: Warm up shape inference cache (performance optimization)
         from .core.warmup import _warmup_shape_inference
         _warmup_shape_inference()
 

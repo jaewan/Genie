@@ -38,6 +38,7 @@ class OptimizationStats:
     fusion_applied: bool = False
     fusion_grouping_ms: float = 0.0
     tensorrt_compiled: bool = False
+    tensorrt_used: bool = False
     execution_ms: float = 0.0
     transfer_ms: float = 0.0
     total_ms: float = 0.0
@@ -68,6 +69,9 @@ class OptimizationExecutor:
         self.pressure_handler: Optional['MemoryPressureHandler'] = None
         self.tensorrt_compiler: Optional['TensorRTCompiler'] = None
         self.monitor = PerformanceMonitor()
+
+        # TensorRT cache for compiled modules
+        self.tensorrt_cache: Dict[str, Any] = {}
         
         # Configuration
         self.config = get_config()
@@ -131,7 +135,7 @@ class OptimizationExecutor:
         # ✅ Week 3: Initialize TensorRTCompiler
         try:
             from .tensorrt_compiler import TensorRTCompiler
-            self.tensorrt_compiler = TensorRTCompiler(gpu_id=self.gpu_id)
+            self.tensorrt_compiler = TensorRTCompiler(compilation_threshold=10)  # Lower threshold for testing
             logger.info("✓ TensorRTCompiler initialized")
         except Exception as e:
             logger.warning(f"Failed to initialize TensorRTCompiler: {e}")
@@ -215,16 +219,42 @@ class OptimizationExecutor:
             if self.tensorrt_compiler and model_id:
                 # Check if we should compile to TensorRT
                 profile = self.tensorrt_compiler.get_profile(model_id)
-                if profile.should_compile_tensorrt():
+                if profile and profile.should_compile_tensorrt():
                     logger.info(f"Compiling {model_id} to TensorRT for optimization")
                     try:
-                        self.tensorrt_compiler.compile_model(
-                            model_id=model_id,
-                            subgraph=optimized_request,
-                            input_shapes={k: v.shape for k, v in input_data.items()}
+                        # Step 3a: Synthesize TorchScript from operations
+                        from djinn.server.torchscript_synthesizer import get_synthesizer
+                        synthesizer = get_synthesizer()
+
+                        operations = optimized_request.get('operations', [])
+                        sample_inputs = list(input_data.values())
+
+                        torchscript_module = synthesizer.synthesize_block(
+                            operations=operations,
+                            block_id=model_id,
+                            sample_inputs=sample_inputs
                         )
-                        stats.tensorrt_compiled = True
-                        logger.info(f"✓ TensorRT compilation completed for {model_id}")
+
+                        if torchscript_module is None:
+                            logger.warning(f"TorchScript synthesis failed for {model_id}")
+                            stats.tensorrt_compiled = False
+                        else:
+                            # Step 3b: Compile TorchScript to TensorRT
+                            trt_module = self.tensorrt_compiler.try_compile_tensorrt(
+                                block_id=model_id,
+                                torchscript_module=torchscript_module,
+                                sample_input=sample_inputs[0] if sample_inputs else None,
+                                use_fp16=True
+                            )
+
+                            if trt_module:
+                                # Cache the compiled module
+                                self.tensorrt_cache[model_id] = trt_module
+                                stats.tensorrt_compiled = True
+                                logger.info(f"✓ TensorRT compilation completed for {model_id}")
+                            else:
+                                stats.tensorrt_compiled = False
+
                     except Exception as e:
                         logger.warning(f"TensorRT compilation failed: {e}")
                         stats.tensorrt_compiled = False
@@ -237,11 +267,36 @@ class OptimizationExecutor:
 
             # Step 4: Execute subgraph (with all optimizations applied)
             exec_start = time.time()
-            result = self.executor.execute(
-                subgraph_request=optimized_request,
-                input_data=input_data,
-                timeout=timeout
-            )
+
+            # Check if we have a cached TensorRT module (hot path)
+            if model_id and model_id in self.tensorrt_cache:
+                logger.info(f"🔥 Using cached TensorRT module for {model_id}")
+                trt_module = self.tensorrt_cache[model_id]
+
+                # Prepare inputs for TensorRT
+                gpu_inputs = []
+                for tensor in input_data.values():
+                    if isinstance(tensor, torch.Tensor) and not tensor.is_cuda:
+                        gpu_inputs.append(tensor.cuda())
+                    else:
+                        gpu_inputs.append(tensor)
+
+                # Execute with TensorRT
+                with torch.no_grad():
+                    result = trt_module(*gpu_inputs)
+
+                stats.tensorrt_used = True
+                logger.info(f"🚀 TensorRT execution completed for {model_id}")
+
+            else:
+                # Regular execution
+                result = self.executor.execute(
+                    subgraph_request=optimized_request,
+                    input_data=input_data,
+                    timeout=timeout
+                )
+                stats.tensorrt_used = False
+
             stats.execution_ms = (time.time() - exec_start) * 1000
 
             # Add TensorRT time to execution time if compilation happened

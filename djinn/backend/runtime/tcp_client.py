@@ -12,6 +12,7 @@ import torch
 import json
 import logging
 import time
+import pickle
 from typing import Optional, Dict, Any
 import io
 
@@ -145,26 +146,34 @@ class TCPRemoteExecutionClient:
             # Get connection
             reader, writer = await self._get_connection()
 
-            # Serialize request and tensors
-            request_json = json.dumps(subgraph_request)
-            tensors_buffer = io.BytesIO()
-            torch.save(input_data, tensors_buffer)
-            tensors_data = tensors_buffer.getvalue()
+            # Create coordinator message format
+            # The server expects subgraph_data to be a dict with a 'subgraph' key
+            message = {
+                'type': 0x03,  # EXECUTE_SUBGRAPH (coordinator format)
+                'subgraph_data': {
+                    'subgraph': subgraph_request  # Nest under 'subgraph' key as server expects
+                },
+                'input_data': {
+                    k: pickle.dumps(v) for k, v in input_data.items()
+                },
+                'timeout': self.timeout
+            }
 
-            # Create message: request_json + tensors_data
-            message_data = json.dumps({
-                'request': request_json,
-                'tensors_size': len(tensors_data)
-            }).encode() + tensors_data
-
-            # Send request (type=0x01: EXECUTE_SUBGRAPH)
-            await self._send_message(writer, 0x01, message_data)
+            # Send pickled message
+            message_data = pickle.dumps(message)
+            await self._send_message(writer, 0x03, message_data)
 
             # Receive result (type=0x04: RESULT)
             msg_type, result_data = await self._recv_message(reader)
+            logger.info(f"Received message type: {msg_type}, data length: {len(result_data)}")
 
             if msg_type == 0x05:  # ERROR
-                error_msg = result_data.decode()
+                try:
+                    error_msg = result_data.decode()
+                    logger.error(f"Server error: {error_msg}")
+                except UnicodeDecodeError:
+                    logger.error(f"Server error (binary data): {result_data[:100]}")
+                    error_msg = f"Binary error data: {len(result_data)} bytes"
                 raise RuntimeError(f"Remote execution failed: {error_msg}")
 
             if msg_type != 0x04:

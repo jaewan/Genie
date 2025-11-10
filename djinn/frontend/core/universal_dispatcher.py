@@ -15,6 +15,40 @@ from typing import Any, Dict, List, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
+# Constants
+LAZY_TENSOR_CLASS_NAME = 'LazyTensor'
+
+
+def _is_lazy_tensor(obj: Any) -> bool:
+    """Check if an object is a LazyTensor instance."""
+    return isinstance(obj, torch.Tensor) and type(obj).__name__ == LAZY_TENSOR_CLASS_NAME
+
+
+def _materialize_lazy_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    """
+    Materialize a LazyTensor to a concrete tensor.
+
+    Handles both CPU and CUDA tensors correctly.
+    Ensures the result is NOT a LazyTensor.
+    """
+    if not _is_lazy_tensor(tensor):
+        return tensor
+
+    # Call the LazyTensor's materialize method
+    result = tensor.materialize()
+    
+    # Safety check: ensure result is not still a LazyTensor
+    # But avoid infinite recursion - only check once
+    if _is_lazy_tensor(result):
+        # This should not happen - materialization should return concrete tensor
+        # But if it does, log and return as-is to avoid infinite loop
+        logger.error(f"Materialization returned LazyTensor for operation {tensor.operation if hasattr(tensor, 'operation') else 'unknown'}. This indicates a bug.")
+        # Don't recurse - return the LazyTensor to avoid infinite loop
+        # The caller should handle this case
+        return result
+    
+    return result
+
 
 class UniversalDispatcher:
     """
@@ -80,6 +114,25 @@ class UniversalDispatcher:
             'linear': self._handle_linear,
             'max_pool2d': self._handle_max_pool2d,
             'softmax': self._handle_softmax,
+            'relu': self._handle_relu,
+
+            # ✅ FIX: repeat operation (argument format differences)
+            'repeat': self._handle_repeat,
+            
+            # Note: Type conversion operations (long, float, etc) are handled
+            # by the tensor method fallback (Step 5) in the universal dispatcher
+            
+            # ✅ FIX: Binary operations that might have mixed LazyTensor/Tensor inputs
+            'add': lambda inputs, kwargs: self._handle_binary_op(inputs, kwargs, 'add'),
+            'sub': lambda inputs, kwargs: self._handle_binary_op(inputs, kwargs, 'sub'),
+            'mul': lambda inputs, kwargs: self._handle_binary_op(inputs, kwargs, 'mul'),
+            'div': lambda inputs, kwargs: self._handle_binary_op(inputs, kwargs, 'div'),
+            
+            # ✅ FIX: Embedding operation (critical for GPT-2)
+            'embedding': self._handle_embedding,
+            
+            # ✅ FIX: Type conversion via .to() method
+            'to': self._handle_to,
         }
     
     def _preprocess_cat(self, inputs: List[Any], kwargs: Dict[str, Any]) -> tuple:
@@ -101,6 +154,34 @@ class UniversalDispatcher:
     def _preprocess_stack(self, inputs: List[Any], kwargs: Dict[str, Any]) -> tuple:
         """Preprocess arguments for torch.stack (same as cat)."""
         return self._preprocess_cat(inputs, kwargs)
+
+    def _preprocess_repeat(self, inputs: List[Any], kwargs: Dict[str, Any]) -> tuple:
+        """
+        Preprocess arguments for torch.repeat.
+
+        tensor.repeat(2, 1) gets captured as repeat(tensor, 2, 1)
+        But torch.ops.aten.repeat expects repeat(tensor, [2, 1]) as List[int]
+
+        Convert individual integer arguments into a list for ATen,
+        but keep them separate for tensor method dispatch.
+        """
+        # inputs[0] is the tensor, inputs[1:] are the repeat dimensions
+        if len(inputs) < 2:
+            # No repeat args, pass through unchanged
+            return inputs, kwargs
+
+        # For repeat, we need special handling because:
+        # - ATen expects: repeat(tensor, [2, 1]) - list
+        # - tensor method expects: repeat(2, 1) - unpacked ints
+        # - We can't satisfy both with one preprocessing step
+
+        # Instead, we'll modify the dispatch logic to handle repeat specially
+        # For now, convert to list (ATen format) and let tensor method handle unpacking
+        tensor = inputs[0]
+        repeat_dims = list(inputs[1:])  # Convert to list for ATen
+
+        # Return tensor and repeat_dims list as single argument
+        return [tensor, repeat_dims], kwargs
     
     def _handle_linear(self, inputs: List[Any], kwargs: Dict[str, Any]) -> torch.Tensor:
         """
@@ -138,28 +219,244 @@ class UniversalDispatcher:
     def _handle_softmax(self, inputs: List[Any], kwargs: Dict[str, Any]) -> torch.Tensor:
         """
         Handle F.softmax operation.
-        
+
         PyTorch doesn't have torch.softmax - it's torch.nn.functional.softmax.
         This is a naming inconsistency, not a bug.
         """
         import torch.nn.functional as F
         return F.softmax(*inputs, **kwargs)
+
+    def _handle_relu(self, inputs: List[Any], kwargs: Dict[str, Any]) -> torch.Tensor:
+        """
+        Handle F.relu operation.
+
+        torch.ops.aten.relu doesn't accept inplace kwarg, but PyTorch's relu does.
+        """
+        import torch.nn.functional as F
+
+        # Remove inplace from kwargs since torch.ops.aten.relu doesn't accept it
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k != 'inplace'}
+        return F.relu(*inputs, **filtered_kwargs)
+
+    def _handle_repeat(self, inputs: List[Any], kwargs: Dict[str, Any]) -> torch.Tensor:
+        """
+        Handle torch.repeat operation by materializing inputs and executing.
+
+        tensor.repeat(2, 1) gets captured as repeat(tensor, 2, 1)
+        We materialize the input tensor and perform the repeat operation.
+        """
+        if not inputs or not isinstance(inputs[0], torch.Tensor):
+            raise ValueError("repeat expects a tensor as the first argument")
+
+        # Materialize the input tensor if it's a LazyTensor
+        tensor = _materialize_lazy_tensor(inputs[0])
+
+        # Get repeat dimensions (remaining arguments)
+        repeats = inputs[1:]
+        if not repeats:
+            raise ValueError("repeat expects at least one repeat dimension")
+
+        # Perform the repeat operation with interception disabled to avoid recursion
+        from .interception_control import disable_interception, InterceptionContext
+        with disable_interception(InterceptionContext.MATERIALIZATION):
+            return tensor.repeat(*repeats)
     
+    def _handle_embedding(self, inputs: List[Any], kwargs: Dict[str, Any]) -> torch.Tensor:
+        """Handle embedding operation (F.embedding or aten::embedding)."""
+        if len(inputs) < 2:
+            raise ValueError("embedding requires input and weight tensors")
+        
+        # Materialize inputs
+        input_tensor = _materialize_lazy_tensor(inputs[0])
+        weight_tensor = _materialize_lazy_tensor(inputs[1])
+        
+        # Call torch.nn.functional.embedding
+        import torch.nn.functional as F
+        from .interception_control import disable_interception, InterceptionContext
+        
+        with disable_interception(InterceptionContext.MATERIALIZATION):
+            return F.embedding(input_tensor, weight_tensor, *inputs[2:], **kwargs)
+    
+    def _handle_to(self, inputs: List[Any], kwargs: Dict[str, Any]) -> torch.Tensor:
+        """Handle tensor.to() type/device conversion."""
+        if not inputs or not isinstance(inputs[0], torch.Tensor):
+            raise ValueError("to expects a tensor as the first argument")
+        
+        tensor = _materialize_lazy_tensor(inputs[0])
+        
+        # Ensure tensor is fully materialized (not a LazyTensor)
+        # Keep materializing until we get a concrete tensor
+        max_attempts = 5
+        for attempt in range(max_attempts):
+            if not _is_lazy_tensor(tensor):
+                break
+            # Use executor's materialization which should return concrete tensors
+            from ...server.executor import _executor
+            if _executor is not None:
+                try:
+                    tensor = _executor._execute_recursive(tensor)
+                except Exception:
+                    tensor = tensor.materialize()
+            else:
+                tensor = tensor.materialize()
+        else:
+            # Still a LazyTensor after max attempts - use fallback
+            logger.warning(f"Failed to fully materialize LazyTensor after {max_attempts} attempts, using fallback")
+            # Fallback: try to get concrete value if available
+            if hasattr(tensor, 'concrete_value'):
+                tensor = tensor.concrete_value
+            else:
+                raise RuntimeError(f"Cannot materialize LazyTensor for aten::to operation")
+        
+        # Final check - ensure we have a concrete tensor
+        if _is_lazy_tensor(tensor):
+            raise RuntimeError(f"Tensor is still a LazyTensor after materialization attempts")
+        
+        # Use a direct approach: create new tensor with desired dtype/device
+        from .interception_control import disable_interception, InterceptionContext
+        
+        with disable_interception(InterceptionContext.MATERIALIZATION):
+            # Handle dtype conversion
+            if 'dtype' in kwargs:
+                target_dtype = kwargs['dtype']
+                # Check if already the right dtype
+                if tensor.dtype == target_dtype:
+                    # Still need to handle device if specified
+                    if 'device' in kwargs:
+                        return tensor.to(device=kwargs['device'])
+                    return tensor
+                
+                # Use a completely non-intercepted path for dtype conversion
+                # Convert to numpy first (this materializes and avoids interception)
+                import numpy as np
+                # Map PyTorch dtype to numpy dtype
+                dtype_map = {
+                    torch.long: np.int64,
+                    torch.int64: np.int64,
+                    torch.int32: np.int32,
+                    torch.int16: np.int16,
+                    torch.int8: np.int8,
+                    torch.float: np.float32,
+                    torch.float32: np.float32,
+                    torch.float64: np.float64,
+                    torch.double: np.float64,
+                    torch.half: np.float16,
+                    torch.bool: np.bool_,
+                }
+                numpy_dtype = dtype_map.get(target_dtype, np.float32)
+                
+                # Ensure tensor is on CPU for numpy conversion
+                # Use direct CPU conversion without interception
+                if tensor.device.type != 'cpu':
+                    # Use executor to move to CPU if needed
+                    cpu_tensor = tensor.cpu()
+                else:
+                    cpu_tensor = tensor
+                
+                # Convert to numpy (this bypasses interception when inside disable_interception)
+                numpy_data = cpu_tensor.detach().numpy()
+                
+                # Create new tensor with target dtype using numpy
+                # Get original torch.from_numpy function to avoid factory interception
+                # The original function should work regardless of interception state
+                from ..factory_interceptor import get_factory_interceptor
+                
+                # Use torch.empty() + manual copy to avoid factory interception entirely
+                # torch.empty() might be intercepted, so use original function
+                factory_interceptor = get_factory_interceptor()
+                
+                # Ensure executor flag is set to prevent factory interception
+                from ...server.executor import _in_executor
+                prev_executor_active = getattr(_in_executor, 'active', False)
+                _in_executor.active = True
+                
+                try:
+                    # Get original empty function
+                    if factory_interceptor and 'empty' in factory_interceptor._original_functions:
+                        original_empty = factory_interceptor._original_functions['empty']
+                        # Create empty tensor with target dtype and shape
+                        result = original_empty(numpy_data.shape, dtype=target_dtype)
+                    else:
+                        # Fallback: use torch.empty
+                        result = torch.empty(numpy_data.shape, dtype=target_dtype)
+                    
+                    # Verify result is concrete before copying data
+                    if _is_lazy_tensor(result):
+                        logger.error("Tensor creation returned LazyTensor - using from_numpy fallback")
+                        # Fallback: use from_numpy directly
+                        if factory_interceptor and 'from_numpy' in factory_interceptor._original_functions:
+                            original_from_numpy = factory_interceptor._original_functions['from_numpy']
+                            result = original_from_numpy(numpy_data.astype(numpy_dtype))
+                        else:
+                            result = torch.from_numpy(numpy_data.astype(numpy_dtype))
+                        
+                        if _is_lazy_tensor(result):
+                            raise RuntimeError("Cannot create concrete tensor for dtype conversion")
+                    else:
+                        # Copy data from numpy array directly (bypasses interception)
+                        # Use numpy's memory view to copy data efficiently
+                        result_numpy = result.detach().cpu().numpy()
+                        result_numpy[:] = numpy_data.astype(numpy_dtype)
+                finally:
+                    # Restore executor flag
+                    _in_executor.active = prev_executor_active
+                
+                # Preserve device (use original tensor's device, not cpu_tensor)
+                target_device = kwargs.get('device', tensor.device)
+                if target_device != result.device:
+                    # Only move if device is different
+                    # Use original from_numpy and then move, or handle device in kwargs
+                    if 'device' in kwargs:
+                        # Device conversion requested - move to target device
+                        result = result.to(device=kwargs['device'])
+                    elif tensor.device.type != 'cpu':
+                        # Preserve original device
+                        result = result.to(device=tensor.device)
+                return result
+            elif 'device' in kwargs:
+                # Device conversion only - use direct method
+                return tensor.to(device=kwargs['device'])
+            else:
+                # No conversion specified, return as-is
+                return tensor
+    
+    def _handle_binary_op(self, inputs: List[Any], kwargs: Dict[str, Any], op_name: str) -> torch.Tensor:
+        """Handle binary operations that might have LazyTensor inputs."""
+        # Materialize any LazyTensor inputs
+        materialized_inputs = [_materialize_lazy_tensor(inp) if isinstance(inp, torch.Tensor) else inp 
+                               for inp in inputs]
+        
+        # Dispatch to PyTorch
+        try:
+            if hasattr(torch.ops.aten, op_name):
+                aten_op = getattr(torch.ops.aten, op_name)
+                return aten_op(*materialized_inputs, **kwargs)
+        except Exception:
+            pass
+        
+        # Fallback to torch namespace
+        if hasattr(torch, op_name):
+            torch_op = getattr(torch, op_name)
+            return torch_op(*materialized_inputs, **kwargs)
+        
+        raise NotImplementedError(f"Cannot find operation {op_name}")
+
     def dispatch(self, operation: str, inputs: List[Any], kwargs: Dict[str, Any]) -> torch.Tensor:
         """
         Universal dispatch - handles 99% of operations automatically.
         
         Algorithm:
-        1. Check if operation needs argument preprocessing
-        2. Try PyTorch's ATen namespace (torch.ops.aten.X)
-        3. Try PyTorch's torch namespace (torch.X)
-        4. Try as tensor method (tensor.X())
-        5. Check special handlers (only for PyTorch bugs)
-        6. Fail with clear error
+        1. Materialize any remaining LazyTensor inputs (safety check)
+        2. Check if operation needs argument preprocessing
+        3. Try PyTorch's ATen namespace (torch.ops.aten.X)
+        4. Try PyTorch's torch namespace (torch.X)
+        5. Try as tensor method (tensor.X())
+        6. Check special handlers (only for PyTorch bugs)
+        7. Fail with clear error
         
         Args:
             operation: Operation name (e.g., 'aten::add', 'aten::softmax')
-            inputs: List of input tensors (already materialized)
+            inputs: List of input tensors (should be materialized but we'll handle any LazyTensors)
             kwargs: Keyword arguments
         
         Returns:
@@ -168,6 +465,16 @@ class UniversalDispatcher:
         Raises:
             NotImplementedError: If operation cannot be dispatched
         """
+        # Safety: Materialize any remaining LazyTensor inputs
+        # This is a defensive measure in case inputs slip through without materialization
+        materialized_inputs = []
+        for inp in inputs:
+            if isinstance(inp, torch.Tensor) and _is_lazy_tensor(inp):
+                materialized_inputs.append(_materialize_lazy_tensor(inp))
+            else:
+                materialized_inputs.append(inp)
+        inputs = materialized_inputs
+        
         # Normalize operation name
         op_name = operation.replace('aten::', '')
         

@@ -17,8 +17,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 import logging
 
-# Import Genie components
-from benchmarks.baselines import LocalPyTorchBaseline, GenieFullBaseline
+# Import Djinn components
+from benchmarks.baselines import LocalPyTorchBaseline, DjinnFullBaseline
 from benchmarks.workloads_detailed import RealisticLLMDecodeWorkload, RealisticLLMPrefillWorkload
 
 logger = logging.getLogger(__name__)
@@ -75,7 +75,7 @@ class RealMultiTenantBenchmark:
     Compares:
     1. FCFS: Process in submission order
     2. Round-Robin: Fair time-sharing
-    3. Semantic: Genie-aware scheduling
+    3. Semantic: Djinn-aware scheduling
     """
 
     def __init__(self,
@@ -117,7 +117,10 @@ class RealMultiTenantBenchmark:
         # Initialize baselines
         self.baselines = {
             'fcfs': LocalPyTorchBaseline(),
-            'semantic': GenieFullBaseline(),
+            'semantic': DjinnFullBaseline(
+                use_real_network=True,
+                server_addr="localhost:5556"
+            ),
         }
 
         # Initialize workloads
@@ -217,7 +220,7 @@ class RealMultiTenantBenchmark:
         return results
 
     async def run_semantic_baseline(self) -> MultiTenantResults:
-        """Run semantic baseline: Genie-aware scheduling."""
+        """Run semantic baseline: Djinn-aware scheduling."""
         logger.info("\n🧠 Running Semantic Baseline...")
 
         results = MultiTenantResults(scenario="Semantic")

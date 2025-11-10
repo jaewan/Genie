@@ -1,4 +1,4 @@
-"""Utilities for Genie benchmarking."""
+"""Utilities for Djinn benchmarking."""
 
 from benchmarks.utils.server_spawner import RemoteServerManager
 

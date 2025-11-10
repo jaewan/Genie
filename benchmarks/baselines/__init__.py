@@ -6,11 +6,11 @@ This module implements the active baseline configurations used in the
 """
 
 from .local_pytorch import LocalPyTorchBaseline
-from .genie_full_semantics import GenieFullBaseline
+from .djinn_full_semantics import DjinnFullBaseline
 from .ray_baseline import RayBaseline
 
 __all__ = [
     'LocalPyTorchBaseline',
-    'GenieFullBaseline',
+    'DjinnFullBaseline',
     'RayBaseline',
 ]

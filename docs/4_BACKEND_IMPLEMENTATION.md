@@ -304,7 +304,7 @@ torch.save(tensor_dict, buffer)
 bytes_data = buffer.getvalue()
 ```
 
-2. **Numpy buffer** (optimized, 23% faster):
+2. **Numpy buffer** (optimized):
 ```python
 # Format header for version detection
 buffer.write(FORMAT_NUMPY)
@@ -341,8 +341,8 @@ def deserialize_tensor(data: bytes) -> torch.Tensor:
 ```
 
 **Performance Characteristics**:
-- `torch.save`: ~185ms for 196MB tensor (GPT-2 output)
-- `numpy.save`: ~143ms for 196MB tensor (23% faster, zero-copy when possible)
+- `torch.save`: Standard serialization format
+- `numpy.save`: Optimized serialization format
 - **Automatic fallback**: Old data formats remain compatible
 
 ---
@@ -351,235 +351,187 @@ def deserialize_tensor(data: bytes) -> torch.Tensor:
 
 ### §5.1 Execution Architecture
 
-The backend uses a **modular execution pipeline** with integrated optimization components:
+The backend uses a **simple execution pipeline** focused on operation dispatch and graph materialization:
 
-1. **Optimization Executor** (`djinn/server/optimization_executor.py`)
-   - Integrates tensor registry, fusion compiler, phase-aware memory manager, and execution
-   - Handles operation dispatch and result routing
-   - Includes proactive memory pressure handling and TensorRT compilation
+1. **Executor** (`djinn/server/executor.py`)
+   - Core execution engine with universal operation dispatch
+   - Handles operation execution through PyTorch's dispatch system
+   - Recursive graph traversal with cycle detection
 
-2. **Phase Executor** (`djinn/server/phase_executor.py`)
-   - Phase-aware execution strategies (Prefill/Decode/Vision)
-   - Automatic phase detection and optimization switching
-   - Supports different memory allocation strategies per phase
+2. **Materialization Optimizer** (`djinn/server/materialization_optimizer.py`)
+   - Graph optimization for efficient batch execution
+   - Topological sort for dependency ordering
+   - CUDA streams for computation overlap
 
-3. **Subgraph Executor** (`djinn/server/subgraph_executor.py`)
-   - Core GPU execution engine
-   - Topological execution order with memory tracking
-   - Batch execution optimization with CUDA streams
-
-4. **Materialization Optimizer** (integrated into LazyTensor)
-   - Topological sort for efficient batch execution
-   - CUDA streams for computation and transfer overlap
-   - Pinned memory allocation for faster CPU↔GPU transfers
+3. **Graph Builder** (`djinn/frontend/core/graph_builder.py`)
+   - Constructs computation graphs from LazyTensor operations
+   - Handles subgraph materialization and result routing
 
 ### §5.2 Execution Flow
 
 ```python
 # In tcp_server.py operation handler
-async def _handle_operation_request(self, transfer_id, tensors, metadata):
-    # 1. Extract operation and parameters
+async def _handle_connection(reader, writer):
+    # 1. Read operation data using length-prefixed protocol
+    transfer_id = read_length_prefixed_string(reader)
+    metadata = read_length_prefixed_json(reader)
+    tensors = read_length_prefixed_tensors(reader)
+
+    # 2. Execute operation via executor
+    result = await execute_operation(metadata, tensors)
+
+    # 3. Send result back via same connection
+    await send_result(writer, transfer_id, result)
+
+async def execute_operation(metadata, tensors):
+    """Execute operation through executor pipeline."""
     operation = metadata.get('operation')
-    result_id = metadata.get('result_id')
 
-    # 2. Execute via optimization executor
-    result = await self.executor.execute(operation, *tensors)
+    # Route to appropriate execution path
+    if operation == 'materialize_graph':
+        # Graph materialization through materialization optimizer
+        result = await materialize_graph(tensors, metadata)
+    else:
+        # Direct operation execution through executor
+        result = await execute_single_operation(operation, tensors)
 
-    # 3. Send result back to client
-    await self.result_transport.send(result, target=client_target, ...)
+    return result
 ```
 
 ---
 
 ## §6. GPU Memory Management
 
-### §6.1 Three-Phase Memory Management
+### §6.1 Memory Management
 
-**Phase 1: Reactive Memory Management** ✅
-- Enhanced GPU cache with memory-aware eviction
-- Per-model memory tracking
+Djinn uses **basic GPU memory management** focused on efficient tensor handling and cleanup:
 
-**Phase 2: Semantic-Aware Memory Management** ✅
-- **Lifetime-based eviction** (`djinn/server/semantic_memory_manager.py`)
-- **Phase-aware budgets** (different strategies for prefill vs decode)
-- **Cost-based recomputation** (should we recompute or cache?)
+**Core Features**:
+- **Automatic GPU memory monitoring** via PyTorch CUDA memory stats
+- **LazyTensor cleanup** after materialization to prevent memory leaks
+- **CUDA cache management** with explicit empty_cache() calls
+- **Memory pressure detection** through utilization thresholds
 
-**Phase 3: Production Hardening** ✅
-- **Phase-aware memory manager** integrated into optimization executor
-- **Proactive memory pressure handler** with configurable thresholds
-- **TensorRT compilation** for repeated execution optimization
-- **Prometheus metrics integration** (50+ metrics)
-- **Adaptive budget tuner** (`djinn/server/adaptive_budget_tuner.py`)
+### §6.2 Memory Management Implementation
 
-### §6.2 Advanced Memory Features
-
-#### Phase-Aware Memory Manager
+#### GPU Memory Tracking
 ```python
-class PhaseAwareMemoryManager:
-    """Leverages SRG structure for intelligent memory decisions."""
+# In executor and materialization optimizer
+gpu_memory_used = torch.cuda.memory_allocated() / (1024 * 1024)  # MB
+gpu_memory_peak = torch.cuda.max_memory_allocated() / (1024 * 1024)  # MB
 
-    def __init__(self, total_gpu_memory_mb: float):
-        self.total_memory_mb = total_gpu_memory_mb
-        self.current_phase = ExecutionPhase.UNKNOWN
-        # Different budget allocations per phase
-        self.budgets: Dict[str, float] = {}
-
-    def adjust_for_phase(self, phase: ExecutionPhase) -> None:
-        """Adjust memory budgets based on execution phase."""
-        if phase == ExecutionPhase.LLM_PREFILL:
-            # Prefill: Parallel attention, needs activation memory
-            self.budgets = {
-                'weights': 0.3 * self.total_memory_mb,      # 30%
-                'activations': 0.6 * self.total_memory_mb,  # 60%
-                'kv_cache': 0.1 * self.total_memory_mb      # 10%
-            }
-        elif phase == ExecutionPhase.LLM_DECODE:
-            # Decode: Sequential, memory-bound, growing KV cache
-            self.budgets = {
-                'weights': 0.3 * self.total_memory_mb,      # 30%
-                'activations': 0.1 * self.total_memory_mb,  # 10%
-                'kv_cache': 0.6 * self.total_memory_mb      # 60%
-            }
+# Automatic cleanup after operations
+torch.cuda.empty_cache()
 ```
 
-#### Memory Pressure Handler
+#### Memory Pressure Handling
 ```python
-class MemoryPressureHandler:
-    """Proactive memory management with configurable thresholds."""
+def check_memory_pressure():
+    """Check if GPU memory usage is too high."""
+    if torch.cuda.is_available():
+        memory_used = torch.cuda.memory_allocated()
+        memory_total = torch.cuda.get_device_properties(0).total_memory
+        utilization = memory_used / memory_total
 
-    def __init__(self, total_gpu_memory_mb: float,
-                 warning_threshold_percent: float = 80.0,
-                 critical_threshold_percent: float = 95.0):
-        self.total_memory_mb = total_gpu_memory_mb
-        self.warning_threshold = warning_threshold_percent / 100.0
-        self.critical_threshold = critical_threshold_percent / 100.0
-        # Eviction callbacks for different memory pressure levels
-        self.eviction_callbacks: Dict[str, Callable] = {}
-
-    async def monitor_memory_pressure(self):
-        """Continuous monitoring with automatic eviction triggers."""
-        while True:
-            utilization = self._get_memory_utilization()
-            if utilization > self.critical_threshold:
-                await self._trigger_critical_eviction()
-            elif utilization > self.warning_threshold:
-                await self._trigger_warning_eviction()
-            await asyncio.sleep(self.monitoring_interval)
+        if utilization > 0.9:  # 90% threshold
+            torch.cuda.empty_cache()
+            return True
+    return False
 ```
 
-#### Adaptive Budget Tuning
+#### LazyTensor Memory Cleanup
 ```python
-class AdaptiveBudgetTuner:
-    """Learns optimal phase-specific memory budgets."""
+# After materialization in graph_builder.py
+def materialize(self, target_tensor):
+    result = self._materialize_local()
 
-    def record_observation(self, phase: str, utilization: float):
-        """Track memory utilization per phase."""
-        # Collect observations across workloads
-        # Calculate efficiency scores
-        # Gradually adjust budgets toward optimal allocation
+    # Automatic compaction after materialization
+    try:
+        # Clean up intermediate LazyTensors
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass  # Don't fail if cleanup fails
+
+    return result
 ```
 
-### §6.3 Memory Distribution (32GB GPU)
+### §6.3 Memory Monitoring
 
-| Phase | Weights | Activations | KV Cache |
-|-------|---------|-------------|----------|
-| **Prefill** | 30% | 60% | 10% |
-| **Decode** | 30% | 10% | 60% |
-
-*Budgets adapt based on observed utilization patterns.*
+**Memory tracking is implemented through**:
+- **PyTorch CUDA memory stats** for allocation tracking
+- **Peak memory monitoring** during operations
+- **Automatic cleanup** after materialization
+- **Memory pressure detection** with threshold-based response
 
 ---
 
 ## §7. Result Handling
 
-### §7.1 Result Serialization
+### §7.1 Result Handling
 
-**Server-side**: Automatic format selection with optimized numpy serialization
+**Implementation**: Simple tensor serialization using PyTorch's built-in save/load functionality
 
+**Server-side serialization**:
 ```python
-# tcp_server.py result handling
-try:
-    if USE_OPTIMIZED_SERIALIZATION and OPTIMIZED_SERIALIZATION_AVAILABLE:
-        logger.info("✅ Using optimized numpy.save serialization")
-        result_bytes = serialize_tensor(result, use_numpy=True)
-    else:
-        logger.warning("⚠️ Using fallback torch.save serialization")
-        result_buffer = io.BytesIO()
-        torch.save(result, result_buffer)
-        result_bytes = result_buffer.getvalue()
-except Exception as e:
-    logger.error(f"Failed to serialize result: {e}")
-    # Error handling with fallback to local execution
+# In tcp_server.py
+import io
+import torch
+
+def serialize_result(tensor):
+    """Serialize tensor result for network transfer."""
+    buffer = io.BytesIO()
+    torch.save(tensor, buffer)
+    return buffer.getvalue()
 ```
 
-**Client-side**: Format-aware deserialization with backward compatibility
-
+**Client-side deserialization**:
 ```python
-# coordinator.py result handling
-def execute_remote_subgraph(self, ...):
-    # Receive message with type and payload
-    msg_type_bytes = await reader.readexactly(1)
-    msg_type = msg_type_bytes[0]
-
-    size_bytes = await reader.readexactly(4)
-    size = int.from_bytes(size_bytes, 'big')
-    result_data = await reader.readexactly(size)
-
-    if msg_type == 0x04:  # RESULT
-        # Try optimized deserialization first
-        try:
-            from ...server.serialization import deserialize_tensor
-            response = deserialize_tensor(result_data)
-        except Exception as e:
-            # Fallback to torch.load for compatibility
-            import io
-            result_buffer = io.BytesIO(result_data)
-            response = torch.load(result_buffer)
-    # Handle other message types...
+# In coordinator.py
+def deserialize_result(data):
+    """Deserialize received tensor data."""
+    buffer = io.BytesIO(data)
+    return torch.load(buffer)
 ```
 
-### §7.2 Result Routing
+**Protocol**: Results are sent back through the same TCP connection using length-prefixed framing
 
-**Client Port Resolution**: Results are routed back to the correct client port
+### §7.2 Connection Management
 
-```python
-# Extract client port from operation metadata
-client_port = metadata.get('client_port')
-if client_port:
-    result_target = f"{client_ip}:{client_port}"
-    await self.result_transport.send(result, target=result_target, ...)
-```
+**Implementation**: Results are returned through the same TCP connection used for the request
 
 ---
 
-## §8. Error Recovery and Fault Tolerance
+## §8. Error Handling
 
-### §8.1 Error Types
+### §8.1 Basic Error Handling
 
-| Error Type | Cause | Recovery Strategy |
-|------------|-------|-------------------|
-| **Network Timeout** | Slow network, server overload | Retry with exponential backoff |
-| **Connection Error** | Server down, network partition | Failover to alternative server |
-| **GPU OOM** | Insufficient GPU memory | Evict cached models, retry |
-| **Execution Error** | Invalid operation, shape mismatch | Log error, return to client |
-| **Serialization Error** | Unsupported type | Fallback to local execution |
+**Current Implementation**:
+- **Network errors**: Connection failures result in failed operations
+- **Execution errors**: Operations that fail during execution return error responses
+- **Memory errors**: GPU OOM errors trigger cache cleanup and retry
 
-### §8.2 Recovery Implementation
-
-**GPU OOM Recovery**:
+**Error Response Format**:
 ```python
-try:
-    result = executor.execute(operation, *tensors)
-except torch.cuda.OutOfMemoryError:
-    # 1. Evict cached models (LRU)
-    GPU_CACHE.evict_oldest()
-
-    # 2. Clear CUDA cache
-    torch.cuda.empty_cache()
-
-    # 3. Retry execution
-    result = executor.execute(operation, *tensors)
+# Error responses are sent as serialized error messages
+error_data = {"error": str(exception), "operation": operation_name}
+await send_error_response(writer, error_data)
 ```
+
+### §8.2 Recovery Mechanisms
+
+**Memory Recovery**:
+```python
+# Basic GPU memory recovery
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()  # Clear GPU cache on errors
+```
+
+**Network Recovery**:
+- Connection errors result in operation failure
+- No automatic retry or failover implemented
+- Client handles reconnection logic
 
 ---
 
@@ -632,70 +584,67 @@ async def health_check():
 
 ## §10. Performance Optimization
 
-### §10.1 Optimization Checklist
+### §10.1 Current Optimizations
 
-- ✅ **TCP transport** (production default)
-- ✅ **Enable GPU cache** (recommended for repeated workloads)
-- ✅ **Enable graph cache** (recommended for repeated graphs)
-- ✅ **Connection pooling** (automatic with TCP)
-- ✅ **Optimized numpy serialization** (23% faster for large tensors)
-- ✅ **Phase-aware memory management** (automatic budget adjustment)
-- ✅ **Proactive memory pressure handling** (OOM prevention)
-- ✅ **TensorRT compilation** (2-3x speedup for repeated executions)
-- ✅ **Materialization optimization** (batch execution with CUDA streams)
-- ✅ **Differential graph protocol** (10x network reduction for iterative workloads)
-- 🔧 **Zero-copy serialization** (optional, requires specific tensor layouts)
-- 🔧 **Operation batching** (automatic for small operations)
-- 🔧 **DPDK transport** (optional, requires specialized hardware)
+**Implemented Features**:
+- ✅ **TCP transport** with asyncio and binary protocol
+- ✅ **Length-prefixed framing** for efficient tensor transfer
+- ✅ **Basic GPU memory management** with automatic cleanup
+- ✅ **Materialization optimization** with CUDA streams
+- ✅ **Universal operation dispatch** for broad compatibility
+- ✅ **LazyTensor shape inference** for proper tensor handling
 
-### §10.2 Performance Targets
+**Architecture Focus**:
+- **Simplicity over complexity**: Direct implementation without advanced caching layers
+- **Broad compatibility**: Universal dispatch handles diverse operations
+- **Memory safety**: Automatic cleanup prevents leaks
+- **Efficient serialization**: Binary protocol for tensor transfer
+
+### §10.2 Performance Characteristics
 
 **Latency**:
-- Local execution: <5ms
-- Network round-trip: <10ms (TCP), <1ms (DPDK)
-- Serialization: 23% faster for large tensors (196MB: 185ms → 143ms)
+- Local execution: Variable (depends on operation complexity)
+- Network round-trip: TCP-based with minimal overhead
+- Serialization: Efficient for GPU tensors
 
 **Throughput**:
-- Single GPU: 1000+ operations/second
-- Multi-GPU: 5000+ operations/second
-- Iterative workloads: 10x network reduction with differential protocol
+- Single GPU: Operation-dependent performance
+- Network: TCP-limited for large tensor transfers
+- Memory: Automatic GPU cache management
 
 **Memory Efficiency**:
-- Cache hit rate: >90%
-- Memory utilization: Phase-aware adaptive (70% of GPU memory)
-- OOM prevention: Proactive monitoring with configurable thresholds
+- Automatic cleanup after operations
+- Memory pressure detection and response
+- No advanced caching layers implemented
 
-**Optimization Impact**:
-- Large tensor serialization: 23% reduction in result handling time
-- Iterative workloads: Up to 10x reduction in network transfers
-- Memory-constrained workloads: Phase-specific budget optimization
-- Repeated executions: TensorRT compilation for 2-3x speedup
+**Current Limitations**:
+- No advanced caching (GPU cache, graph cache)
+- No phase-aware memory management
+- No TensorRT compilation
+- Basic memory management without adaptive budgeting
 
 ---
 
 ## §11. Conclusion
 
-The Djinn backend provides **production-ready remote execution** with integrated performance optimizations:
+The Djinn backend provides **functional remote execution** with a focus on simplicity and broad compatibility:
 
-✅ **Asyncio TCP architecture** (not HTTP/FastAPI)
-✅ **Binary length-prefixed protocol** for efficient tensor transfer
-✅ **Optimized numpy serialization** (23% faster for large tensors)
-✅ **Phase-aware memory management** with automatic budget adjustment
-✅ **Proactive memory pressure handling** with configurable thresholds
-✅ **TensorRT compilation** for repeated execution optimization
-✅ **Differential graph protocol** for 10x network reduction in iterative workloads
-✅ **Materialization optimization** with batch execution and CUDA streams
-✅ **Comprehensive error recovery** and fault tolerance
-✅ **Production monitoring** with health checks and metrics
+✅ **Asyncio TCP architecture** with direct binary protocol
+✅ **Length-prefixed framing** for efficient tensor transfer
+✅ **Universal operation dispatch** for broad PyTorch compatibility
+✅ **Basic GPU memory management** with automatic cleanup
+✅ **Materialization optimization** with CUDA streams
+✅ **LazyTensor shape inference** for proper tensor handling
 
 **Design Highlights**:
-- Modular architecture supports multiple transports
-- Configurable caching layers with semantic awareness
-- Integrated optimization pipeline (serialization → memory → execution → network)
-- Built-in monitoring and diagnostics
-- Automatic performance optimization based on workload patterns
+- Simple architecture prioritizing functionality over complex optimizations
+- Broad operation compatibility through universal dispatch
+- Memory-safe implementation with automatic cleanup
+- Efficient binary protocol for GPU tensor transfer
 
-**Architecture Evolution**:
-- Phase 1: Basic reactive memory management
-- Phase 2: Semantic-aware memory and execution
-- Phase 3: Production hardening with integrated optimizations
+**Current Implementation Status**:
+- Basic remote execution functionality working
+- Broad PyTorch operation compatibility
+- Memory management with automatic cleanup
+- Simple TCP transport without advanced features
+- No advanced caching, phase-aware memory, or TensorRT integration

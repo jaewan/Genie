@@ -16,6 +16,21 @@ from .interception_control import should_intercept, disable_interception, Interc
 # ✅ OPTIMIZATION: Import MetadataPlaceholder at module level to avoid per-call import overhead
 from ...core.metadata import MetadataPlaceholder
 
+# ✅ Phase 2: Import reduction optimizer for smart remote execution
+from .reduction_optimizer import should_execute_reduction_remotely
+
+# ✅ Phase 3: Import placement strategy for mixed local/remote operations
+from .placement_strategy import PlacementStrategy
+
+# ✅ Phase 6A: Import enhanced operation classifier with context awareness
+from .operation_classifier import OperationClassifier, OperationClass
+
+# ✅ Phase 6B: Import shape inference system
+from .shape_inference import ShapeInference
+
+# ✅ Phase 7A: Import transformer operation classifier
+from .transformer_operations import classify_transformer_op, should_execute_transformer_op_remotely
+
 # ============================================================================
 # PHASE 2 FIX: Minimal Tensor Wrapper for detach() Edge Case
 # ============================================================================
@@ -624,6 +639,19 @@ class LazyTensor(torch.Tensor):
         object.__setattr__(self, '_kwargs', kwargs or {})
         object.__setattr__(self, '_tensor_id', id(self))
 
+        # ✅ PHASE 6B: Store inferred shape
+        # Try to infer the output shape without materialization
+        inferred_shape = shape
+        if inferred_shape is None:
+            try:
+                inferred_shape = self._infer_output_shape(operation, inputs, kwargs)
+                # Use inferred shape as the actual shape for the underlying tensor
+                shape = inferred_shape
+            except Exception:
+                inferred_shape = None
+
+        object.__setattr__(self, '_inferred_shape', inferred_shape)
+
         # ✅ OPTIMIZATION: Defer ALL shape computation until property access
         # Never store computed shapes during capture - always compute lazily
         object.__setattr__(self, '_shape', None)
@@ -783,6 +811,14 @@ class LazyTensor(torch.Tensor):
 
             # ✅ Normal case: Create new LazyTensor (ALWAYS if we got here)
             op_name = cls._normalize_op_name(func)
+
+            # ✅ PHASE 7A: Check for transformer operations and route accordingly
+            transformer_op_type = classify_transformer_op(op_name)
+            if transformer_op_type is not None:
+                # This is a transformer operation - apply special routing
+                return cls._handle_transformer_operation(
+                    transformer_op_type, func, args, kwargs, op_name
+                )
 
             # ✅ PHASE 2: Try automatic dispatch first (handles ALL operations automatically)
             from .automatic_dispatch import get_automatic_dispatcher
@@ -1051,8 +1087,9 @@ class LazyTensor(torch.Tensor):
 
                 # Derive output shape: indices shape + embedding dimension(s)
                 indices_shape = ()
-                if input_is_lazy and hasattr(input_tensor, '_shape'):
-                    indices_shape = tuple(object.__getattribute__(input_tensor, '_shape'))
+                if input_is_lazy and hasattr(input_tensor, 'shape'):
+                    # Use the shape property which handles lazy computation
+                    indices_shape = tuple(input_tensor.shape)
                 elif hasattr(input_tensor, 'shape'):
                     try:
                         indices_shape = tuple(int(dim) for dim in input_tensor.shape)
@@ -1060,8 +1097,9 @@ class LazyTensor(torch.Tensor):
                         indices_shape = tuple(input_tensor.shape)
 
                 weight_shape = None
-                if weight_is_lazy and hasattr(weight_tensor, '_shape'):
-                    weight_shape = object.__getattribute__(weight_tensor, '_shape')
+                if weight_is_lazy and hasattr(weight_tensor, 'shape'):
+                    # Use the shape property which handles lazy computation
+                    weight_shape = weight_tensor.shape
                 elif hasattr(weight_tensor, 'shape'):
                     weight_shape = torch.Size(weight_tensor.shape)
 
@@ -1074,7 +1112,7 @@ class LazyTensor(torch.Tensor):
                 from ..semantic.metadata_capture import get_metadata_capture
                 metadata = get_metadata_capture().capture_metadata(
                     operation='aten::embedding',
-                    inputs=[weight_tensor, input_tensor],
+                    inputs=[input_tensor, weight_tensor],
                     kwargs=op_kwargs,
                 )
 
@@ -1090,13 +1128,71 @@ class LazyTensor(torch.Tensor):
 
                 return cls(
                     operation='aten::embedding',
-                    inputs=[weight_tensor, input_tensor],
+                    inputs=[input_tensor, weight_tensor],
                     kwargs=op_kwargs,
                     shape=output_shape,
                     dtype=weight_dtype,
                     device=weight_device,
                     metadata=metadata,
                 )
+
+        # ✅ SPECIAL CASE: layer_norm - requires special handling to avoid circular interception
+        if func_name == 'layer_norm':
+            # layer_norm signature: layer_norm(input, normalized_shape, weight=None, bias=None, eps=1e-05)
+            if len(args) >= 1:
+                input_tensor = args[0]
+                normalized_shape = args[1] if len(args) > 1 else kwargs.get('normalized_shape')
+                weight_tensor = args[2] if len(args) > 2 else kwargs.get('weight')
+                bias_tensor = args[3] if len(args) > 3 else kwargs.get('bias')
+                eps = args[4] if len(args) > 4 else kwargs.get('eps', 1e-05)
+                
+                input_is_lazy = type(input_tensor).__name__ == 'LazyTensor'
+                weight_is_lazy = weight_tensor is not None and type(weight_tensor).__name__ == 'LazyTensor'
+                bias_is_lazy = bias_tensor is not None and type(bias_tensor).__name__ == 'LazyTensor'
+                
+                if input_is_lazy or weight_is_lazy or bias_is_lazy:
+                    # Build operation kwargs
+                    op_kwargs = {'normalized_shape': normalized_shape, 'eps': eps}
+                    
+                    # Gather all lazy inputs (input, weight, bias)
+                    lazy_inputs = [input_tensor]
+                    if weight_is_lazy:
+                        lazy_inputs.append(weight_tensor)
+                    if bias_is_lazy:
+                        lazy_inputs.append(bias_tensor)
+                    
+                    # Infer output shape - layer_norm doesn't change input shape
+                    output_shape = getattr(input_tensor, 'shape', None)
+                    if output_shape is None and hasattr(input_tensor, '_shape'):
+                        output_shape = object.__getattribute__(input_tensor, '_shape')
+                    
+                    # Infer output dtype - same as input
+                    output_dtype = getattr(input_tensor, 'dtype', torch.float32)
+                    if output_dtype is None and hasattr(input_tensor, '_dtype'):
+                        output_dtype = object.__getattribute__(input_tensor, '_dtype')
+                    
+                    # Get device
+                    output_device = getattr(input_tensor, 'device', torch.device('cpu'))
+                    if input_is_lazy and hasattr(input_tensor, '_original_device'):
+                        output_device = object.__getattribute__(input_tensor, '_original_device')
+                    
+                    # Capture metadata
+                    from ..semantic.metadata_capture import get_metadata_capture
+                    metadata = get_metadata_capture().capture_metadata(
+                        operation='aten::layer_norm',
+                        inputs=lazy_inputs,
+                        kwargs=op_kwargs,
+                    )
+                    
+                    return cls(
+                        operation='aten::layer_norm',
+                        inputs=[input_tensor, weight_tensor, bias_tensor],
+                        kwargs=op_kwargs,
+                        shape=output_shape,
+                        dtype=output_dtype,
+                        device=output_device,
+                        metadata=metadata,
+                    )
 
         # ✅ PHASE 2: Handle detach() FIRST, before ANY other checks
         # detach() is called internally by PyTorch during tensor creation
@@ -1375,11 +1471,24 @@ class LazyTensor(torch.Tensor):
 
             # ✅ NEW: Use ShapeInference for torch functions too
             from .shape_inference import ShapeInference
-            
+
             try:
-                inferred_shape = ShapeInference.infer_shape(op_name, list(args), kwargs)
-                if op_name == 'aten::softmax':
-                    logger.info(f"🔍 Softmax shape inference result: {inferred_shape}")
+                # Extract shapes from tensor arguments for ShapeInference
+                input_shapes = []
+                positional_args = []
+
+                for arg in args:
+                    if isinstance(arg, torch.Tensor):
+                        input_shapes.append(arg.shape)
+                    elif hasattr(arg, 'shape'):  # LazyTensor
+                        input_shapes.append(arg.shape)
+                    else:
+                        positional_args.append(arg)
+
+                # Call ShapeInference with proper format: (input_shapes,), *positional_args, **kwargs
+                inferred_shape = ShapeInference.infer_shape(op_name, tuple(input_shapes), *positional_args, **kwargs)
+                if op_name == 'aten::repeat':
+                    logger.info(f"🔍 Repeat shape inference: inputs={input_shapes}, args={positional_args}, result={inferred_shape}")
             except Exception as e:
                 logger.warning(f"Shape inference failed for {op_name}: {e}", exc_info=True)
                 inferred_shape = torch.Size([])
@@ -1458,7 +1567,33 @@ class LazyTensor(torch.Tensor):
     def tensor(cls, data, dtype=None, device=None, requires_grad=False):
         """Create LazyTensor from data."""
         # For tensor creation from data, we already know the shape and don't need torch.empty
-        shape = torch.Size(data.shape) if hasattr(data, 'shape') else torch.Size([])
+        if hasattr(data, 'shape'):
+            shape = torch.Size(data.shape)
+        elif hasattr(data, '__len__'):
+            # Handle Python sequences (lists, tuples) - compute proper shape
+            def get_sequence_shape(seq):
+                """Recursively compute shape of nested sequences."""
+                if not hasattr(seq, '__len__'):
+                    return []
+                try:
+                    if len(seq) == 0:
+                        return [0]
+                    # Check if first element is also a sequence
+                    first_elem = seq[0]
+                    if hasattr(first_elem, '__len__') and not isinstance(first_elem, str):
+                        # Nested sequence - recurse
+                        inner_shape = get_sequence_shape(first_elem)
+                        return [len(seq)] + inner_shape
+                    else:
+                        # 1D sequence
+                        return [len(seq)]
+                except TypeError:
+                    return []
+
+            shape_list = get_sequence_shape(data)
+            shape = torch.Size(shape_list)
+        else:
+            shape = torch.Size([])
         inferred_dtype = dtype or (data.dtype if hasattr(data, 'dtype') else torch.float32)
 
         # Store original device before processing
@@ -1518,7 +1653,7 @@ class LazyTensor(torch.Tensor):
             kwargs['device'] = device
 
         # ✅ NEW: Capture semantic metadata for tensor creation
-        from .metadata_capture import get_metadata_capture
+        from ..semantic.metadata_capture import get_metadata_capture
         metadata = get_metadata_capture().capture_metadata(
             operation='aten::tensor',
             inputs=[data],
@@ -1535,6 +1670,10 @@ class LazyTensor(torch.Tensor):
             device=device,
             metadata=metadata  # ✅ NEW: Pass semantic metadata
         )
+
+        # ✅ FIX: For tensor creation from data, store the known shape immediately
+        # This prevents shape inference failures when the shape is already known
+        object.__setattr__(wrapper, '_shape', shape)
 
         return wrapper
 
@@ -1601,7 +1740,7 @@ class LazyTensor(torch.Tensor):
             kwargs['device'] = device
 
         # ✅ NEW: Capture semantic metadata for as_tensor
-        from .metadata_capture import get_metadata_capture
+        from ..semantic.metadata_capture import get_metadata_capture
         metadata = get_metadata_capture().capture_metadata(
             operation='aten::as_tensor',
             inputs=[data],
@@ -1625,7 +1764,7 @@ class LazyTensor(torch.Tensor):
     def from_numpy(cls, ndarray, dtype=None, device=None):
         """Create LazyTensor from numpy array."""
         # ✅ NEW: Capture semantic metadata for factory functions
-        from .metadata_capture import get_metadata_capture
+        from ..semantic.metadata_capture import get_metadata_capture
         metadata = get_metadata_capture().capture_metadata(
             operation='aten::from_numpy',
             inputs=[ndarray],
@@ -1796,11 +1935,20 @@ class LazyTensor(torch.Tensor):
         runtime_state = get_runtime_state()
         if runtime_state.coordinator and runtime_state.server_address:
             # Remote execution path
-            logger.debug(f"Routing materialization to remote server: {runtime_state.server_address}")
-            return self._materialize_remote()
+            logger.info(f"🌐 Attempting remote execution on server: {runtime_state.server_address}")
+            try:
+                return self._materialize_remote()
+            except Exception as e:
+                logger.warning(f"❌ Remote execution failed: {e}, falling back to local execution")
+                logger.info("🏠 Using local execution (remote execution failed)")
+                return self._materialize_local()
         else:
-            # Local execution path (fallback)
-            logger.debug("Local execution (remote not configured)")
+            # Local execution path (no remote configuration)
+            if hasattr(self, 'device') and str(self.device).startswith('remote_accelerator'):
+                logger.warning("⚠️  Remote accelerator device detected but no remote server configured. Using local execution.")
+                logger.info("🏠 Using local execution (remote server not configured)")
+            else:
+                logger.debug("🏠 Using local execution")
             return self._materialize_local()
 
     def _materialize_local(self) -> torch.Tensor:
@@ -1890,6 +2038,7 @@ class LazyTensor(torch.Tensor):
             # ✅ Week 3: Enable differential updates for iterative workloads
             graph_id = f"subgraph_{id(self)}"  # Use tensor ID as graph identifier
 
+            # Define async execution function
             async def execute_subgraph_async():
                 return await coordinator.execute_remote_subgraph(
                     subgraph=subgraph.serialize(),
@@ -1939,13 +2088,49 @@ class LazyTensor(torch.Tensor):
         """
         try:
             # Execute the factory operation locally
-            from .shape_inference import ShapeInference
+            op_name = tensor.operation.split('::')[1]
 
-            # Get operation function
-            op_func = getattr(torch.ops.aten, tensor.operation.split('::')[1])
-
-            # Execute with the stored arguments
-            result = op_func(*tensor.inputs, **tensor.kwargs)
+            # Use torch functions directly instead of torch.ops.aten
+            if op_name == 'randn':
+                # torch.randn(size, ...)
+                result = torch.randn(*tensor.inputs, **tensor.kwargs)
+            elif op_name == 'zeros':
+                # torch.zeros(size, ...)
+                result = torch.zeros(*tensor.inputs, **tensor.kwargs)
+            elif op_name == 'ones':
+                # torch.ones(size, ...)
+                result = torch.ones(*tensor.inputs, **tensor.kwargs)
+            elif op_name == 'empty':
+                # torch.empty(size, ...)
+                result = torch.empty(*tensor.inputs, **tensor.kwargs)
+            elif op_name == 'full':
+                # torch.full(size, fill_value, ...)
+                result = torch.full(*tensor.inputs, **tensor.kwargs)
+            elif op_name == 'tensor':
+                # torch.tensor(data, ...)
+                result = torch.tensor(*tensor.inputs, **tensor.kwargs)
+            elif op_name == 'as_tensor':
+                # torch.as_tensor(data, ...)
+                result = torch.as_tensor(*tensor.inputs, **tensor.kwargs)
+            elif op_name == 'from_numpy':
+                # torch.from_numpy(data, ...)
+                result = torch.from_numpy(*tensor.inputs, **tensor.kwargs)
+            elif op_name == 'eye':
+                # torch.eye(n, ...)
+                result = torch.eye(*tensor.inputs, **tensor.kwargs)
+            elif op_name == 'arange':
+                # torch.arange(start, end, ...)
+                result = torch.arange(*tensor.inputs, **tensor.kwargs)
+            elif op_name == 'linspace':
+                # torch.linspace(start, end, ...)
+                result = torch.linspace(*tensor.inputs, **tensor.kwargs)
+            elif op_name == 'logspace':
+                # torch.logspace(start, end, ...)
+                result = torch.logspace(*tensor.inputs, **tensor.kwargs)
+            else:
+                # Fallback to torch.ops.aten
+                op_func = getattr(torch.ops.aten, op_name)
+                result = op_func(*tensor.inputs, **tensor.kwargs)
 
             logger.debug(f"Materialized factory op {tensor.operation} locally")
             return result
@@ -2466,13 +2651,42 @@ class LazyTensor(torch.Tensor):
         # Check if already computed (cached)
         cached_shape = object.__getattribute__(self, '_shape')
         if cached_shape is not None:
-            return cached_shape
+            # Ensure cached shape is torch.Size
+            if isinstance(cached_shape, torch.Size):
+                return cached_shape
+            elif isinstance(cached_shape, (tuple, list)):
+                # Convert to torch.Size and cache it
+                cached_shape = torch.Size(cached_shape)
+                object.__setattr__(self, '_shape', cached_shape)
+                return cached_shape
+            else:
+                # Invalid cached shape, clear it and recompute
+                object.__setattr__(self, '_shape', None)
 
-        # Compute now (only once) - LAZY COMPUTATION
+        # ✅ FIX: Use pre-computed _inferred_shape if available (from constructor)
+        # This avoids circular dependencies when ShapeInference tries to access input shapes
+        inferred_shape = object.__getattribute__(self, '_inferred_shape')
+        if inferred_shape is not None:
+            # Ensure it's a torch.Size, not a LazyTensor or other type
+            if isinstance(inferred_shape, (tuple, list)):
+                inferred_shape = torch.Size(inferred_shape)
+            elif not isinstance(inferred_shape, torch.Size):
+                # Safety: convert to torch.Size
+                inferred_shape = torch.Size(inferred_shape) if hasattr(inferred_shape, '__iter__') else torch.Size([])
+            # Cache the result
+            object.__setattr__(self, '_shape', inferred_shape)
+            return inferred_shape
+
+        # Fallback: Compute now (only once) - LAZY COMPUTATION
         from .shape_inference import ShapeInference
         try:
             inferred_shape = ShapeInference.infer_shape(self.operation, self.inputs, self.kwargs)
             if inferred_shape is not None:
+                # Ensure it's a torch.Size
+                if isinstance(inferred_shape, (tuple, list)):
+                    inferred_shape = torch.Size(inferred_shape)
+                elif not isinstance(inferred_shape, torch.Size):
+                    inferred_shape = torch.Size(inferred_shape) if hasattr(inferred_shape, '__iter__') else torch.Size([])
                 # Cache the result
                 object.__setattr__(self, '_shape', inferred_shape)
                 return inferred_shape
@@ -2557,12 +2771,42 @@ class LazyTensor(torch.Tensor):
             return shape
         
         # Check if shape is empty
-        if not shape:
+        if shape is None:
             raise IndexError(f"Cannot access dimension {dim} of tensor with empty shape. "
                            f"LazyTensor(op={self.operation}) has uninitialized shape. "
                            f"This usually means shape inference failed for this operation.")
         
-        # Normalize negative dimensions
+        # Normalize negative dimensions first (before scalar check)
+        # Ensure shape is a tuple/torch.Size before calling len()
+        if not isinstance(shape, (tuple, torch.Size)):
+            raise TypeError(f"Expected shape to be tuple or torch.Size, got {type(shape)}")
+        
+        # Handle scalar tensors (shape = ())
+        if len(shape) == 0:
+            if dim is not None:
+                # Try materializing to get actual shape (shape inference might be wrong)
+                try:
+                    materialized = self.materialize()
+                    actual_shape = materialized.shape
+                    if len(actual_shape) > 0:
+                        # Shape inference was wrong - use actual shape
+                        if dim < 0:
+                            dim = len(actual_shape) + dim
+                        if 0 <= dim < len(actual_shape):
+                            return actual_shape[dim]
+                except Exception:
+                    # Materialization failed, use inferred shape
+                    pass
+                
+                # Normalize negative dimension for scalar (though it will still be invalid)
+                if dim < 0:
+                    dim = len(shape) + dim  # This will be -1 + 0 = -1, still invalid
+                raise IndexError(f"Dimension out of range for scalar tensor with dim={dim}. "
+                               f"LazyTensor(op={self.operation}) has scalar shape. "
+                               f"This usually indicates incorrect shape inference.")
+            return shape
+        
+        # Normalize negative dimensions for non-scalar tensors
         if dim < 0:
             dim = len(shape) + dim
         
@@ -2715,6 +2959,34 @@ class LazyTensor(torch.Tensor):
         # Use torch.reshape which goes through __torch_dispatch__
         return torch.reshape(self, shape)
     
+    # ===================================================================
+    # TYPE CONVERSION METHODS
+    # ===================================================================
+    
+    def long(self):
+        """Convert to long (int64) dtype."""
+        return self.to(dtype=torch.long)
+    
+    def float(self):
+        """Convert to float (float32) dtype."""
+        return self.to(dtype=torch.float)
+    
+    def double(self):
+        """Convert to double (float64) dtype."""
+        return self.to(dtype=torch.double)
+    
+    def int(self):
+        """Convert to int (int32) dtype."""
+        return self.to(dtype=torch.int32)
+    
+    def half(self):
+        """Convert to half (float16) dtype."""
+        return self.to(dtype=torch.half)
+    
+    def bool(self):
+        """Convert to bool dtype."""
+        return self.to(dtype=torch.bool)
+    
     @property
     def T(self):
         """Transpose property - return transposed view."""
@@ -2782,6 +3054,431 @@ class LazyTensor(torch.Tensor):
             inputs = list(size_args)
 
         return cls(operation=op_name, inputs=inputs, kwargs=kwargs)
+
+    # ===================================================================
+    # PHASE 1: MATERIALIZATION TRIGGERS (Hybrid Execution Model)
+    # ===================================================================
+    # These methods are critical for transformer compatibility.
+    # They implement controlled materialization boundaries that enable
+    # both correctness (proper return types for control flow) and
+    # optimization (smart placement of reduction operations).
+    #
+    # Design: Operations that need concrete values for Python control flow
+    # or introspection force materialization of the pending graph and
+    # return the correct Python type (bool, int, etc.) instead of LazyTensor.
+    
+    def all(self, dim=None, keepdim=False):
+        """
+        Return True if all elements are nonzero.
+        
+        Control flow case (dim=None, keepdim=False):
+            - Must return Python bool, not LazyTensor
+            - Triggers full graph materialization
+            - Used in: if tensor.all(): ...
+        
+        Tensor reduction case (dim or keepdim specified):
+            - Returns LazyTensor with boolean results
+            - Does not trigger materialization
+        """
+        if dim is None and not keepdim:
+            # MATERIALIZATION_TRIGGER: Control flow usage
+            # Materialize the entire pending graph
+            concrete_self = self.materialize()
+            # Call all() on the concrete tensor (torch.Tensor, not LazyTensor)
+            # Use torch.all() function to avoid recursion
+            result = torch.all(concrete_self)
+            # Return Python bool, NOT LazyTensor
+            return bool(result)
+        else:
+            # REDUCTION_OPERATION: Keep as deferred execution
+            return LazyTensor(
+                operation='all',
+                inputs=[self],
+                kwargs={'dim': dim, 'keepdim': keepdim}
+            )
+    
+    def any(self, dim=None, keepdim=False):
+        """
+        Return True if any element is nonzero.
+        
+        Similar to all() - control flow case returns bool,
+        tensor case returns LazyTensor.
+        """
+        if dim is None and not keepdim:
+            # MATERIALIZATION_TRIGGER: Control flow usage
+            concrete_self = self.materialize()
+            # Use torch.any() to avoid recursion
+            result = torch.any(concrete_self)
+            return bool(result)
+        else:
+            # REDUCTION_OPERATION: Keep as deferred execution
+            return LazyTensor(
+                operation='any',
+                inputs=[self],
+                kwargs={'dim': dim, 'keepdim': keepdim}
+            )
+    
+    def item(self):
+        """
+        Return the single element of a 1-element tensor as a Python scalar.
+        
+        ALWAYS a MATERIALIZATION_TRIGGER - must return Python int/float/bool,
+        not LazyTensor.
+        """
+        concrete_self = self.materialize()
+        return concrete_self.item()
+    
+    def __bool__(self):
+        """
+        Support for if/while statements: if tensor: ...
+        
+        MATERIALIZATION_TRIGGER: Python requires a concrete bool for control flow.
+        """
+        concrete_self = self.materialize()
+        return bool(concrete_self)
+    
+    def __int__(self):
+        """
+        Support for int() conversion.
+        
+        MATERIALIZATION_TRIGGER: Python requires a concrete integer.
+        """
+        concrete_self = self.materialize()
+        return int(concrete_self)
+    
+    def __float__(self):
+        """
+        Support for float() conversion.
+        
+        MATERIALIZATION_TRIGGER: Python requires a concrete float.
+        """
+        concrete_self = self.materialize()
+        return float(concrete_self)
+    
+    def __index__(self):
+        """
+        Support for indexing operations like list[tensor].
+        
+        MATERIALIZATION_TRIGGER: Requires concrete integer index.
+        """
+        concrete_self = self.materialize()
+        return int(concrete_self)
+    
+    def tolist(self):
+        """
+        Convert tensor to Python list/scalar.
+        
+        MATERIALIZATION_TRIGGER: Must return Python native types, not LazyTensor.
+        
+        🔧 PHASE 8 FIX: Avoid recursion by using torch.Tensor.tolist directly
+        """
+        concrete_self = self.materialize()
+        
+        # ✅ CRITICAL: Use torch.Tensor.tolist directly, not the intercepted method
+        with disable_interception(InterceptionContext.MATERIALIZATION):
+            return torch.Tensor.tolist(concrete_self)
+    
+    def numpy(self):
+        """
+        Convert tensor to NumPy array.
+        
+        MATERIALIZATION_TRIGGER: Must materialize to create actual array data.
+        
+        🔧 PHASE 8 FIX: Avoid recursion by using torch.Tensor.numpy directly
+        We disable interception to prevent re-wrapping the materialized tensor.
+        """
+        concrete_self = self.materialize()
+        
+        # ✅ CRITICAL: Use torch.Tensor.numpy directly, not the intercepted method
+        # This prevents recursion when the materialized tensor is still intercepted
+        with disable_interception(InterceptionContext.MATERIALIZATION):
+            # Call numpy on the torch.Tensor directly, bypassing any __torch_dispatch__
+            return torch.Tensor.numpy(concrete_self)
+    
+    # ===================================================================
+    # PHASE 2: REDUCTION OPERATIONS (Smart Remote Execution)
+    # ===================================================================
+    # These methods handle reduction operations intelligently:
+    # - If remote execution is beneficial (50,000x reduction), keep remote
+    # - Otherwise, fall back to local execution
+    
+    def argmax(self, dim=None, keepdim=False):
+        """
+        Return indices of maximum values.
+        
+        REDUCTION_OPERATION: Typically reduces tensor by 10,000x+
+        - Should execute remotely to avoid transferring massive logits tensor
+        - Example: [1, 1024, 50257] float32 (200MB) → [1, 1024] int64 (4KB)
+        """
+        # Check if remote execution is beneficial
+        if should_execute_reduction_remotely('argmax', [self]):
+            # Create LazyTensor for remote execution
+            return LazyTensor(
+                operation='argmax',
+                inputs=[self],
+                kwargs={'dim': dim, 'keepdim': keepdim},
+                metadata={'optimization': 'remote_reduction'}
+            )
+        else:
+            # Fall back to local execution
+            concrete_self = self.materialize()
+            return concrete_self.argmax(dim=dim, keepdim=keepdim)
+    
+    def argmin(self, dim=None, keepdim=False):
+        """
+        Return indices of minimum values.
+        
+        REDUCTION_OPERATION: Similar to argmax.
+        """
+        if should_execute_reduction_remotely('argmin', [self]):
+            return LazyTensor(
+                operation='argmin',
+                inputs=[self],
+                kwargs={'dim': dim, 'keepdim': keepdim},
+                metadata={'optimization': 'remote_reduction'}
+            )
+        else:
+            concrete_self = self.materialize()
+            return concrete_self.argmin(dim=dim, keepdim=keepdim)
+    
+    def sum(self, dim=None, keepdim=False, dtype=None):
+        """
+        Sum elements.
+        
+        REDUCTION_OPERATION: Can reduce significantly depending on dimensions.
+        """
+        if should_execute_reduction_remotely('sum', [self]):
+            return LazyTensor(
+                operation='sum',
+                inputs=[self],
+                kwargs={'dim': dim, 'keepdim': keepdim, 'dtype': dtype},
+                metadata={'optimization': 'remote_reduction'}
+            )
+        else:
+            concrete_self = self.materialize()
+            return concrete_self.sum(dim=dim, keepdim=keepdim, dtype=dtype)
+    
+    def mean(self, dim=None, keepdim=False, dtype=None):
+        """
+        Compute mean of elements.
+        
+        REDUCTION_OPERATION: Similar to sum.
+        """
+        if should_execute_reduction_remotely('mean', [self]):
+            return LazyTensor(
+                operation='mean',
+                inputs=[self],
+                kwargs={'dim': dim, 'keepdim': keepdim, 'dtype': dtype},
+                metadata={'optimization': 'remote_reduction'}
+            )
+        else:
+            concrete_self = self.materialize()
+            return concrete_self.mean(dim=dim, keepdim=keepdim, dtype=dtype)
+    
+    def max(self, dim=None, keepdim=False):
+        """
+        Return maximum values.
+        
+        REDUCTION_OPERATION: Reduces to scalar or along dimension.
+        """
+        if should_execute_reduction_remotely('max', [self]):
+            return LazyTensor(
+                operation='max',
+                inputs=[self],
+                kwargs={'dim': dim, 'keepdim': keepdim},
+                metadata={'optimization': 'remote_reduction'}
+            )
+        else:
+            concrete_self = self.materialize()
+            result = concrete_self.max(dim=dim, keepdim=keepdim)
+            # max() returns namedtuple if dim specified, scalar otherwise
+            return result
+    
+    def min(self, dim=None, keepdim=False):
+        """
+        Return minimum values.
+        
+        REDUCTION_OPERATION: Similar to max.
+        """
+        if should_execute_reduction_remotely('min', [self]):
+            return LazyTensor(
+                operation='min',
+                inputs=[self],
+                kwargs={'dim': dim, 'keepdim': keepdim},
+                metadata={'optimization': 'remote_reduction'}
+            )
+        else:
+            concrete_self = self.materialize()
+            result = concrete_self.min(dim=dim, keepdim=keepdim)
+            return result
+    
+    # ===================================================================
+    # PHASE 3: MIXED PLACEMENT STRATEGY (Binary Operations)
+    # ===================================================================
+    # These handle operations with mixed local/remote inputs by determining
+    # the most efficient execution location.
+    
+    def _handle_binary_operation(self, other, operation: str, 
+                                 fallback_fn) -> 'LazyTensor':
+        """
+        Generic handler for binary operations with mixed placement.
+        
+        Strategy:
+        1. Determine if inputs are local/remote
+        2. Execute where most data resides
+        3. Avoid unnecessary data transfers
+        
+        Args:
+            other: Second operand
+            operation: Operation name (e.g., 'add', 'matmul')
+            fallback_fn: Function to call if need to materialize
+        
+        Returns:
+            LazyTensor or result depending on execution path
+        """
+        # Check if we can keep both as lazy (remote)
+        if isinstance(other, LazyTensor):
+            # Both remote - execute there
+            return LazyTensor(
+                operation=operation,
+                inputs=[self, other],
+                metadata={'optimization': 'binary_lazy'}
+            )
+        
+        # Mixed case: self is LazyTensor, other is concrete
+        # Use placement strategy to decide
+        should_remote = PlacementStrategy.should_execute_remotely([self, other])
+        
+        if should_remote:
+            # Keep operation remote (will materialize other if needed on remote)
+            return LazyTensor(
+                operation=operation,
+                inputs=[self, other],
+                metadata={'optimization': 'binary_mixed_remote'}
+            )
+        else:
+            # Execute locally - materialize self first
+            concrete_self = self.materialize()
+            return fallback_fn(concrete_self, other)
+
+    @classmethod
+    def _handle_transformer_operation(cls, op_type, func, args, kwargs, op_name):
+        """
+        Phase 7A: Handle transformer operations with specialized routing.
+
+        Routes transformer operations based on:
+        - Operation type (normalization, activation, attention, etc.)
+        - Input sizes and characteristics
+        - Performance trade-offs
+        """
+        from .transformer_operations import TransformerOpType, should_execute_transformer_op_remotely
+
+        # Extract input shapes for decision making
+        input_shapes = []
+        for arg in args:
+            if isinstance(arg, torch.Tensor):
+                input_shapes.append(arg.shape)
+            elif type(arg).__name__ == 'LazyTensor':
+                # Use inferred shape if available
+                if hasattr(arg, '_inferred_shape') and arg._inferred_shape is not None:
+                    input_shapes.append(arg._inferred_shape)
+                else:
+                    input_shapes.append(getattr(arg, 'shape', torch.Size([])))
+
+        # Get execution recommendation from transformer optimizer
+        should_remote = should_execute_transformer_op_remotely(op_type, input_shapes)
+
+        if should_remote:
+            # Route to remote execution
+            return cls._create_remote_lazy_tensor(func, args, kwargs, op_name, op_type)
+        else:
+            # Route to local execution (materialize inputs and execute)
+            return cls._create_local_lazy_tensor(func, args, kwargs, op_name, op_type)
+
+    @classmethod
+    def _create_remote_lazy_tensor(cls, func, args, kwargs, op_name, op_type):
+        """Create LazyTensor for remote execution."""
+        from .transformer_operations import TransformerOpType
+
+        # For remote execution, keep as lazy tensor
+        # Use normal LazyTensor creation process but with transformer metadata
+        metadata = {'transformer_op_type': op_type.value, 'execution_hint': 'remote'}
+
+        # Create LazyTensor normally (this will go through the standard process)
+        # but mark it for remote execution
+        return cls._create_lazy_tensor_with_metadata(func, args, kwargs, metadata)
+
+    @classmethod
+    def _create_local_lazy_tensor(cls, func, args, kwargs, op_name, op_type):
+        """Create LazyTensor for local execution."""
+        from .transformer_operations import TransformerOpType
+
+        # For local execution, we can still defer some operations
+        # But mark them to prefer local execution
+        metadata = {'transformer_op_type': op_type.value, 'execution_hint': 'local'}
+
+        return cls._create_lazy_tensor_with_metadata(func, args, kwargs, metadata)
+
+    @classmethod
+    def _create_lazy_tensor_with_metadata(cls, func, args, kwargs, metadata):
+        """Create LazyTensor with additional metadata."""
+        op_name = cls._normalize_op_name(func)
+
+        # Infer device from input tensors
+        inferred_device = None
+        if 'device' not in kwargs:
+            for arg in args:
+                if type(arg).__name__ == 'LazyTensor':
+                    if hasattr(arg, '_original_device') and arg._original_device:
+                        inferred_device = arg._original_device
+                        break
+
+        if inferred_device is None:
+            inferred_device = torch.device('cpu')
+
+        # Create LazyTensor with transformer metadata
+        return cls(
+            operation=op_name,
+            inputs=list(args),
+            kwargs=kwargs,
+            device=inferred_device,
+            metadata=metadata
+        )
+
+    def __add__(self, other):
+        """Addition with mixed placement support."""
+        return self._handle_binary_operation(
+            other, 'add',
+            lambda a, b: a + b
+        )
+    
+    def __sub__(self, other):
+        """Subtraction with mixed placement support."""
+        return self._handle_binary_operation(
+            other, 'sub',
+            lambda a, b: a - b
+        )
+    
+    def __mul__(self, other):
+        """Multiplication with mixed placement support."""
+        return self._handle_binary_operation(
+            other, 'mul',
+            lambda a, b: a * b
+        )
+    
+    def __truediv__(self, other):
+        """Division with mixed placement support."""
+        return self._handle_binary_operation(
+            other, 'truediv',
+            lambda a, b: a / b
+        )
+    
+    def __matmul__(self, other):
+        """Matrix multiplication with mixed placement support."""
+        return self._handle_binary_operation(
+            other, 'matmul',
+            lambda a, b: a @ b
+        )
 
 
 
@@ -2859,6 +3556,61 @@ class LazyTensor(torch.Tensor):
         
         return None
     
+    @staticmethod
+    def _infer_output_shape(operation: str, inputs: List[Any], 
+                           kwargs: Optional[Dict[str, Any]]) -> Optional[torch.Size]:
+        """
+        Phase 6B: Infer output shape without materialization.
+        
+        Uses ShapeInference module to compute output shapes based on input shapes
+        and operation semantics.
+        """
+        try:
+            # Collect input shapes
+            input_shapes = []
+            for inp in inputs:
+                if isinstance(inp, torch.Tensor):
+                    input_shapes.append(inp.shape)
+                elif isinstance(inp, LazyTensor):
+                    # For LazyTensor, use its inferred shape if available
+                    inferred = object.__getattribute__(inp, '_inferred_shape')
+                    if inferred is not None:
+                        input_shapes.append(inferred)
+                    else:
+                        # Fallback: try to get shape from properties
+                        try:
+                            input_shapes.append(inp.shape)
+                        except Exception:
+                            return None  # Can't infer
+                else:
+                    # Scalar or other type
+                    continue
+            
+            if not input_shapes:
+                return None
+            
+            # Use ShapeInference to compute output shape
+            output_shape = ShapeInference.infer_shape(
+                operation, 
+                tuple(input_shapes),
+                *kwargs.get('args', []) if kwargs else [],
+                **{k: v for k, v in (kwargs or {}).items() if k != 'args'}
+            )
+            
+            return torch.Size(output_shape) if output_shape else None
+        
+        except Exception as e:
+            logger.debug(f"Shape inference failed for {operation}: {e}")
+            return None
+    
+    @property
+    def inferred_shape(self) -> Optional[torch.Size]:
+        """Get inferred output shape for this operation."""
+        try:
+            return object.__getattribute__(self, '_inferred_shape')
+        except AttributeError:
+            return None
+
     @classmethod
     def _apply_shape_pattern(cls, pattern_name: str, inputs: List[Any]) -> Optional[torch.Size]:
         """

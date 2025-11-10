@@ -49,7 +49,8 @@ djinn/
     ├── types.py       # Common type definitions (ExecutionPhase, etc.)
     ├── exceptions.py  # Error handling
     ├── config.py      # Configuration management
-    └── coordinator.py # Cluster coordination primitives
+    ├── coordinator.py # Cluster coordination primitives
+    └── device_compatibility.py # PyTorch device compatibility layer
 ```
 
 ### Key Design Principles
@@ -284,8 +285,8 @@ class LazyTensor(torch.Tensor):
         object.__setattr__(self, '_device', device)     # Logical device
         object.__setattr__(self, '_metadata', None)     # Computed lazily
 
-        # Initialize as meta tensor to avoid GPU memory allocation during capture
-        super().__init__([], dtype=dtype, device='meta' if device != 'meta' else device)
+        # Initialize as meta tensor for zero memory overhead during capture
+        super().__init__([], dtype=dtype, device='meta')
 
     @property
     def shape(self) -> torch.Size:
@@ -346,7 +347,73 @@ class LazyTensor(torch.Tensor):
 - **Memory Efficiency**: Uses meta device during capture to avoid GPU memory allocation
 - **Fallback Mechanisms**: Graceful degradation when shape inference or metadata capture fails
 
-### §3.4 LazyTensor DAG Graph Builder
+### §3.4 Device Compatibility Layer
+
+**Automatic Model Weight Conversion** (`djinn/core/device_compatibility.py`):
+```python
+class RemoteAcceleratorSupport:
+    """Enables PyTorch-compatible device semantics for remote accelerators."""
+
+    @classmethod
+    def initialize(cls):
+        # Store original method and patch nn.Module.to()
+        cls._original_module_to = nn.Module.to
+
+        def patched_to(self, device=None, dtype=None, non_blocking=False, memory_format=torch.preserve_format):
+            # Handle device argument variations
+            device_str = str(device) if device else ""
+
+            if 'remote_accelerator' in device_str:
+                # Convert all parameters to LazyTensors
+                from djinn.frontend.core.lazy_tensor import LazyTensor
+
+                param_count = 0
+                for name, param in self.named_parameters(recurse=False):
+                    if not isinstance(param.data, LazyTensor):
+                        lazy_data = LazyTensor.tensor(
+                            data=param.data,
+                            device=device_str,
+                            dtype=param.dtype,
+                            requires_grad=param.requires_grad
+                        )
+                        new_param = torch.nn.Parameter(lazy_data, requires_grad=param.requires_grad)
+                        setattr(self, name, new_param)
+                        param_count += 1
+
+                # Convert buffers (batch norm stats, etc.)
+                buffer_count = 0
+                for name, buffer in self.named_buffers(recurse=False):
+                    if not isinstance(buffer, LazyTensor):
+                        lazy_buffer = LazyTensor.tensor(
+                            data=buffer,
+                            device=device_str,
+                            dtype=buffer.dtype,
+                            requires_grad=False
+                        )
+                        setattr(self, name, lazy_buffer)
+                        buffer_count += 1
+
+                # Recursively convert child modules
+                for child_name, child_module in self.named_children():
+                    child_module.to(device, dtype, non_blocking, memory_format)
+
+                return self
+
+            # Fall back to original for other devices
+            return cls._original_module_to(self, device, dtype, non_blocking, memory_format)
+
+        nn.Module.to = patched_to
+        nn.Module.remote = lambda self: self.to('remote_accelerator:0')
+```
+
+**Key Features**:
+- **PyTorch Compatibility**: Follows standard `nn.Module.to(device)` conventions exactly
+- **Framework Integration**: Compatible with HuggingFace Accelerate, PyTorch Lightning, and other ML frameworks
+- **Gradient Preservation**: Maintains autograd compatibility for both training and inference
+- **Automatic Conversion**: Transparently converts parameters, buffers, and nested modules to LazyTensors
+- **Thread-Safe Implementation**: Uses proper parameter replacement to avoid PyTorch's Parameter constraints
+
+### §3.5 LazyTensor DAG Graph Builder
 
 **Strategy: LazyTensor DAG for all models**
 
@@ -555,9 +622,9 @@ The server layer handles **distributed execution coordination** - orchestrating 
 - `multi_tenant_coordinator.py`: Fairness, priority queues, resource allocation
 
 **Execution Engines:**
-- `subgraph_executor.py`: Fine-grained operation execution
-- `block_executor.py`: Coarse-grained block execution
-- `real_gpu_executor.py`: Direct GPU execution with memory management
+- `subgraph_executor.py`: Fine-grained operation execution with O(1) network transfer
+- `smart_subgraph_builder.py`: Intelligent subgraph construction avoiding lazy property triggers
+- `materialization_optimizer.py`: Local execution with topological sorting and CUDA streams
 
 **JIT Compilation:**
 - `tensorrt_compiler.py`: TensorRT optimization with profiling
@@ -565,10 +632,15 @@ The server layer handles **distributed execution coordination** - orchestrating 
 - `block_compiler.py`: TorchScript block compilation
 
 **Caching Systems:**
-- `gpu_cache.py`: Persistent GPU weight storage
+- `gpu_cache.py`: Persistent GPU weight storage with memory-aware eviction
 - `graph_cache.py`: Compiled graph caching with LRU eviction
-- `subgraph_cache.py`: Avoids rebuilding identical computation subgraphs
+- `subgraph_cache.py`: DAG-based subgraph caching avoiding rebuilds
 - `tensor_registry.py`: Remote tensor lifecycle management
+
+**Memory Management:**
+- `memory_metrics.py`: Comprehensive Prometheus metrics integration
+- `memory_pressure_handler.py`: Proactive OOM prevention and recovery
+- `adaptive_budget_tuner.py`: Learning-based memory allocation optimization
 
 **Differential Updates:**
 - `differential_graph.py`: Only send graph changes for iterative workloads using delta computation
@@ -577,24 +649,31 @@ The server layer handles **distributed execution coordination** - orchestrating 
 
 ### §5.2 Execution Strategies
 
-**Smart Fragmentation** (Default):
+**Smart Subgraph Execution** (Default):
 ```
-Client Request → Server → Subgraph Execution → Result
-    ↓              ↓            ↓
-Cached Graph → JIT Compile → GPU Execute
+Client Request → Server → Subgraph Builder → Remote Execution → Result
+    ↓              ↓            ↓                    ↓
+LazyTensor DAG → Operation Extraction → Network Transfer → GPU Execute
 ```
+
+**Key Components**:
+- **SmartSubgraphBuilder** (`djinn/server/smart_subgraph_builder.py`): Intelligent subgraph construction avoiding lazy property triggers
+- **SubgraphCache** (`djinn/server/subgraph_cache.py`): DAG-based caching with LRU eviction for repeated patterns
+- **Single Network Transfer**: O(1) network round-trip vs O(n) individual operations
+- **Factory Operation Handling**: Local execution of tensor creation operations
 
 **Block Compilation** (Large graphs):
 ```
-Client Request → Server → Block Execution → Result
-    ↓              ↓            ↓
-TorchScript → TensorRT → GPU Execute
+Client Request → Server → Block Compilation → Remote Execution → Result
+    ↓              ↓            ↓                    ↓
+LazyTensor DAG → TorchScript/TensorRT → Network Transfer → GPU Execute
 ```
 
 **Multi-Tenant Coordination:**
-- **Fair Queuing**: Prevents starvation across tenants
-- **Load Balancing**: Distributes work across GPU cluster
-- **Resource Isolation**: Memory and compute quotas per tenant
+- **Fair Queuing**: Prevents starvation across concurrent clients
+- **Load Balancing**: Automatic workload distribution across GPU cluster
+- **Resource Isolation**: Per-client memory and compute quotas
+- **Priority Management**: SLA-aware request scheduling
 
 ### §5.3 Materialization Optimization
 
@@ -1010,7 +1089,6 @@ Result: Meet SLA for interactive workload
 ┌─────────────────────────────────────────────────────────────────┐
 │  PHASE 12: USER RECEIVES RESULT                                 │
 │  • Return concrete torch.Tensor to user                         │
-│  • Total: Cold 380ms | Warm 28ms (2.38× slowdown)              │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1115,7 +1193,7 @@ For specific performance characteristics, run the benchmarking suite on your har
 1. **In-place operations**: Converted to out-of-place (slight memory overhead ~5%)
 2. **Mixed device operations**: Force materialization (lose potential optimizations)
 3. **Memory management**: Long-running workloads require graph compaction
-4. **Cold start overhead**: 32.2× slowdown (amortized over multiple requests)
+4. **Cold start overhead**: Initial execution latency (amortized over multiple requests)
 
 ### §10.3 Future Work
 

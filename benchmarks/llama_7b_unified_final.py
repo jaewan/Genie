@@ -3,7 +3,7 @@ UNIFIED LLAMA-2-7B EXPERIMENT FOR OSDI
 
 The single experiment that proves disaggregation necessity:
 - Show clear OOM cliff on single GPU
-- Show Genie handles larger batches on 2 GPUs
+- Show Djinn handles larger batches on 2 GPUs
 - Measure actual GPU utilization
 - All results on SAME MODEL
 """
@@ -124,7 +124,7 @@ def run_unified_llama_experiment():
     
     results = []
     pytorch_oom_batch = None
-    genie_max_batch = None
+    djinn_max_batch = None
 
     print("=" * 100)
     print("PHASE 1: SINGLE GPU BASELINE (PyTorch)")
@@ -204,7 +204,7 @@ def run_unified_llama_experiment():
     print("Strategy: Chunked processing with eviction (simulating 2-GPU disaggregation)")
     print("")
 
-    # Reset to original batch sizes for Genie
+    # Reset to original batch sizes for Djinn
     for batch_size in batch_sizes:
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
@@ -214,7 +214,7 @@ def run_unified_llama_experiment():
         print(f"Batch size: {batch_size:3d} | ", end="", flush=True)
 
         try:
-            # Genie strategy: Process in chunks, simulating distribution
+            # Djinn strategy: Process in chunks, simulating distribution
             # Chunk size = half to simulate 2-GPU split
             chunk_size = max(1, batch_size // 2)
             num_chunks = (batch_size + chunk_size - 1) // chunk_size
@@ -248,8 +248,8 @@ def run_unified_llama_experiment():
 
             print(f"✅ Success | Memory: {peak_memory:5.1f} GB | Util: {util:5.1f}% | Time: {elapsed_ms:6.0f} ms")
 
-            if genie_max_batch is None or batch_size > genie_max_batch:
-                genie_max_batch = batch_size
+            if djinn_max_batch is None or batch_size > djinn_max_batch:
+                djinn_max_batch = batch_size
 
             results.append(ExperimentResult(
                 batch_size=batch_size,
@@ -276,12 +276,12 @@ def run_unified_llama_experiment():
     print("=" * 100)
     print("")
 
-    if pytorch_oom_batch and genie_max_batch:
-        improvement = genie_max_batch / pytorch_oom_batch
+    if pytorch_oom_batch and djinn_max_batch:
+        improvement = djinn_max_batch / pytorch_oom_batch
         print(f"CRITICAL FINDING:")
         print(f"  PyTorch max batch (single GPU): {pytorch_oom_batch - 1}")
         print(f"  PyTorch OOMs at batch: {pytorch_oom_batch}")
-        print(f"  Genie max batch (2 GPUs): {genie_max_batch}")
+        print(f"  Djinn max batch (2 GPUs): {djinn_max_batch}")
         print(f"  Disaggregation enables: {improvement:.1f}× larger batches")
         print("")
 
@@ -297,17 +297,17 @@ def run_unified_llama_experiment():
     print("MEMORY EFFICIENCY COMPARISON:")
     
     single_gpu_results = [r for r in results if r.setup == "single_gpu" and r.success]
-    genie_results = [r for r in results if r.setup == "2_gpu_disaggregated" and r.success]
+    djinn_results = [r for r in results if r.setup == "2_gpu_disaggregated" and r.success]
     
-    if single_gpu_results and genie_results:
+    if single_gpu_results and djinn_results:
         # Find comparable batch size
         for batch in [32, 48, 64]:
             sg = next((r for r in single_gpu_results if r.batch_size == batch), None)
-            ge = next((r for r in genie_results if r.batch_size == batch), None)
+            ge = next((r for r in djinn_results if r.batch_size == batch), None)
             
             if sg and ge:
                 savings = (sg.peak_memory_gb - ge.peak_memory_gb) / sg.peak_memory_gb * 100
-                print(f"  Batch {batch}: PyTorch {sg.peak_memory_gb:.1f}GB → Genie {ge.peak_memory_gb:.1f}GB ({savings:+.1f}% savings)")
+                print(f"  Batch {batch}: PyTorch {sg.peak_memory_gb:.1f}GB → Djinn {ge.peak_memory_gb:.1f}GB ({savings:+.1f}% savings)")
 
     # GPU utilization
     print("")
@@ -330,8 +330,8 @@ def run_unified_llama_experiment():
             "gpu": f"{torch.cuda.get_device_name(0)} ({total_gpu_mem:.1f}GB)",
             "pytorch_max_batch": pytorch_oom_batch - 1 if pytorch_oom_batch else None,
             "pytorch_oom_batch": pytorch_oom_batch,
-            "genie_max_batch": genie_max_batch,
-            "improvement": (genie_max_batch / pytorch_oom_batch) if pytorch_oom_batch and genie_max_batch else None,
+            "djinn_max_batch": djinn_max_batch,
+            "improvement": (djinn_max_batch / pytorch_oom_batch) if pytorch_oom_batch and djinn_max_batch else None,
             "results": [
                 {
                     "batch_size": r.batch_size,
@@ -354,13 +354,13 @@ def run_unified_llama_experiment():
     print("=" * 100)
     print("")
 
-    if pytorch_oom_batch and genie_max_batch:
+    if pytorch_oom_batch and djinn_max_batch:
         min_memory_savings = None
         max_memory_savings = None
         
         for batch in [32, 48, 64]:
             sg = next((r for r in single_gpu_results if r.batch_size == batch), None)
-            ge = next((r for r in genie_results if r.batch_size == batch), None)
+            ge = next((r for r in djinn_results if r.batch_size == batch), None)
             
             if sg and ge:
                 savings = (sg.peak_memory_gb - ge.peak_memory_gb) / sg.peak_memory_gb * 100
@@ -372,14 +372,14 @@ def run_unified_llama_experiment():
                     max_memory_savings = max(max_memory_savings, savings)
 
         avg_util = sum(all_utils) / len(all_utils) if all_utils else 0
-        improvement = genie_max_batch / pytorch_oom_batch
+        improvement = djinn_max_batch / pytorch_oom_batch
 
         paragraph = f"""
-We evaluate Genie on Llama-2-7B (6.7B parameters), a production language model that 
+We evaluate Djinn on Llama-2-7B (6.7B parameters), a production language model that 
 challenges single-GPU memory capacity. With batch size {pytorch_oom_batch}, PyTorch exhausts the 
-24GB GPU memory limit. Genie disaggregates the workload across two GPUs, enabling batch size {genie_max_batch}
-({improvement:.1f}× larger). On feasible batch sizes ({max(single_gpu_results[-1].batch_size if single_gpu_results else 1, 32)}-{genie_max_batch}), 
-Genie achieves {max_memory_savings:.1f}% memory reduction through semantic chunked processing and lifetime-aware eviction, 
+24GB GPU memory limit. Djinn disaggregates the workload across two GPUs, enabling batch size {djinn_max_batch}
+({improvement:.1f}× larger). On feasible batch sizes ({max(single_gpu_results[-1].batch_size if single_gpu_results else 1, 32)}-{djinn_max_batch}), 
+Djinn achieves {max_memory_savings:.1f}% memory reduction through semantic chunked processing and lifetime-aware eviction, 
 while maintaining {avg_util:.1f}% GPU utilization. This demonstrates that semantic-driven disaggregation is necessary 
 to unlock the efficiency potential of large language models beyond single-GPU capacity limits.
 """

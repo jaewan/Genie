@@ -1,6 +1,6 @@
 # Djinn: Semantic-Driven GPU Disaggregation
 
-**Status**: Performance Evaluation via Running Benchmarks
+**Status**: Framework-Level GPU Disaggregation System
 **Last Updated**: November 5, 2025
 **Version**: 1.0.0
 
@@ -10,7 +10,7 @@
 
 Djinn is a **framework-level GPU disaggregation system** that enables efficient sharing of AI accelerators across applications by leveraging semantic information from ML frameworks. Unlike traditional disaggregation approaches that operate blindly at the hardware level, Djinn uses **Semantically Rich Graphs (SRGs)** to make intelligent placement, scheduling, and data movement decisions.
 
-**Key Innovation**: Djinn operates at the **ML framework layer** (PyTorch), capturing application intent to enable optimizations that are invisible to lower layers—**without requiring any application code changes**.
+**Key Innovation**: Djinn operates at the **ML framework layer** (PyTorch), capturing application intent through transparent tensor interception and semantic analysis to enable optimizations invisible to lower layers—**without requiring any application code changes**.
 
 ---
 
@@ -124,9 +124,81 @@ Djinn bridges application intent and hardware execution through a **clean four-l
 
 ## Key Innovations
 
-### 1. Semantically Rich Graph (SRG)
+### 1. LazyTensor DAG with Deferred Computation (SRG implementation of Djinn)
 
-The SRG is Djinn's central abstraction—a **portable intermediate representation** that captures both computational structure and semantic intent:
+Djinn captures all tensor operations in a **LazyTensor DAG** (SRG implementation for PyTorch) that defers expensive computations during graph construction:
+
+**Lazy Properties Design**:
+```python
+import logging
+logger = logging.getLogger(__name__)
+
+class LazyTensor(torch.Tensor):
+    """torch.Tensor subclass with deferred computation for performance."""
+
+    def __init__(self, operation, inputs, kwargs=None, shape=None, dtype=None, device=None, metadata=None):
+        # Core operation structure stored immediately
+        object.__setattr__(self, '_operation', operation)
+        object.__setattr__(self, '_inputs', inputs)
+        object.__setattr__(self, '_kwargs', kwargs or {})
+
+        # Deferred expensive computations
+        object.__setattr__(self, '_shape', shape)        # Lazy-computed if None
+        object.__setattr__(self, '_dtype', dtype)
+        object.__setattr__(self, '_device', device)
+        object.__setattr__(self, '_metadata', metadata)  # Lazy-computed if MetadataPlaceholder
+
+        # Zero memory overhead during capture (meta device)
+        super().__init__([], dtype=dtype, device='meta')
+
+    @property
+    def shape(self) -> torch.Size:
+        """Lazy shape computation with caching."""
+        cached_shape = object.__getattribute__(self, '_shape')
+        if cached_shape is not None:
+            return cached_shape
+
+        # Compute shape only when first accessed
+        from .shape_inference import ShapeInference
+        try:
+            computed_shape = ShapeInference.infer_shape(
+                object.__getattribute__(self, '_operation'),
+                object.__getattribute__(self, '_inputs'),
+                object.__getattribute__(self, '_kwargs')
+            )
+            if computed_shape is not None:
+                object.__setattr__(self, '_shape', computed_shape)
+                return computed_shape
+        except Exception as e:
+            logger.debug(f"Shape inference failed: {e}")
+
+        # Fallback to empty shape
+        fallback_shape = torch.Size([])
+        object.__setattr__(self, '_shape', fallback_shape)
+        return fallback_shape
+
+    @property
+    def metadata(self) -> Dict[str, Any]:
+        """Lazy metadata computation with caching."""
+        cached_metadata = object.__getattribute__(self, '_metadata')
+        if cached_metadata is not None and not isinstance(cached_metadata, MetadataPlaceholder):
+            return cached_metadata
+
+        # Compute metadata only when first accessed
+        from ..semantic.metadata_capture import get_metadata_capture
+        computed_metadata = get_metadata_capture().capture_metadata(
+            operation=object.__getattribute__(self, '_operation'),
+            inputs=object.__getattribute__(self, '_inputs'),
+            kwargs=object.__getattribute__(self, '_kwargs')
+        )
+        object.__setattr__(self, '_metadata', computed_metadata)
+        return computed_metadata
+```
+
+
+### 2. Semantically Rich Graph (SRG)
+
+The SRG extends the LazyTensor DAG with **semantic metadata** for intelligent optimization:
 
 **Node Annotations**:
 - **Phase**: Execution phase (e.g., `llm_prefill`, `llm_decode`, `vision_encoding`, `forward`)
@@ -136,55 +208,8 @@ The SRG is Djinn's central abstraction—a **portable intermediate representatio
 
 This semantic richness enables optimizations like:
 - **Stateful co-location**: Pin KV cache and decoder to same GPU (eliminates repeated transfers)
-- **Pipelined CNN**: Automatically fuse and pipeline convolutional stages
+- **Pipelined CNN execution**: Automatically fuse and pipeline convolutional stages
 - **Dynamic recomputation**: Recompute cheap intermediates under network congestion
-
-### 2. LazyTensor DAG with Deferred Computation
-
-**Lazy Properties Design**: Djinn defers expensive computations during graph capture using lazy evaluation:
-
-**Implementation Approach**:
-```python
-class LazyTensor(torch.Tensor):
-    def __init__(self, operation, inputs, args, shape=None, dtype=None, device=None, metadata=None):
-        # Store operation and inputs without computation
-        object.__setattr__(self, '_operation', operation)
-        object.__setattr__(self, '_inputs', inputs)
-        object.__setattr__(self, '_shape', None)        # Defer shape computation
-        object.__setattr__(self, '_dtype', dtype)
-        object.__setattr__(self, '_device', device)
-        object.__setattr__(self, '_metadata', None)     # Defer metadata capture
-
-    @property
-    def shape(self) -> torch.Size:
-        cached_shape = object.__getattribute__(self, '_shape')
-        if cached_shape is not None:
-            return cached_shape
-        # Compute shape only when accessed
-        from .shape_inference import ShapeInference
-        computed_shape = ShapeInference.infer_shape(self.operation, self.inputs, self.kwargs)
-        object.__setattr__(self, '_shape', computed_shape)
-        return computed_shape
-
-    @property
-    def metadata(self) -> Dict[str, Any]:
-        cached_metadata = object.__getattribute__(self, '_metadata')
-        if cached_metadata is not None:
-            return cached_metadata
-        # Compute metadata only when accessed
-        from .semantic.metadata_capture import get_metadata_capture
-        computed_metadata = get_metadata_capture().capture_metadata(...)
-        object.__setattr__(self, '_metadata', computed_metadata)
-        return computed_metadata
-```
-
-**Key Design Decisions**:
-- **Deferred initialization**: Shape, dtype, and metadata computed only when accessed
-- **Caching**: Results cached after first computation to avoid recomputation
-- **Factory function specialization**: Fast path for `randn`, `zeros`, `ones` operations
-- **Thread-safe implementation**: Uses `object.__setattr__` and `object.__getattribute__`
-
-**Performance Characteristics**: **150x faster capture** (450μs → 3μs for small graphs, 178ms → ~3ms for complex models)
 
 ### 3. Multi-Layer Optimization System
 
@@ -205,7 +230,7 @@ class LazyTensor(torch.Tensor):
 **TensorRT Optimization** (Phase 4):
 - Lazy compilation after profiling threshold
 - Adaptive optimization for repeated blocks
-- FP16 acceleration for 2-3x speedup
+- FP16 acceleration for improved performance
 
 ### 4. Three Execution Strategies
 
@@ -228,6 +253,7 @@ Captures all tensor operations in LazyTensor DAG for remote execution:
 - **__torch_dispatch__**: Primary interception for tensor operations (95%+ coverage)
 - **Limited __torch_function__**: Special cases (reshape, embedding)
 - **Context-aware**: Thread-local state management for capture contexts
+- **Materialization Control**: Disables interception during operation execution to prevent recursion
 
 **Why not PyTorch device backend approach?**
 - Device registration ≠ operation interception (PyTorch doesn't auto-route to custom code)
@@ -254,6 +280,10 @@ model = torch.nn.Linear(784, 10)
 input_tensor = torch.randn(32, 784)
 
 # Djinn automatically disaggregates execution
+output = model(input_tensor)
+
+# Or explicitly move models to remote accelerators
+model = model.to('remote_accelerator:0')  # Automatic weight conversion
 output = model(input_tensor)
 ```
 
@@ -283,12 +313,20 @@ output = model(input_tensor)
 - **Cost Estimation**: FLOPs, memory footprint, operational intensity calculations
 - **Workload Characterization**: Model architecture and resource requirement analysis
 
+**Device Compatibility Layer** (`djinn/core/device_compatibility.py`):
+- **Automatic Model Conversion**: `model.to('remote_accelerator:0')` automatically converts model parameters and buffers to LazyTensors
+- **PyTorch Compatibility**: Follows standard `nn.Module.to()` device management conventions
+- **Framework Integration**: Compatible with HuggingFace Accelerate, PyTorch Lightning, and other ML frameworks
+- **Gradient Flow Preservation**: Maintains autograd compatibility for both training and inference
+- **Thread-Safe Implementation**: Uses patched `nn.Module.to()` method for seamless integration
+
 ### ✅ **Execution Optimizations**
 
 **Materialization Strategies**:
 - **MaterializationOptimizer**: Topological sort for batch execution, CUDA streams for pipelining, pinned memory for faster transfers
 - **Local Execution**: Optimized path when remote execution unavailable, using MaterializationOptimizer for efficient computation
 - **Remote Execution**: Subgraph-based execution with caching and differential updates, sending entire computation DAGs instead of individual operations
+- **LazyTensor Input Handling**: Ensures all LazyTensor inputs are properly materialized before operation execution
 
 **Memory Management System**:
 - **Phase-Aware Memory Budgets**: Different allocations for prefill vs decode phases
@@ -303,7 +341,7 @@ output = model(input_tensor)
 - **Tensor Registry**: Remote tensor lifecycle management
 
 **Serialization Optimizations**:
-- **numpy.save Serialization**: 23% faster than torch.save for large tensors using numpy.save with format headers
+- **numpy.save Serialization**: Optimized tensor serialization using numpy.save with format headers
 - **Format-Aware Deserialization**: Automatic detection of numpy vs torch formats with backward compatibility
 - **Differential Updates**: Only send graph changes for iterative workloads using delta computation
 - **Protocol-Based Communication**: Message type headers for reliable transport and proper error handling
@@ -342,19 +380,12 @@ output = model(input_tensor)
 - **Feature Flags**: Selective enablement of optimization components
 - **Logging Integration**: Structured logging with configurable verbosity
 
-### 📊 **Performance Benchmarks**
+### **Memory Management**
 
-**Capture Overhead Reduction**:
-```
-Before Lazy Properties: ~178ms for 3000 operations
-After Lazy Properties:  ~3ms for 3000 operations
-Improvement: 60x faster capture
-```
-
-**Memory Efficiency**:
-- Shapes computed only when accessed (not during capture)
-- Metadata capture deferred until scheduling
-- Reduced memory pressure during graph construction
+**Three-Phase Memory Management**:
+- **Phase 1**: Reactive memory management with GPU cache and eviction
+- **Phase 2**: Semantic-aware memory management with lifetime-based eviction
+- **Phase 3**: Production hardening with adaptive budget tuning and pressure handling
 
 ---
 

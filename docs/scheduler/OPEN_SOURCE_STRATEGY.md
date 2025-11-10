@@ -1,22 +1,24 @@
 # Djinn Scheduler: Open Source Strategy
 
-**Status**: Planning Phase
-**Last Updated**: November 7, 2025
+**Status**: Planning Phase - Implementation Dependencies
+**Last Updated**: November 10, 2025
+**Note**: Strategy dependent on resolving core LazyTensor interception and operation handler completeness issues
 
 ---
 
 ## Executive Summary
 
 ### Current Challenge
-The Djinn scheduler represents the system's "intelligence layer"—transforming semantic graphs into optimized execution plans. However, its sophisticated cost modeling and optimization strategies create adoption barriers for organizations without ML performance engineering expertise.
+The Djinn scheduler implements sophisticated semantic-driven optimization architecture. However, core LazyTensor interception issues and incomplete operation handler coverage currently limit compatibility with complex ML frameworks like transformers.
 
 ### Target Outcome
-Make the scheduler accessible to mainstream ML practitioners while preserving advanced capabilities for performance-critical applications.
+Develop a progressive configuration strategy that can accommodate varying levels of system stability and optimization sophistication as core implementation issues are resolved.
 
-### Business Impact
-- **Broader adoption**: Enable 80% of ML workloads to benefit from intelligent scheduling
-- **Reduced expertise barrier**: Lower the cost of GPU disaggregation adoption
-- **Performance differentiation**: Maintain leadership in complex optimization scenarios
+### Implementation Dependencies
+- **LazyTensor Compatibility**: Resolve interception issues with complex ML frameworks
+- **Operation Handler Completeness**: Implement comprehensive PyTorch operation support
+- **Shape Inference Robustness**: Fix tensor shape inference for nested sequences
+- **Materialization Stability**: Address recursion issues in tensor materialization
 
 ---
 
@@ -46,17 +48,18 @@ Make the scheduler accessible to mainstream ML practitioners while preserving ad
 
 #### Current Adoption Barriers
 
-1. **Configuration Complexity**
+1. **Core System Stability**
+   - LazyTensor interception incompatibilities with transformers
+   - Incomplete PyTorch operation handler coverage
+   - Shape inference failures for complex tensor constructions
+   - Materialization recursion and infinite loop issues
+
+2. **Configuration Complexity** (Post-Stability)
    - Cost model calibration requires domain expertise
    - Network topology configuration is error-prone
    - Memory budget tuning needs performance engineering knowledge
 
-2. **Performance Tuning Overhead**
-   - Cost model validation against real hardware
-   - Optimization strategy selection and tuning
-   - Memory management parameter adjustment
-
-3. **Integration Complexity**
+3. **Integration Complexity** (Post-Stability)
    - Multi-device setup and coordination
    - Fault tolerance configuration
    - Monitoring and observability setup
@@ -204,7 +207,21 @@ def create_scheduler_for_workload(workload_type):
 
 ## Implementation Roadmap
 
-### Phase 1: Auto-Configuration Foundation (Q1 2026)
+### Phase 0: Core Stability (Prerequisites - Current Focus)
+
+#### Core Issue Resolution
+- [ ] Fix LazyTensor shape inference for nested sequences
+- [ ] Implement comprehensive PyTorch operation handlers
+- [ ] Resolve materialization recursion issues
+- [ ] Validate compatibility with transformers and complex ML models
+
+#### Stability Validation
+- [ ] Comprehensive testing with GPT-2, BERT, and other complex models
+- [ ] Operation handler coverage analysis and completion
+- [ ] Shape inference robustness testing
+- [ ] Materialization cycle detection and prevention
+
+### Phase 1: Auto-Configuration Foundation (Q1 2026 - Post-Stability)
 
 #### Week 1-2: Environment Detection
 - [ ] Implement `AdaptiveScheduler` base class
@@ -335,19 +352,25 @@ def interactive_scheduler_setup():
 
 ## Success Metrics
 
-### Technical Metrics
+### Technical Metrics (Post-Core-Stability)
 - **Auto-configuration accuracy**: >90% optimal configuration selection
 - **Progressive enablement**: <5% failed feature enablements
 - **Performance maintenance**: <10% performance degradation vs manual tuning
 - **Memory efficiency**: >80% GPU utilization across workloads
 
-### User Experience Metrics
+### User Experience Metrics (Post-Core-Stability)
 - **Time to productive**: <30 minutes for basic workloads
 - **Configuration errors**: <5% of deployments require manual intervention
 - **Performance satisfaction**: >4.5/5 user satisfaction rating
 - **Support tickets**: <10% related to configuration issues
 
-### Business Metrics
+### Implementation Prerequisites
+- **Core stability**: All LazyTensor interception issues resolved
+- **Operation coverage**: >95% of PyTorch operations supported
+- **ML compatibility**: Full transformers library support
+- **Shape inference**: <1% shape inference failures
+
+### Business Metrics (Post-Core-Stability)
 - **Market coverage**: 80% of PyTorch workloads supported
 - **Adoption rate**: >50% of disaggregation users choose Djinn
 - **Time to value**: <1 day for most organizations
@@ -397,17 +420,23 @@ result = djinn.execute_model(model, input_tensor, scheduler=scheduler)
 
 ## Conclusion
 
-Progressive configuration provides the optimal balance between accessibility and power. This strategy enables Djinn's scheduler to serve both mainstream ML practitioners and performance-critical applications, maximizing market adoption while preserving competitive differentiation.
+The open source strategy for Djinn's scheduler depends critically on first resolving core implementation stability issues. Progressive configuration provides an excellent long-term approach for balancing accessibility with advanced capabilities, but requires a stable foundation to be effective.
 
-**Key Success Factors:**
+**Current Priorities:**
+1. **Resolve core stability issues**: Fix LazyTensor interception, shape inference, and operation handler completeness
+2. **Validate ML framework compatibility**: Ensure transformers and complex model support
+3. **Establish stability baselines**: Comprehensive testing and validation
+
+**Post-Stability Implementation:**
 - Auto-configuration eliminates 80% of setup complexity
 - Progressive enablement prevents user overwhelm
 - Profile-based presets provide clear upgrade paths
 - Comprehensive monitoring ensures reliable operation
 
-**Next Steps:**
-1. Begin Phase 1 implementation with environment detection
-2. Create workload profiles for common use cases
-3. Implement progressive feature enablement
-4. Set up monitoring and observability infrastructure</contents>
-</xai:function_call">Write contents to /home/jae/Genie/docs/scheduler/OPEN_SOURCE_STRATEGY.md.
+**Strategic Timeline:**
+- **Phase 0 (Current)**: Core stability and ML framework compatibility
+- **Phase 1 (Q1 2026)**: Auto-configuration foundation
+- **Phase 2 (Q2 2026)**: User experience enhancement
+- **Phase 3 (Q3-Q4 2026)**: Ecosystem integration
+
+The scheduler's sophisticated architecture provides an excellent foundation, but practical adoption requires addressing current implementation challenges first.

@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 class RemoteServerManager:
-    """Manages spawning and lifecycle of remote Genie server."""
+    """Manages spawning and lifecycle of remote Djinn server."""
 
     def __init__(self, host: str = "127.0.0.1", port: int = 5556, timeout: int = 60):
         """
@@ -65,7 +65,7 @@ class RemoteServerManager:
             self.process = ctx.Process(
                 target=self._run_server_subprocess,
                 daemon=True,
-                name="genie-server"
+                name="djinn-server"
             )
             self.process.start()
             logger.info(f"Server process started (PID: {self.process.pid})")
@@ -154,27 +154,41 @@ class RemoteServerManager:
     def _run_server_subprocess(self):
         """Run server in separate process."""
         try:
-            # Import Genie TCP server - the new async implementation
-            from genie.server.tcp_server import start_server, initialize_server
-            
+            # Set up environment for subprocess (important for spawn context)
+            import sys
+            import os
+
+            # Ensure we're using the same Python executable and environment
+            venv_python = sys.executable
+            logger.info(f"Using Python executable: {venv_python}")
+
+            # Add current directory to Python path
+            current_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            if current_dir not in sys.path:
+                sys.path.insert(0, current_dir)
+                logger.info(f"Added to Python path: {current_dir}")
+
+            # Import Djinn TCP server - the new async implementation
+            from djinn.server.tcp_server import start_server, initialize_server
+
             logger.info(f"Starting TCP server on port {self.port}...")
-            
+
             # Start TCP server (this blocks)
             try:
                 async def run_tcp_server():
                     """Initialize and start TCP server."""
                     await initialize_server()
                     await start_server(host="127.0.0.1", port=self.port)
-                
+
                 asyncio.run(run_tcp_server())
             except Exception as e:
                 logger.error(f"TCP server start failed: {e}")
                 import traceback
                 traceback.print_exc()
-            
+
         except ImportError as e:
-            logger.error(f"Failed to import Genie TCP server: {e}")
-            logger.error("Make sure Genie is properly installed")
+            logger.error(f"Failed to import Djinn TCP server: {e}")
+            logger.error("Make sure Djinn is properly installed")
             import traceback
             traceback.print_exc()
         except Exception as e:

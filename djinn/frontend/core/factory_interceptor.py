@@ -33,11 +33,16 @@ from ...core.metadata import MetadataPlaceholder
 _in_lazy_factory = threading.local()
 
 # Module-level import (avoids hot path import)
+# Note: Executor is in djinn.server.executor, not djinn.frontend.core.executor
 _executor_module = None
 try:
-    from . import executor as _executor_module
+    from ...server import executor as _executor_module
 except ImportError:
-    pass
+    try:
+        # Fallback: try relative import
+        from ..server import executor as _executor_module
+    except ImportError:
+        pass
 
 
 class FactoryInterceptor:
@@ -152,7 +157,6 @@ class FactoryInterceptor:
                     return original_func(*args, **fixed_kwargs)
                 else:
                     return original_func(*args, **kwargs)
-
             # Check if we're inside executor materialization (skip interception in that case)
             if _executor_module:
                 executor_active = getattr(_executor_module._in_executor, 'active', False)

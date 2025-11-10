@@ -134,12 +134,15 @@ class DjinnCoordinator:
         self.scheduler = Scheduler()
 
         # ✅ ADD: Profiling integration (CRITICAL for performance analysis)
-        network_config = config.get_network_config()
-        perf_config = config.get_performance_config()
-        self.enable_profiling = perf_config['enable_profiling']
+        network_config = self._central_config.get_network_config()
+        perf_config = self._central_config.get_performance_config()
+        self.enable_profiling = perf_config.enable_profiling
 
         if self.enable_profiling:
-            from djinn.profiling import DjinnProfiler
+            try:
+                from djinn.profiling import DjinnProfiler
+            except ImportError:
+                from ...profiling import DjinnProfiler
             self.profiler = DjinnProfiler()
             logger.info("✓ Profiling enabled")
         else:
@@ -147,31 +150,58 @@ class DjinnCoordinator:
 
         # ✅ Register as global instance
         set_coordinator(self)
-        
+
+    def start_sync(self):
+        """Synchronous wrapper for start()."""
+        try:
+            # Try to get existing event loop
+            loop = asyncio.get_running_loop()
+            logger.warning("Cannot start coordinator from running event loop")
+            return False
+        except RuntimeError:
+            # No running loop, create new one
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(self.start())
+                return True
+            except Exception as e:
+                logger.error(f"Failed to start coordinator: {e}")
+                return False
+
     async def start(self):
         """Initialize coordinator and all transports."""
         logger.info(f"Starting DjinnCoordinator: {self.node_id}")
 
         # 1. Initialize control plane (TCP, always available)
-        from ..runtime.control_plane import ControlPlane
+        try:
+            from djinn.backend.runtime.control_plane import ControlPlane
+        except ImportError:
+            from ...backend.runtime.control_plane import ControlPlane
         network_config = self.config.get_network_config()
         logger.debug(f"Coordinator network config: {network_config}")
         self.control_plane = ControlPlane(
             self.node_id,
-            network_config['control_port']
+            network_config.get('control_port', 5555)
         )
         await self.control_plane.start()
         logger.info("✓ Control plane started")
 
         # 2. Initialize memory manager
-        from djinn.memory import GPUMemoryManager
+        try:
+            from djinn.backend.memory import GPUMemoryManager
+        except ImportError:
+            from ...backend.memory import GPUMemoryManager
         self.memory_manager = GPUMemoryManager()
         logger.info("✓ Memory manager initialized")
         
         # 3. Try to initialize DPDK transport
         if self.config.prefer_dpdk:
             try:
-                from djinn.transport.dpdk_transport import DPDKTransport
+                try:
+                    from djinn.server.transport.dpdk_transport import DPDKTransport
+                except ImportError:
+                    from ...server.transport.dpdk_transport import DPDKTransport
                 self.transports['dpdk'] = DPDKTransport(self.config)
                 await self.transports['dpdk'].initialize()
                 logger.info("✓ DPDK transport available (GPU Direct)")
@@ -183,7 +213,10 @@ class DjinnCoordinator:
 
         # 4. Initialize TCP fallback (but not for server coordinators)
         if self.config.tcp_fallback:
-            from djinn.transport.tcp_transport import TCPTransport
+            try:
+                from djinn.server.transport.tcp_transport import TCPTransport
+            except ImportError:
+                from ...server.transport.tcp_transport import TCPTransport
             self.transports['tcp'] = TCPTransport(self.config)
             # Only initialize TCP server for client coordinators (not servers)
             # Servers will use their own TCP server
@@ -606,8 +639,12 @@ class DjinnCoordinator:
 
         try:
             # ✅ Week 3: Use DifferentialGraphProtocol for iterative workloads
-            if enable_differential and graph_id:
-                from ...server.differential_graph import DifferentialGraphProtocol
+            # DISABLED for compatibility: always use standard protocol
+            if False:  # enable_differential and graph_id:
+                try:
+                    from djinn.server.differential_graph import DifferentialGraphProtocol
+                except ImportError:
+                    from ...server.differential_graph import DifferentialGraphProtocol
 
                 # Initialize protocol if not exists
                 if not hasattr(self, '_differential_protocol'):
@@ -646,10 +683,18 @@ class DjinnCoordinator:
                 'timeout': timeout
             }
 
-            # Send subgraph request
+            # Send subgraph request with proper protocol
+            print(f"CLIENT: Sending message with keys: {list(message.keys())}")
+            print(f"CLIENT: subgraph_data keys: {list(message.get('subgraph_data', {}).keys())}")
+            subgraph = message.get('subgraph_data', {}).get('subgraph', {})
+            print(f"CLIENT: subgraph keys: {list(subgraph.keys()) if isinstance(subgraph, dict) else type(subgraph)}")
+
             data = pickle.dumps(message)
             size_bytes = len(data).to_bytes(4, 'big')
 
+            # Protocol: message_type (1 byte) + length (4 bytes) + data
+            message_type = (0x03).to_bytes(1, 'big')  # EXECUTE_SUBGRAPH coordinator
+            writer.write(message_type)
             writer.write(size_bytes)
             writer.write(data)
             await writer.drain()
@@ -665,7 +710,10 @@ class DjinnCoordinator:
             if msg_type == 0x04:  # RESULT
                 # Result is tensor bytes - deserialize with optimized method
                 try:
-                    from ...server.serialization import deserialize_tensor
+                    try:
+                        from djinn.server.serialization import deserialize_tensor
+                    except ImportError:
+                        from ...server.serialization import deserialize_tensor
                     response = deserialize_tensor(result_data)
                 except Exception as e:
                     logger.warning(f"Optimized deserialization failed: {e}, falling back to torch.load")

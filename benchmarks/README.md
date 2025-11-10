@@ -1,4 +1,4 @@
-# Genie Benchmarking Suite - OSDI Evaluation
+# Djinn Benchmarking Suite - OSDI Evaluation
 
 **Last Updated**: November 4, 2025
 **Current Status**: ✅ **OSDI READY** - All 4 benchmarks complete and validated
@@ -10,7 +10,7 @@
 
 ### ✅ **Memory Pressure Handling** - `llama_7b_unified_final.py`
 - **Demonstrates**: OOM cliff elimination on Llama-2-7B
-- **Results**: PyTorch fails at batch=64, Genie succeeds at batch=80
+- **Results**: PyTorch fails at batch=64, Djinn succeeds at batch=80
 - **Impact**: 26-34% memory savings through semantic management
 - **Status**: ✅ **COMPLETE** - Production ready
 
@@ -26,7 +26,7 @@
 - **Impact**: 13-26% latency improvements for priority clients
 - **Status**: ✅ **COMPLETE** - Shows resource coordination value
 
-### ✅ **Disaggregation Superiority** - `ray_vs_genie_comparison.py`
+### ✅ **Disaggregation Superiority** - `ray_vs_djinn_comparison.py`
 - **Demonstrates**: Framework-level optimizations beat naive approaches
 - **Results**: 7221% throughput improvement, 97.6% network reduction vs Ray
 - **Impact**: Proves semantic disaggregation advantage
@@ -53,7 +53,7 @@
 
 The benchmarking suite is **OSDI-ready** with comprehensive evaluation:
 - ✅ **4 OSDI benchmarks** - All validated and working
-- ✅ **3 active baselines** - Local PyTorch, Genie semantic, Ray disaggregation
+- ✅ **3 active baselines** - Local PyTorch, Djinn semantic, Ray disaggregation
 - ✅ **2 production workloads** - Realistic LLM decode/prefill with real models
 - ✅ **Real model execution** - Llama-2-7B, GPT-2-medium, BERT-base-uncased
 - ✅ **Production metrics** - GPU utilization, throughput, latency, memory usage
@@ -73,7 +73,7 @@ benchmarks/
 ├── llama_7b_unified_final.py      ✅ Memory pressure (OOM cliffs)
 ├── continuous_llm_serving.py      ✅ Production serving (GPU util)
 ├── multi_tenant_real.py           ✅ Multi-tenant scheduling
-├── ray_vs_genie_comparison.py     ✅ Disaggregation comparison
+├── ray_vs_djinn_comparison.py     ✅ Disaggregation comparison
 ├── README.md                       Current file
 ├── __init__.py                     Module exports
 ├── archived/                       23 obsolete files
@@ -88,7 +88,7 @@ benchmarks/
 ```
 benchmarks/baselines/
 ├── local_pytorch.py               ✅ Local PyTorch (upper bound)
-├── genie_full_semantics.py        ✅ Genie semantic (our approach)
+├── djinn_full_semantics.py        ✅ Djinn semantic (our approach)
 └── ray_baseline.py                ✅ Ray disaggregation (naive baseline)
 ```
 
@@ -116,8 +116,8 @@ python benchmarks/continuous_llm_serving.py --duration 30
 # Multi-tenant scheduling benchmark
 python benchmarks/multi_tenant_real.py
 
-# Ray vs Genie comparison (disaggregation benefits)
-python benchmarks/ray_vs_genie_comparison.py --batches 15
+# Ray vs Djinn comparison (disaggregation benefits)
+python benchmarks/ray_vs_djinn_comparison.py --batches 15
 ```
 
 ### Run All Benchmarks Sequentially
@@ -137,7 +137,7 @@ python benchmarks/continuous_llm_serving.py --duration 20
 python benchmarks/multi_tenant_real.py
 
 # Ray comparison (~2-3 min)
-python benchmarks/ray_vs_genie_comparison.py --batches 15
+python benchmarks/ray_vs_djinn_comparison.py --batches 15
 ```
 
 ### Expected Results
@@ -146,7 +146,7 @@ Each benchmark saves results to its own directory:
 - `llama_7b_unified_final_results/` - OOM cliff data and memory metrics
 - `continuous_serving_results/` - GPU utilization and throughput data
 - `multi_tenant_real_results/` - Scheduling comparison metrics
-- `ray_genie_comparison_results/` - Disaggregation performance data
+- `ray_djinn_comparison_results/` - Disaggregation performance data
 
 ---
 
@@ -158,7 +158,7 @@ Each benchmark saves results to its own directory:
 **Model**: Llama-2-7B (6.7B parameters)
 **Test**: Batch size scaling from 8 to 128
 **Metrics**: Peak memory usage, batch size limits, execution success
-**Expected**: PyTorch fails at batch=64, Genie succeeds at batch=80
+**Expected**: PyTorch fails at batch=64, Djinn succeeds at batch=80
 
 ### 2. Continuous Serving Benchmark (`continuous_llm_serving.py`)
 
@@ -176,7 +176,7 @@ Each benchmark saves results to its own directory:
 **Metrics**: Throughput, latency per client, SLO violations
 **Expected**: 120% throughput improvement, better latency fairness
 
-### 4. Ray Comparison Benchmark (`ray_vs_genie_comparison.py`)
+### 4. Ray Comparison Benchmark (`ray_vs_djinn_comparison.py`)
 
 **Purpose**: Show semantic disaggregation superiority over naive approaches
 **Model**: GPT-2-medium (355M parameters)

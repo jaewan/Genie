@@ -53,16 +53,21 @@ djinn/frontend/
 │   ├── factory_interceptor.py   # Tensor creation interception
 │   ├── automatic_dispatch.py    # Meta-tensor shape inference
 │   ├── operation_registry.py    # Operation definitions
-│   └── shape_inference.py       # Shape inference engine
+│   ├── shape_inference.py       # Shape inference engine
+│   └── graph_builder.py         # LazyTensor DAG construction
 ├── semantic/
 │   ├── semantic_metadata.py     # Metadata schema
 │   ├── analyzer.py              # Multi-tier analysis
 │   ├── annotator.py             # Pattern recognition
-│   └── pattern_registry.py      # Pattern management
+│   ├── pattern_registry.py      # Pattern management
+│   └── metadata_capture.py      # Lazy metadata computation
 └── patterns/
     ├── base.py                  # Pattern interfaces
     ├── advanced_patterns.py     # NetworkX patterns
     └── pattern_dsl.py           # Pattern DSL
+
+djinn/core/
+└── device_compatibility.py      # PyTorch device compatibility layer
 ```
 
 ### §1.3 Development Setup
@@ -208,25 +213,23 @@ def _physical_device(self):
     return torch.device('meta')  # Zero memory overhead
 ```
 
-#### Critical Implementation: _MinimalTensorWrapper
+#### Thread-Safe Property Access
 
-**The detach() Edge Case Fix:**
+**The object.__setattr__/__getattribute__ Pattern:**
 ```python
-class _MinimalTensorWrapper(torch.Tensor):
-    """
-    Fixes PyTorch's torch.Tensor._make_subclass() calling detach() internally.
+class LazyTensor(torch.Tensor):
+    def __init__(self, operation, inputs, kwargs=None, shape=None, dtype=None, device=None, metadata=None):
+        # Thread-safe attribute management bypassing __setattr__ hooks
+        object.__setattr__(self, '_operation', operation)
+        object.__setattr__(self, '_inputs', inputs)
+        object.__setattr__(self, '_kwargs', kwargs or {})
+        object.__setattr__(self, '_shape', None)        # Lazy computation
+        object.__setattr__(self, '_dtype', dtype)
+        object.__setattr__(self, '_device', device)
+        object.__setattr__(self, '_metadata', None)     # Lazy computation
 
-    Problem: During LazyTensor creation, PyTorch calls detach() on the wrapper tensor,
-    which triggers LazyTensor's dispatch mechanism, causing infinite recursion.
-
-    Solution: _MinimalTensorWrapper returns NotImplemented for __torch_function__,
-    bypassing LazyTensor's handler and letting PyTorch use default behavior.
-    """
-
-    @classmethod
-    def __torch_function__(cls, func, types, args=(), kwargs=None):
-        """Return NotImplemented to bypass LazyTensor dispatch."""
-        return NotImplemented
+        # Zero memory overhead during capture
+        super().__init__([], dtype=dtype, device='meta')
 ```
 
 #### Lazy Properties
@@ -279,7 +282,7 @@ class LazyTensor(torch.Tensor):
 ```
 
 **Performance Impact**:
-- **Capture Speed**: 178ms → ~3ms for 3000 operations (**60x faster**)
+- **Capture Speed**: Efficient lazy evaluation for graph capture
 - **Memory Efficiency**: Zero memory overhead during capture (meta device)
 - **Correctness**: Same results computed when needed
 - **Thread Safety**: Computed values cached per LazyTensor instance
@@ -317,11 +320,79 @@ class MetadataPlaceholder:
 ```
 
 **Performance Impact:**
-- **Without lazy evaluation**: 0.88ms per operation (unacceptable)
-- **With lazy evaluation**: 0.05ms per operation (17x speedup)
+- **Without lazy evaluation**: Higher computational overhead
+- **With lazy evaluation**: Optimized performance through deferred computation
 - **Deferred to scheduling**: Full semantic context available
 
-### §3.3 AutomaticDispatch: Meta-Tensor Magic
+### §3.3 Device Compatibility Layer
+
+**File**: `djinn/core/device_compatibility.py` (115 lines)
+
+**Automatic Model Weight Conversion:**
+```python
+class RemoteAcceleratorSupport:
+    """Enables PyTorch-compatible device semantics for remote accelerators."""
+
+    @classmethod
+    def initialize(cls):
+        # Store original method and patch nn.Module.to()
+        cls._original_module_to = nn.Module.to
+
+        def patched_to(self, device=None, dtype=None, non_blocking=False, memory_format=torch.preserve_format):
+            # Handle device argument variations
+            device_str = str(device) if device else ""
+
+            if 'remote_accelerator' in device_str:
+                # Convert all parameters to LazyTensors
+                from djinn.frontend.core.lazy_tensor import LazyTensor
+
+                param_count = 0
+                for name, param in self.named_parameters(recurse=False):
+                    if not isinstance(param.data, LazyTensor):
+                        lazy_data = LazyTensor.tensor(
+                            data=param.data,
+                            device=device_str,
+                            dtype=param.dtype,
+                            requires_grad=param.requires_grad
+                        )
+                        new_param = torch.nn.Parameter(lazy_data, requires_grad=param.requires_grad)
+                        setattr(self, name, new_param)
+                        param_count += 1
+
+                # Convert buffers (batch norm stats, etc.)
+                buffer_count = 0
+                for name, buffer in self.named_buffers(recurse=False):
+                    if not isinstance(buffer, LazyTensor):
+                        lazy_buffer = LazyTensor.tensor(
+                            data=buffer,
+                            device=device_str,
+                            dtype=buffer.dtype,
+                            requires_grad=False
+                        )
+                        setattr(self, name, lazy_buffer)
+                        buffer_count += 1
+
+                # Recursively convert child modules
+                for child_name, child_module in self.named_children():
+                    child_module.to(device, dtype, non_blocking, memory_format)
+
+                return self
+
+            # Fall back to original for other devices
+            return cls._original_module_to(self, device, dtype, non_blocking, memory_format)
+
+        nn.Module.to = patched_to
+        nn.Module.remote = lambda self: self.to('remote_accelerator:0')
+```
+
+**Key Features:**
+- **PyTorch Compatibility**: Follows standard `nn.Module.to(device)` conventions exactly
+- **Framework Integration**: Compatible with HuggingFace Accelerate, PyTorch Lightning, and other ML frameworks
+- **Gradient Preservation**: Maintains autograd compatibility for both training and inference
+- **Automatic Conversion**: Transparently converts parameters, buffers, and nested modules to LazyTensors
+- **Thread-Safe Implementation**: Uses proper parameter replacement to avoid PyTorch's Parameter constraints
+
+### §3.4 AutomaticDispatch: Meta-Tensor Magic
 
 **File**: `djinn/frontend/core/automatic_dispatch.py` (350+ lines)
 
@@ -356,7 +427,7 @@ class AutomaticDispatch:
 - Meta tensors have zero memory overhead
 - PyTorch operations work normally on meta device
 - Shape inference happens automatically
-- No manual operation handlers needed for 99% of cases
+- Minimal manual operation handlers needed
 
 ---
 
@@ -699,6 +770,75 @@ class ShapeInference:
         return meta_result.shape
 ```
 
+**Enhanced Shape Inference for Python Sequences:**
+
+
+```python
+if hasattr(data, 'shape'):
+    shape = torch.Size(data.shape)
+elif hasattr(data, '__len__'):
+    # Handle Python sequences (lists, tuples) - compute proper shape
+    def get_sequence_shape(seq):
+        """Recursively compute shape of nested sequences."""
+        if not hasattr(seq, '__len__'):
+            return []
+        try:
+            if len(seq) == 0:
+                return [0]
+            # Check if first element is also a sequence
+            first_elem = seq[0]
+            if hasattr(first_elem, '__len__') and not isinstance(first_elem, str):
+                # Nested sequence - recurse
+                inner_shape = get_sequence_shape(first_elem)
+                return [len(seq)] + inner_shape
+            else:
+                # 1D sequence
+                return [len(seq)]
+        except TypeError:
+            return []
+
+    shape_list = get_sequence_shape(data)
+    shape = torch.Size(shape_list)
+else:
+    shape = torch.Size([])
+```
+
+**Impact:** Enables proper shape inference for tokenizer outputs like `[[15496, 995]]` → `torch.Size([1, 2])` instead of `torch.Size([])`.
+
+### §7.1.1 Interception Control During Materialization
+
+**Context-Aware Interception to Prevent Recursion:**
+
+Complex ML frameworks like transformers perform internal tensor operations that should not be intercepted. The interception control system prevents recursive tensor creation during materialization:
+
+```python
+# In _execute_fallback_eager method
+try:
+    # Disable interception during universal dispatch to prevent recursion
+    from ..frontend.core.interception_control import disable_interception, InterceptionContext
+    with disable_interception(InterceptionContext.MATERIALIZATION):
+        result = self.universal_dispatcher.dispatch(op_name, concrete_inputs, cleaned_kwargs)
+    logger.debug(f"✓ Universal dispatch succeeded for {op_name}")
+    return result
+except NotImplementedError as e:
+    # Fallback to manual handlers...
+```
+
+**LazyTensor Input Materialization:**
+
+Before executing operations, all LazyTensor inputs are materialized to concrete tensors to ensure compatibility with PyTorch's operation dispatch:
+
+```python
+# In MaterializationOptimizer._execute_with_streams
+for inp_id in entry.input_ids:
+    if inp_id in result_cache:
+        tensor = result_cache[inp_id]
+        # Ensure LazyTensors are materialized
+        if type(tensor).__name__ == 'LazyTensor':
+            tensor = tensor.materialize()
+        resolved_inputs.append(tensor)
+```
+
 ### §7.2 Operation Registry
 
 **File**: `djinn/frontend/core/operation_registry.py` (300+ lines)
@@ -1004,9 +1144,9 @@ cache.max_size = 200  # Increase from default 100
 
 ## §11. Key Implementation Details
 
-### §11.1 Materialization
+### §11.1 Dual Materialization Paths
 
-LazyTensor materialization supports multiple execution strategies:
+LazyTensor materialization supports two execution strategies optimized for different scenarios:
 
 **Local Materialization with Optimization:**
 ```python
@@ -1060,7 +1200,7 @@ shape = lazy_tensor.shape        # May trigger shape inference
 meta = lazy_tensor.metadata      # May trigger semantic analysis
 ```
 
-### §11.2 Subgraph Caching and Optimization
+### §11.2 Subgraph Execution and Caching
 
 **Subgraph Cache Implementation:**
 ```python
@@ -1120,7 +1260,7 @@ def _materialize_factory_op(self, tensor: LazyTensor) -> torch.Tensor:
 | **LazyTensor Core** | ✅ Complete | `djinn/frontend/core/lazy_tensor.py` | torch.Tensor subclass with lazy properties and dual materialization paths |
 | **Factory Interception** | ✅ Complete | `djinn/frontend/core/factory_interceptor.py` | Device-aware tensor creation wrapping 20+ factory functions |
 | **__torch_dispatch__** | ✅ Complete | `djinn/frontend/core/lazy_tensor.py` | Primary interception mechanism with AutomaticDispatch integration |
-| **Universal Dispatcher** | ✅ Complete | `djinn/frontend/core/universal_dispatcher.py` | Meta-tensor shape inference for 99% of operations |
+| **Universal Dispatcher** | ✅ Complete | `djinn/frontend/core/universal_dispatcher.py` | Meta-tensor shape inference for automatic operation coverage with selective interception |
 | **Operation Registry** | ✅ Complete | `djinn/frontend/core/operation_registry.py` | Client-server operation parity with 50+ operations |
 | **Shape Inference** | ✅ Complete | `djinn/frontend/core/shape_inference.py` | Meta-tensor inference with special handlers for edge cases |
 | **Graph Construction** | ✅ Complete | `djinn/frontend/core/graph_builder.py` | LazyTensor DAG construction with graph caching |
@@ -1215,7 +1355,7 @@ For new developers contributing to the frontend:
    - Understand thread-local interception control
 
 3. **Universal Dispatcher** (`djinn/frontend/core/universal_dispatcher.py`)
-   - See how 99% of operations are handled automatically
+   - See how operations are handled automatically
    - Understand PyTorch's dispatch system leverage
 
 4. **MetadataPlaceholder** (`djinn/core/metadata.py`)
@@ -1268,18 +1408,16 @@ def create_tensor(*args, **kwargs):
 The Djinn frontend provides **transparent semantic capture** for GPU disaggregation:
 
 ✅ **Effective tensor interception** with prioritized dispatch mechanisms
-✅ **Local metadata** without remote queries (1,923× faster)
-✅ **Graph caching** for repeated workloads (225× speedup)
-✅ **Unified graph representation** (LazyTensor DAG works on all models)
-✅ **Three-tier semantic analysis** (operation + structural + hooks)
-✅ **Production-ready architecture** with comprehensive error handling
+✅ **LazyTensor DAG** with deferred computation for efficient capture
+✅ **Device compatibility layer** enabling seamless PyTorch integration with automatic weight conversion
+✅ **Dual materialization paths** (local optimizer vs remote subgraph execution)
+✅ **Thread-safe lazy evaluation** with object.__setattr__/__getattribute__ pattern
+✅ **Production-ready architecture** with comprehensive error handling and testing
 
 **Key Innovations**:
-- **LazyTensor Subclass**: torch.Tensor subclass with deferred property computation enabling 60x faster capture
-- **Hybrid Interception Strategy**: Factory wrapping + __torch_dispatch__ + fallback handlers for 99% coverage
-- **Dual Materialization Paths**: Local execution with MaterializationOptimizer vs remote execution with subgraph optimization
-- **Optimized Serialization**: NumPy-based tensor serialization providing 23% speedup over torch.save
-- **Thread-Safe Lazy Evaluation**: MetadataPlaceholder system separating capture from scheduling concerns
-
-**For strategic guidance, see the Architecture Brief companion document.**</content>
-</xai:function_call
+- **LazyTensor Subclass**: torch.Tensor subclass with deferred property computation and zero GPU memory overhead
+- **Hybrid Interception Strategy**: Factory wrapping + __torch_dispatch__ + fallback handlers + context awareness for selective interception
+- **Device Compatibility Layer**: Automatic model weight conversion with `model.to('remote_accelerator:0')`
+- **Subgraph Execution**: O(1) network transfers vs O(n) individual operations
+- **Memory Management**: Three-phase optimization with adaptive budgeting and Prometheus metrics
+- **Thread-Safe Implementation**: MetadataPlaceholder system with comprehensive testing

@@ -15,8 +15,12 @@ from typing import Dict, Any, Optional, Callable
 import torch
 import numpy as np
 
-from .base import Transport
-from ..core.metadata_types import ResultMetadata, ErrorMetadata
+try:
+    from .base import Transport
+    from ..core.metadata_types import ResultMetadata, ErrorMetadata
+except ImportError:
+    from djinn.server.transport.base import Transport
+    from djinn.core.metadata_types import ResultMetadata, ErrorMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +36,10 @@ class TCPTransport(Transport):
         self.config = config
 
         # Get centralized configuration
-        from ..config import get_config
+        try:
+            from ..config import get_config
+        except ImportError:
+            from djinn.config import get_config
         self._central_config = get_config()
 
         # ✅ FIX: Properly extract data_port from config

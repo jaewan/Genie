@@ -12,6 +12,62 @@ from ..core.exceptions import MaterializationError, NotApplicableError, Executio
 from .batch_compiler import get_batch_compiler, get_batch_compiler_stats
 from ..frontend.core.universal_dispatcher import get_universal_dispatcher
 
+# Constants
+LAZY_TENSOR_CLASS_NAME = 'LazyTensor'
+
+
+def _is_lazy_tensor(obj: Any) -> bool:
+    """Check if an object is a LazyTensor instance."""
+    return isinstance(obj, torch.Tensor) and type(obj).__name__ == LAZY_TENSOR_CLASS_NAME
+
+
+def _materialize_tensor_input(tensor: torch.Tensor, operation_name: str, logger) -> torch.Tensor:
+    """
+    Materialize a tensor input, handling LazyTensor cases with fallbacks.
+
+    Args:
+        tensor: Input tensor that might be a LazyTensor
+        operation_name: Name of the operation (for logging)
+        logger: Logger instance
+
+    Returns:
+        Concrete torch.Tensor
+    """
+    if not _is_lazy_tensor(tensor):
+        return tensor
+
+    logger.debug(f"Materializing LazyTensor input for {operation_name}")
+
+    # Try recursive execution first (handles dependencies properly)
+    try:
+        # We need to get the executor instance - this is a bit circular
+        # but we can access it through the global variable
+        global _executor
+        if _executor is not None:
+            materialized = _executor._execute_recursive(tensor)
+            logger.debug(f"Successfully materialized LazyTensor: {materialized.shape if hasattr(materialized, 'shape') else 'scalar'}")
+            return materialized
+    except Exception as e:
+        logger.debug(f"Recursive materialization failed: {e}")
+
+    # Fallback to direct materialization
+    try:
+        materialized = tensor.materialize()
+        logger.debug(f"Fallback materialization succeeded: {materialized.shape if hasattr(materialized, 'shape') else 'scalar'}")
+        return materialized
+    except Exception as e:
+        logger.warning(f"All materialization methods failed for LazyTensor input: {e}")
+        return tensor  # Return as-is if materialization fails
+
+
+def _get_tensor_shape_info(tensor: torch.Tensor) -> str:
+    """Get shape information for a tensor in a safe way."""
+    try:
+        return str(tensor.shape)
+    except Exception:
+        return "unknown_shape"
+
+
 # Global executor instance (singleton for performance)
 _executor: Optional['SimpleExecutor'] = None
 _executor_lock = threading.Lock()  # Protects executor creation and access
@@ -119,7 +175,7 @@ class SimpleExecutor:
 
 		if isinstance(value, LazyTensor):
 			# Recursively materialize all LazyTensor arguments
-			return self.execute_graph(value)
+			return self.execute_subgraph(value)
 		elif isinstance(value, (list, tuple)):
 			# Recursively process collection arguments
 			materialized = [self._ensure_concrete(v) for v in value]
@@ -686,79 +742,110 @@ class SimpleExecutor:
 	def _execute_fallback_eager(self, op_name: str, inputs, kwargs) -> torch.Tensor:
 		"""
 		✅ REFACTORED: Universal dispatch as PRIMARY path (99% coverage).
-		
+
 		This method now uses UniversalDispatcher to handle operations automatically.
 		Manual handlers are only used as a fallback for special cases.
-		
+
 		Strategy (NEW):
 		1. Materialize all inputs to concrete tensors
 		2. Clean kwargs (device mapping, etc.)
 		3. Use UniversalDispatcher (handles 99% of operations automatically)
 		4. Fall back to manual handlers only if universal dispatch fails
 		5. Fail with actionable error message
-		
+
 		Benefits:
 		- ✅ Scales to 99% of PyTorch API automatically
 		- ✅ No manual handler maintenance needed
 		- ✅ Works with future PyTorch versions
 		- ✅ Achieves research goal of transparency
 		"""
-		# Track operation
-		if op_name not in self.stats['ops_executed']:
-			self.stats['ops_executed'][op_name] = 0
-		self.stats['ops_executed'][op_name] += 1
-		
-		# Step 1: Materialize all inputs to concrete tensors
-		concrete_inputs = []
-		for inp in inputs:
-			if isinstance(inp, torch.Tensor):
-				concrete_inputs.append(inp)
-			else:
-				# Try to use pre-materialized value
-				val = getattr(inp, "concrete_value", None)
-				if val is not None and isinstance(val, torch.Tensor):
-					concrete_inputs.append(val)
-				else:
-					concrete_inputs.append(inp)
+		# Add recursion guard
+		if not hasattr(self, '_fallback_depth'):
+			self._fallback_depth = 0
 
-		# Step 2: Clean kwargs (device mapping, etc.)
-		cleaned_kwargs = self._clean_kwargs_for_dispatch(op_name, kwargs)
-		
-		# Step 3: Try UniversalDispatcher FIRST (primary path - 99% coverage)
+		self._fallback_depth += 1
+		if self._fallback_depth > 50:  # Reasonable limit
+			self._fallback_depth = 0  # Reset for next time
+			raise RuntimeError(f"Deep recursion in _execute_fallback_eager for {op_name}")
+
 		try:
-			result = self.universal_dispatcher.dispatch(op_name, concrete_inputs, cleaned_kwargs)
-			logger.debug(f"✓ Universal dispatch succeeded for {op_name}")
-			return result
-		except NotImplementedError as e:
-			# Universal dispatch failed - this is rare and indicates either:
-			# 1. Operation doesn't exist in PyTorch
-			# 2. Operation has special requirements (device mapping, etc.)
-			logger.debug(f"Universal dispatch failed for {op_name}: {e}")
+			# Track operation
+			if op_name not in self.stats['ops_executed']:
+				self.stats['ops_executed'][op_name] = 0
+			self.stats['ops_executed'][op_name] += 1
 			
-			# Step 4: Fall back to manual handlers (only for special cases)
-			base_name = op_name.replace("aten::", "")
-			if base_name in self.operation_handlers:
-				logger.debug(f"Using manual handler for {op_name}")
-				# Create a fake lazy_tensor for the handler interface
-				class FakeLazyTensor:
-					def __init__(self, operation, inputs, kwargs):
-						self.operation = operation
-						self.inputs = inputs
-						self.kwargs = kwargs
-				
-				fake_lt = FakeLazyTensor(op_name, inputs, cleaned_kwargs)
-				return self.operation_handlers[base_name](fake_lt, inputs, cleaned_kwargs)
-			
-			# Step 5: Operation not supported
-			self.stats['failures'].append((op_name, str(e)))
-			raise NotApplicableError(
-				f"Operation '{op_name}' failed to execute.\n"
-				f"  Inputs: {[type(i).__name__ for i in concrete_inputs]}\n"
-				f"  Universal dispatch failed: {e}\n"
-				f"  No manual handler found.\n"
-				f"  This operation may not exist in PyTorch or requires special handling."
-			) from e
+			# Step 1: Materialize all inputs to concrete tensors
+			concrete_inputs = []
+			lazy_count = 0
+
+			for inp in inputs:
+				if isinstance(inp, torch.Tensor):
+					# Handle LazyTensor materialization
+					if _is_lazy_tensor(inp):
+						lazy_count += 1
+						materialized = _materialize_tensor_input(inp, op_name, logger)
+						concrete_inputs.append(materialized)
+					else:
+						concrete_inputs.append(inp)
+				else:
+					# Try to use pre-materialized value for non-tensor inputs
+					val = getattr(inp, "concrete_value", None)
+					if val is not None and isinstance(val, torch.Tensor):
+						concrete_inputs.append(val)
+					else:
+						concrete_inputs.append(inp)
+
+			if lazy_count > 0:
+				logger.debug(f"Materialized {lazy_count} LazyTensor inputs for {op_name}")
 	
+			# Step 2: Clean kwargs (device mapping, etc.)
+			cleaned_kwargs = self._clean_kwargs_for_dispatch(op_name, kwargs)
+			
+			# Step 3: Try UniversalDispatcher FIRST (primary path - 99% coverage)
+			try:
+				# Disable interception during universal dispatch to prevent recursion
+				from ..frontend.core.interception_control import disable_interception, InterceptionContext
+				with disable_interception(InterceptionContext.MATERIALIZATION):
+					result = self.universal_dispatcher.dispatch(op_name, concrete_inputs, cleaned_kwargs)
+				logger.debug(f"✓ Universal dispatch succeeded for {op_name}")
+				return result
+			except NotImplementedError as e:
+				# Universal dispatch failed - this is rare and indicates either:
+				# 1. Operation doesn't exist in PyTorch
+				# 2. Operation has special requirements (device mapping, etc.)
+				logger.debug(f"Universal dispatch failed for {op_name}: {e}")
+				
+				# Step 4: Fall back to manual handlers (only for special cases)
+				base_name = op_name.replace("aten::", "")
+				if base_name in self.operation_handlers:
+					logger.debug(f"Using manual handler for {op_name}")
+					# Create a fake lazy_tensor for the handler interface
+					class FakeLazyTensor:
+						def __init__(self, operation, inputs, kwargs):
+							self.operation = operation
+							self.inputs = inputs
+							self.kwargs = kwargs
+					
+					fake_lt = FakeLazyTensor(op_name, inputs, cleaned_kwargs)
+					# Disable interception during manual handler execution
+					with disable_interception(InterceptionContext.MATERIALIZATION):
+						return self.operation_handlers[base_name](fake_lt, inputs, cleaned_kwargs)
+				
+				# Step 5: Operation not supported
+				self.stats['failures'].append((op_name, str(e)))
+				raise NotApplicableError(
+					f"Operation '{op_name}' failed to execute.\n"
+					f"  Inputs: {[type(i).__name__ for i in concrete_inputs]}\n"
+					f"  Universal dispatch failed: {e}\n"
+					f"  No manual handler found.\n"
+					f"  This operation may not exist in PyTorch or requires special handling."
+			) from e
+		except Exception:
+			# Re-raise any other exceptions
+			raise
+		finally:
+			self._fallback_depth -= 1
+
 	def _clean_kwargs_for_dispatch(self, op_name: str, kwargs: dict) -> dict:
 		"""
 		Clean kwargs for dispatch - handle device mapping and remove invalid kwargs.

@@ -260,6 +260,14 @@ class DjinnConfig:
     debug_mode: bool = False
     config_file: Optional[str] = None
 
+    def get_network_config(self) -> NetworkConfig:
+        """Get network configuration."""
+        return self.network
+
+    def get_performance_config(self) -> PerformanceConfig:
+        """Get performance configuration."""
+        return self.performance
+
     @classmethod
     def load(cls, path: Optional[str] = None) -> 'DjinnConfig':
         """

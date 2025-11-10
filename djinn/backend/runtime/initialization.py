@@ -289,19 +289,31 @@ async def _genie_init_async_impl(
         if server_address and auto_connect:
             logger.info(f"[4/5] Connecting to remote server at {server_address}...")
             try:
-                from ..core.coordinator import DjinnCoordinator, CoordinatorConfig
-                
+                from ...core.coordinator import DjinnCoordinator, CoordinatorConfig
+
                 coordinator_config = CoordinatorConfig(
-                    node_id='genie-client',
-                    tcp_fallback=True
+                    node_id='djinn-client',
+                    tcp_fallback=True,
+                    control_port=5558,  # Use different control port than server
+                    data_port=5557,     # Use different data port than server
                 )
-                
+
                 coordinator = DjinnCoordinator(coordinator_config)
-                await coordinator.start()
-                
+
+                # Try async start first, fall back to sync
+                try:
+                    await coordinator.start()
+                except RuntimeError as e:
+                    if "Cannot start coordinator from running event loop" in str(e):
+                        logger.warning("Async start failed, trying sync start")
+                        if not coordinator.start_sync():
+                            raise RuntimeError("Both async and sync coordinator start failed")
+                    else:
+                        raise
+
                 _runtime_state.coordinator = coordinator
                 logger.info(f"  ✓ Connected to remote server")
-            
+
             except Exception as e:
                 logger.warning(f"  ✗ Failed to connect: {e}")
                 logger.info("  Falling back to local execution")

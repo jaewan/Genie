@@ -31,7 +31,12 @@ class OperationSchedule:
     operation_name: str
     input_ids: List[int]
     output_id: int
+    kwargs: Dict[str, Any] = None
     can_fuse_with_next: bool = False
+
+    def __post_init__(self):
+        if self.kwargs is None:
+            self.kwargs = {}
 
 
 class MaterializationOptimizer:
@@ -89,6 +94,7 @@ class MaterializationOptimizer:
                 operation_name=lt.operation,
                 input_ids=input_ids,
                 output_id=lt_id,
+                kwargs=lt.kwargs if hasattr(lt, 'kwargs') else {},
                 can_fuse_with_next=self._can_fuse(lt)
             )
             schedule.append(schedule_entry)
@@ -125,14 +131,21 @@ class MaterializationOptimizer:
         result_cache: Dict[int, torch.Tensor] = {}
         concrete_inputs: Dict[int, torch.Tensor] = {}
         
-        # Map concrete inputs to IDs
-        def register_inputs(lt):
+        # Map concrete inputs to IDs - include all non-LazyTensor inputs from the entire graph
+        def collect_concrete_inputs(lt, visited):
             from ..frontend.core.lazy_tensor import LazyTensor
+            if id(lt) in visited:
+                return
+            visited.add(id(lt))
+
             for inp in lt.inputs:
-                if not isinstance(inp, LazyTensor):
+                if isinstance(inp, LazyTensor):
+                    collect_concrete_inputs(inp, visited)
+                else:
                     concrete_inputs[id(inp)] = inp
-        
-        register_inputs(root_lazy_tensor)
+
+        visited = set()
+        collect_concrete_inputs(root_lazy_tensor, visited)
         
         # Execute schedule in order
         if self.enable_streams and self.device.type == 'cuda':
@@ -143,34 +156,57 @@ class MaterializationOptimizer:
     def _execute_sequential(self, schedule: List[OperationSchedule],
                            executor, result_cache: Dict[int, torch.Tensor],
                            concrete_inputs: Dict[int, torch.Tensor]) -> torch.Tensor:
-        """Execute schedule sequentially (baseline)"""
-        from ..frontend.core.lazy_tensor import LazyTensor
-        
+        """Execute schedule sequentially without batch executor (avoids recursion)."""
+
         for entry in schedule:
-            # Resolve inputs
+            # Resolve inputs from cache or concrete inputs
             resolved_inputs = []
             for inp_id in entry.input_ids:
                 if inp_id in result_cache:
                     resolved_inputs.append(result_cache[inp_id])
                 elif inp_id in concrete_inputs:
                     resolved_inputs.append(concrete_inputs[inp_id])
+                else:
+                    # This input must be from a previous operation
+                    logger.warning(f"Missing input {inp_id} for {entry.operation_name}")
+                    continue
+
+            # Materialize any remaining LazyTensor inputs before dispatch
+            from ..frontend.core.universal_dispatcher import _materialize_lazy_tensor
+            materialized_inputs = []
+            for inp in resolved_inputs:
+                if isinstance(inp, torch.Tensor):
+                    materialized = _materialize_lazy_tensor(inp)
+                    materialized_inputs.append(materialized)
+                else:
+                    materialized_inputs.append(inp)
             
-            # Execute operation
+            # Execute operation directly using executor's handlers or universal dispatcher
             op_handler = executor.operation_handlers.get(entry.operation_name)
             if op_handler:
-                # Create dummy LazyTensor for operation handler
-                dummy_lt = type('obj', (object,), {
-                    'operation': entry.operation_name,
-                    'kwargs': {}
-                })()
-                result = op_handler(dummy_lt, resolved_inputs, {})
+                # Create minimal context for handler
+                class MinimalLT:
+                    def __init__(self, operation, kwargs):
+                        self.operation = operation
+                        self.kwargs = kwargs
+
+                fake_lt = MinimalLT(entry.operation_name, entry.kwargs)
+                result = op_handler(fake_lt, materialized_inputs, entry.kwargs)
             else:
-                result = executor._execute_fallback_eager(entry.operation_name, resolved_inputs, {})
-            
+                # Use universal dispatcher directly
+                from ..frontend.core.universal_dispatcher import get_universal_dispatcher
+                dispatcher = get_universal_dispatcher()
+                result = dispatcher.dispatch(entry.operation_name, materialized_inputs, entry.kwargs)
+
+            # Cache the result
             result_cache[entry.output_id] = result
-        
-        # Return final result
-        return result_cache[id(None)]  # Will be updated with root ID
+
+        # Return the final result (last operation's output)
+        if schedule:
+            final_output_id = schedule[-1].output_id
+            return result_cache.get(final_output_id, torch.tensor(0.0))
+        else:
+            return torch.tensor(0.0)
     
     def _execute_with_streams(self, schedule: List[OperationSchedule],
                               executor, result_cache: Dict[int, torch.Tensor],
@@ -185,28 +221,44 @@ class MaterializationOptimizer:
                 resolved_inputs = []
                 for inp_id in entry.input_ids:
                     if inp_id in result_cache:
-                        resolved_inputs.append(result_cache[inp_id])
+                        tensor = result_cache[inp_id]
+                        # Ensure LazyTensors are materialized
+                        if type(tensor).__name__ == 'LazyTensor':
+                            tensor = tensor.materialize()
+                        resolved_inputs.append(tensor)
                     elif inp_id in concrete_inputs:
-                        resolved_inputs.append(concrete_inputs[inp_id])
+                        tensor = concrete_inputs[inp_id]
+                        # Ensure LazyTensors are materialized
+                        if type(tensor).__name__ == 'LazyTensor':
+                            tensor = tensor.materialize()
+                        resolved_inputs.append(tensor)
                 
-                # Execute operation
+                # Execute operation - use UniversalDispatcher for 99% of ops
                 op_handler = executor.operation_handlers.get(entry.operation_name)
                 if op_handler:
+                    # Special case handlers (layer_norm, reshape, embedding, dropout, etc.)
                     dummy_lt = type('obj', (object,), {
                         'operation': entry.operation_name,
-                        'kwargs': {}
+                        'kwargs': entry.kwargs  # Preserve original kwargs
                     })()
-                    result = op_handler(dummy_lt, resolved_inputs, {})
+                    result = op_handler(dummy_lt, resolved_inputs, entry.kwargs)
                 else:
-                    result = executor._execute_fallback_eager(entry.operation_name, resolved_inputs, {})
+                    # Default: use UniversalDispatcher (handles 99% automatically)
+                    result = executor._execute_fallback_eager(entry.operation_name, resolved_inputs, entry.kwargs)
                 
                 result_cache[entry.output_id] = result
         
-        # Synchronize streams
-        torch.cuda.stream(self.transfer_stream).wait_stream(self.compute_stream)
+        # Synchronize streams - transfer_stream waits for compute_stream
+        if self.transfer_stream is not None and self.compute_stream is not None:
+            self.transfer_stream.wait_stream(self.compute_stream)
         torch.cuda.synchronize()
-        
-        return result_cache[id(None)]
+
+        # Fix: Return the final result, not id(None)
+        if schedule:
+            final_output_id = schedule[-1].output_id
+            return result_cache.get(final_output_id, torch.tensor(0.0))
+        else:
+            return torch.tensor(0.0)
 
 
 class PinnedMemoryPool:

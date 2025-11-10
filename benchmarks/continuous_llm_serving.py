@@ -34,8 +34,8 @@ import subprocess
 import threading
 from collections import deque
 
-# Import Genie components
-from benchmarks.baselines import GenieFullBaseline, LocalPyTorchBaseline
+# Import Djinn components
+from benchmarks.baselines import DjinnFullBaseline, LocalPyTorchBaseline
 from benchmarks.workloads_detailed import RealisticLLMPrefillWorkload, RealisticLLMDecodeWorkload
 
 
@@ -117,7 +117,7 @@ class ContinuousLLMServingBenchmark:
 
         # Initialize baselines
         # Focus on demonstrating production realism with working baseline
-        # Genie semantic benefits will be shown in other benchmarks
+        # Djinn semantic benefits will be shown in other benchmarks
         self.baselines = {
             'production_baseline': LocalPyTorchBaseline(),
         }

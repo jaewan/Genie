@@ -13,15 +13,14 @@ Djinn's scheduler transforms Semantically Rich Graphs (SRGs) into optimized exec
 ### Why It Matters: Practical GPU Disaggregation
 - **Problem**: Traditional disaggregation operates blindly at hardware level, missing semantic context for optimization
 - **Solution**: Framework-level scheduler leverages ML semantics for intelligent placement, co-location, and resource management
-- **Impact**: Enables 10-100x performance improvements through semantic-aware decisions
+- **Impact**: Enables performance improvements through semantic-aware decisions
 
-### Key Metrics
-- **Decision Speed**: 1,923x faster than remote metadata queries via local abstraction
-- **Optimization Impact**: 29x warmup speedup, 10-100x decode acceleration
-- **Memory Efficiency**: 4x reduction in activation waste through lifetime analysis
-- **Cost Accuracy**: 99% prediction accuracy with adaptive learning
-- **Serialization Performance**: 23% faster result transfer using numpy.save optimization
-- **Network Efficiency**: 10x reduction in iterative workload transfers via differential protocol
+### Key Design Goals
+- **Local Metadata Abstraction**: Eliminate remote metadata query latency through local storage
+- **Semantic Cost Modeling**: Enable ML-aware optimization decisions using operation semantics
+- **Memory-Aware Scheduling**: Integrate lifetime analysis for efficient memory utilization
+- **Network Optimization**: Reduce transfer overhead for distributed execution
+- **Progressive Complexity**: Support varying levels of optimization sophistication
 
 ---
 
@@ -89,8 +88,8 @@ Scheduler ────► Cost Estimator ────► Network Topology
 | **Semantic Optimizer** | Applies ML-aware optimizations | Effectiveness vs generality |
 | **Memory Manager** | Integrates Phase 2-3 memory optimizations | Performance vs memory efficiency |
 | **Logical Device Abstraction** | Local metadata without remote queries | Compatibility vs optimization potential |
-| **Serialization Optimizer** | Uses numpy.save for 23% faster result transfer | Speed vs compatibility |
-| **Differential Protocol** | 10x network reduction for iterative workloads | Bandwidth vs complexity |
+| **Serialization Optimizer** | Uses numpy.save for optimized result transfer | Speed vs compatibility |
+| **Differential Protocol** | Network reduction for iterative workloads | Bandwidth vs complexity |
 | **Subgraph Cache** | Avoids redundant subgraph construction | Memory vs computation |
 | **Materialization Optimizer** | Batch execution with CUDA streams | Performance vs simplicity |
 | **TensorRT Compiler** | Lazy compilation for repeated executions | Startup time vs runtime speed |
@@ -99,7 +98,7 @@ Scheduler ────► Cost Estimator ────► Network Topology
 
 **Five-tier optimization approach** designed for practical deployment:
 
-1. **Cost Model** (Foundation): Predict execution costs with 99% accuracy
+1. **Cost Model** (Foundation): Predict execution costs with high accuracy
 2. **Semantic Optimizations** (Intelligence): Leverage ML semantics for decisions
 3. **Memory Awareness** (Efficiency): Integrate lifetime analysis and phase budgets
 4. **Execution Optimization** (Performance): Materialization and subgraph caching
@@ -111,32 +110,31 @@ Scheduler ────► Cost Estimator ────► Network Topology
 
 ## Key Design Decisions & Trade-offs
 
-### ✅ Strategic Wins
+### 🔧 Design Innovations
 
 **Local Metadata Abstraction**
-- **Why**: Eliminates 1,923x slower remote metadata queries during scheduling
-- **Impact**: Enables practical distributed scheduling with local decision making
-- **Cost**: Additional metadata storage (~250 bytes/node)
-- **Result**: Scheduling decisions made in microseconds, not milliseconds
+- **Design Goal**: Eliminate remote metadata query latency through local LazyTensor storage
+- **Architecture**: Store shape, dtype, and device information directly in tensor objects
+- **Benefit**: Enables fast local queries without distributed coordination
 
 **Semantic Cost Modeling**
-- **Why**: Traditional schedulers can't distinguish prefill vs decode phases
-- **Impact**: Enables phase-specific optimizations (10-100x decode speedup)
-- **Benefit**: Optimizations invisible to lower layers (PCIe, driver)
+- **Design Goal**: Enable ML-aware optimization using operation semantics
+- **Architecture**: Cost estimators for matmul, conv, attention, and other ML operations
+- **Benefit**: Framework-level optimizations not possible at hardware/driver level
 
 **Memory-Aware Scheduling Integration**
-- **Why**: GPU disaggregation exposes memory bottlenecks not visible in monolithic systems
-- **Impact**: 4x reduction in activation memory waste through lifetime analysis
-- **Integration**: Seamless integration with Phase 2-3 memory management
+- **Design Goal**: Integrate lifetime analysis for efficient memory utilization
+- **Architecture**: Phase-aware memory budgets with lifetime-based eviction
+- **Benefit**: Reduces activation memory waste in distributed execution
 
-**Optimized Result Serialization**
-- **Why**: Tensor result transfer dominates execution time for large outputs
-- **Impact**: 23% faster result serialization using numpy.save instead of pickle
-- **Implementation**: Automatic format detection with backward compatibility
+**Network Optimization Framework**
+- **Design Goal**: Minimize network transfer overhead in distributed execution
+- **Architecture**: Serialization optimization and differential graph protocols
+- **Benefit**: Efficient iterative workload execution across network boundaries
 
 **Differential Graph Transfer**
 - **Why**: Iterative workloads resend entire graphs despite minimal changes
-- **Impact**: 10x reduction in network transfers for iterative LLM workloads
+- **Impact**: Reduction in network transfers for iterative LLM workloads
 - **Mechanism**: Client-side caching with delta computation and server reconstruction
 - **Implementation**: DifferentialGraphProtocol with automatic format detection and backward compatibility
 
@@ -147,36 +145,34 @@ Scheduler ────► Cost Estimator ────► Network Topology
 
 ### ⚠️ Risk Assessment
 
-#### **Critical Business Risks** (Adoption Blockers)
+#### **Critical Technical Risks** (Implementation Challenges)
 
-1. **Cost Model Accuracy**
-   - **Risk**: Inaccurate cost predictions lead to suboptimal scheduling
-   - **Impact**: Performance worse than naive approaches, user abandonment
-   - **Mitigation**: Continuous model refinement, runtime validation, fallback strategies
+1. **LazyTensor Interception Complexity**
+   - **Risk**: Overly aggressive tensor interception breaks complex ML frameworks
+   - **Impact**: Incompatible with transformers, attention mechanisms, and advanced ML operations
+   - **Mitigation**: Selective interception, framework-aware operation handling
 
-#### **Technical Implementation Risks** (Architecture Threats)
+2. **Shape Inference Limitations**
+   - **Risk**: Incorrect shape inference for nested sequences and complex tensor constructions
+   - **Impact**: Runtime errors when tensor shapes don't match expectations
+   - **Mitigation**: Robust shape inference, fallback handling for unknown constructions
 
-2. **Remote Device Management**
-   - **Risk**: Distributed device state management introduces consistency issues
-   - **Impact**: Race conditions, incorrect scheduling decisions
-   - **Mitigation**: Atomic operations, state validation, error recovery
+3. **Operation Handler Coverage**
+   - **Risk**: Incomplete coverage of PyTorch operations required by ML frameworks
+   - **Impact**: Runtime failures for basic tensor operations (repeat, to, etc.)
+   - **Mitigation**: Comprehensive operation handler implementation, universal dispatch fallback
 
-3. **Semantic Dependency Complexity**
-   - **Risk**: ML semantics introduce complex optimization dependencies
-   - **Impact**: Scheduling becomes brittle to model changes
-   - **Mitigation**: Loose coupling, validation testing, conservative fallbacks
+#### **Architecture Complexity Risks**
 
-#### **Operational Risks** (Runtime Concerns)
+4. **Materialization Recursion**
+   - **Risk**: Circular dependencies during tensor materialization cause infinite loops
+   - **Impact**: System hangs or crashes during graph execution
+   - **Mitigation**: Cycle detection, proper dependency ordering, materialization state tracking
 
-4. **Scheduling Latency**
-   - **Risk**: Complex optimizations add unacceptable scheduling overhead
-   - **Impact**: Increased end-to-end latency for small requests
-   - **Mitigation**: Caching, parallel processing, progressive optimization
-
-5. **Memory Pressure Under Load**
-   - **Risk**: Memory-aware scheduling fails under extreme pressure
-   - **Impact**: System instability, OOM conditions
-   - **Mitigation**: Pressure-aware fallbacks, emergency eviction, monitoring
+5. **Memory Management Integration**
+   - **Risk**: Complex integration between scheduling and memory management subsystems
+   - **Impact**: Memory leaks, inefficient resource utilization, system instability
+   - **Mitigation**: Clear subsystem boundaries, comprehensive testing, monitoring
 
 ---
 
@@ -189,7 +185,7 @@ Scheduler ────► Cost Estimator ────► Network Topology
 | Graph Analysis | 0.05ms | 96ms | Local metadata abstraction |
 | Cost Estimation | 0.1ms | N/A | Cached FLOP analysis |
 | Placement | 0.2ms | 384ms | Cost model + heuristics |
-| **Total Overhead** | **0.35ms** | **480ms** | **1,371x speedup** |
+| **Total Overhead** | **Efficient** | **Higher latency** | **Significant improvement** |
 
 *Metrics based on internal benchmarking. Remote queries simulate distributed metadata access.*
 
@@ -250,22 +246,22 @@ Scheduler ────► Cost Estimator ────► Network Topology
 ### Monitoring & Alerting Strategy
 
 **Key Metrics to Track:**
-- Cost model accuracy (>95% prediction accuracy)
+- Cost model accuracy (high prediction accuracy)
 - Scheduling latency (<1ms for cached models)
-- Memory efficiency (>80% GPU utilization)
-- Cache hit rates (>90% for warm workloads)
-- Serialization performance (>20% speedup vs pickle)
-- Subgraph cache hit rate (>50% for repeated patterns)
-- Differential protocol savings (>5x reduction for iterative workloads)
+- Memory efficiency (high GPU utilization)
+- Cache hit rates (high for warm workloads)
+- Serialization performance (improved vs pickle)
+- Subgraph cache hit rate (effective for repeated patterns)
+- Differential protocol savings (significant reduction for iterative workloads)
 
 **Alert Conditions:**
 - Cost model accuracy drops below 90%
 - Scheduling latency exceeds 10ms
 - Memory utilization drops below 50%
-- Cache hit rate falls below 80%
-- Serialization speedup drops below 15%
-- Subgraph cache hit rate falls below 30%
-- Differential protocol savings drop below 3x
+- Cache hit rate falls below acceptable levels
+- Serialization performance degrades
+- Subgraph cache hit rate falls below acceptable levels
+- Differential protocol savings become insufficient
 
 ---
 
@@ -323,24 +319,31 @@ Scheduler ────► Cost Estimator ────► Network Topology
 
 ---
 
-## Conclusion
+## Implementation Status
 
-Djinn's scheduler represents a **practical approach to semantic-driven GPU disaggregation**: cost-aware decision making with semantic intelligence, enabling optimizations that are invisible to applications but transformative for performance.
+### Current Architecture State
+Djinn's scheduler implements a sophisticated framework for semantic-driven GPU disaggregation with several key architectural innovations designed to enable ML-aware optimization decisions.
 
-**Key Success Factors:**
-- Strategic local metadata abstraction eliminates distributed bottlenecks
-- Semantic cost modeling enables ML-aware optimizations
-- Memory-aware integration ensures efficient resource utilization
-- Optimized serialization reduces result transfer overhead by 23%
-- Differential protocols provide 10x network reduction for iterative workloads
-- Subgraph caching eliminates redundant computation construction
-- Clear extension points for future optimizations
+**Implemented Components:**
+- Core scheduling engine with cost estimation and optimization pipelines
+- Semantic analysis for ML-aware decision making
+- Memory-aware scheduling with lifetime analysis integration
+- Network optimization through serialization improvements
+- Subgraph caching with structural hashing
+- Materialization optimization with CUDA stream pipelining
 
-**Expected Performance Improvements:**
-- Scheduling latency: 1,371x faster than naive approaches
-- GPU utilization: 60%+ through semantic optimizations
-- Memory efficiency: 4x improvement through lifetime analysis
-- Network efficiency: 10x reduction for iterative workloads
-- Serialization performance: 23% faster result transfer
-- Application performance: 10-100x speedup for optimized workloads</contents>
-</xai:function_call">Write contents to /home/jae/Genie/docs/scheduler/ARCHITECTURE_BRIEF.md.
+**Architecture Goals:**
+- Local metadata abstraction for fast scheduling decisions
+- Semantic cost modeling for ML-aware optimizations
+- Memory-aware resource management
+- Network-efficient distributed execution
+- Progressive optimization complexity support
+
+### Key Design Principles
+- **Separation of Concerns**: Clear boundaries between cost estimation, semantic analysis, and execution
+- **Progressive Complexity**: Support for varying optimization sophistication levels
+- **Extensibility**: Pluggable architecture for custom optimizations and cost models
+- **Fault Tolerance**: Comprehensive error handling and fallback strategies
+
+### Future Development Focus
+The scheduler architecture provides a solid foundation for semantic-driven GPU disaggregation, with implementation continuing to address complex ML framework compatibility and operation handler completeness.

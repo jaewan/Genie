@@ -336,19 +336,19 @@ class SubgraphBuilder:
         # Iterative post-order traversal to avoid recursion limit (fixes GPT-2 XL)
         stack = [(target_tensor, False)]  # (tensor, children_processed)
         pending = set()  # Track nodes waiting for children to be processed
-
+        
         while stack:
             tensor, children_processed = stack.pop()
-
+            
             if not isinstance(tensor, LazyTensor):
                 continue
-
+            
             tensor_id = id(tensor)
-
+            
             # Skip if already fully processed
             if tensor_id in visited:
                 continue
-
+            
             # ✅ Check if this is an external input WITHOUT accessing shape
             if self._is_external_input_by_operation(tensor):
                 input_tensors[tensor_id] = tensor
