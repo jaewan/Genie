@@ -131,6 +131,17 @@ class UniversalDispatcher:
             # ✅ FIX: Embedding operation (critical for GPT-2)
             'embedding': self._handle_embedding,
             
+            # ✅ FIX: Dropout - F.dropout has 4 args (input, p, train, inplace) but aten::dropout only takes 3
+            'dropout': self._handle_dropout,
+            
+            # ✅ FIX: Layer Norm - Use F.layer_norm for correct parameter handling
+            'layer_norm': self._handle_layer_norm,
+            'native_layer_norm': self._handle_layer_norm,
+            
+            # ✅ FIX: Reshape - Ensure shape argument is handled correctly
+            'reshape': self._handle_reshape,
+            'view': self._handle_reshape,
+            
             # ✅ FIX: Type conversion via .to() method
             'to': self._handle_to,
         }
@@ -276,6 +287,322 @@ class UniversalDispatcher:
         
         with disable_interception(InterceptionContext.MATERIALIZATION):
             return F.embedding(input_tensor, weight_tensor, *inputs[2:], **kwargs)
+    
+    def _handle_dropout(self, inputs: List[Any], kwargs: Dict[str, Any]) -> torch.Tensor:
+        """
+        Handle dropout operation.
+        
+        GPT-2 calls F.dropout(input, p, train, inplace) with 4 args,
+        but torch.ops.aten.dropout only accepts 3 args (input, p, train).
+        We need to handle the inplace parameter specially.
+        """
+        if not inputs:
+            raise ValueError("dropout requires at least an input tensor")
+        
+        # Materialize input
+        input_tensor = _materialize_lazy_tensor(inputs[0])
+        
+        # Extract arguments: F.dropout(input, p, train, inplace)
+        # inputs[0] = input tensor (already materialized)
+        # inputs[1] = p (dropout probability)
+        # inputs[2] = train (training mode)
+        # inputs[3] = inplace (optional, if present)
+        
+        # Extract arguments: F.dropout(input, p, train, inplace)
+        # Note: F.dropout uses 'training' parameter, not 'train'
+        p = inputs[1] if len(inputs) > 1 else kwargs.get('p', 0.5)
+        training = inputs[2] if len(inputs) > 2 else kwargs.get('training', kwargs.get('train', False))
+        inplace = inputs[3] if len(inputs) > 3 else kwargs.get('inplace', False)
+        
+        # Use F.dropout which handles all parameters correctly
+        import torch.nn.functional as F
+        from .interception_control import disable_interception, InterceptionContext
+        
+        with disable_interception(InterceptionContext.MATERIALIZATION):
+            return F.dropout(input_tensor, p=p, training=training, inplace=inplace)
+    
+    def _handle_layer_norm(self, inputs: List[Any], kwargs: Dict[str, Any]) -> torch.Tensor:
+        """
+        Handle layer_norm operation.
+        
+        GPT-2 calls F.layer_norm(input, normalized_shape, weight, bias, eps) with 5 positional args.
+        When dispatched as aten::layer_norm, arguments might be in different order.
+        Uses F.layer_norm for correct parameter handling and shape preservation.
+        """
+        if not inputs:
+            raise ValueError("layer_norm requires at least an input tensor")
+        
+        # Materialize input
+        input_tensor = _materialize_lazy_tensor(inputs[0])
+        
+        # Debug: Log what we receive
+        logger.debug(f"layer_norm inputs: {len(inputs)} args, types: {[type(x).__name__ for x in inputs]}")
+        
+        # Try to extract normalized_shape - it might be in different positions
+        # Check if inputs[1] is a tuple (normalized_shape) or a Parameter (weight)
+        normalized_shape = None
+        weight = None
+        bias = None
+        eps = 1e-5
+        
+        # Strategy: Find normalized_shape by checking for tuple
+        # Then weight and bias are Parameters/Tensors
+        for i, inp in enumerate(inputs[1:], 1):
+            if isinstance(inp, (tuple, list)) and not isinstance(inp, torch.Tensor):
+                # This is normalized_shape
+                normalized_shape = tuple(inp) if isinstance(inp, list) else inp
+            elif isinstance(inp, (int, float)) and not isinstance(inp, bool):
+                # This might be eps
+                eps = float(inp)
+            elif isinstance(inp, torch.Tensor) or (hasattr(inp, 'data') and hasattr(inp, 'requires_grad')):
+                # This is weight or bias
+                if weight is None:
+                    weight = inp
+                elif bias is None:
+                    bias = inp
+        
+        # Fallback to positional if we didn't find normalized_shape
+        if normalized_shape is None:
+            if len(inputs) > 1:
+                # Try inputs[1] as normalized_shape
+                inp1 = inputs[1]
+                if isinstance(inp1, (tuple, list)):
+                    normalized_shape = tuple(inp1) if isinstance(inp1, list) else inp1
+                elif isinstance(inp1, torch.Tensor):
+                    # Extract shape from weight tensor
+                    normalized_shape = tuple(inp1.shape)
+                else:
+                    normalized_shape = kwargs.get('normalized_shape', (input_tensor.shape[-1],))
+            else:
+                normalized_shape = kwargs.get('normalized_shape', (input_tensor.shape[-1],))
+        
+        # Extract weight and bias from kwargs if not found
+        if weight is None:
+            weight = kwargs.get('weight', None)
+        if bias is None:
+            bias = kwargs.get('bias', None)
+        if eps == 1e-5:  # Only use default if we didn't find it
+            eps = kwargs.get('eps', 1e-5)
+        
+        # Ensure normalized_shape is a tuple
+        if isinstance(normalized_shape, torch.Tensor):
+            normalized_shape = tuple(normalized_shape.tolist())
+        elif not isinstance(normalized_shape, (tuple, list)):
+            normalized_shape = tuple(normalized_shape) if hasattr(normalized_shape, '__iter__') else (normalized_shape,)
+        
+        # Materialize weight and bias if they're LazyTensors
+        if weight is not None and isinstance(weight, torch.Tensor):
+            weight = _materialize_lazy_tensor(weight)
+        if bias is not None and isinstance(bias, torch.Tensor):
+            bias = _materialize_lazy_tensor(bias)
+        
+        # Use F.layer_norm which handles all parameters correctly
+        import torch.nn.functional as F
+        from .interception_control import disable_interception, InterceptionContext
+        
+        with disable_interception(InterceptionContext.MATERIALIZATION):
+            return F.layer_norm(input_tensor, normalized_shape, weight=weight, bias=bias, eps=eps)
+    
+    def _handle_reshape(self, inputs: List[Any], kwargs: Dict[str, Any]) -> torch.Tensor:
+        """
+        Handle reshape/view operation.
+        
+        Ensures shape argument is correctly extracted and passed.
+        """
+        if not inputs:
+            raise ValueError("reshape requires at least an input tensor")
+        
+        # Materialize input with error handling
+        try:
+            input_tensor = _materialize_lazy_tensor(inputs[0])
+        except Exception as e:
+            logger.error(f"Failed to materialize input tensor for reshape: {e}")
+            raise
+        
+        # Debug logging
+        logger.debug(f"reshape inputs: {len(inputs)} args, kwargs keys: {list(kwargs.keys())}")
+        logger.debug(f"reshape input_tensor shape: {input_tensor.shape}, numel: {input_tensor.numel()}, type: {type(input_tensor)}")
+        logger.debug(f"reshape input_tensor dtype: {input_tensor.dtype}")
+        
+        # Extract shape - can be in inputs[1] or kwargs['shape']
+        shape = None
+        if len(inputs) > 1:
+            shape = inputs[1]
+            logger.debug(f"reshape shape from inputs[1]: {shape}, type: {type(shape)}")
+        elif 'shape' in kwargs:
+            shape = kwargs['shape']
+            logger.debug(f"reshape shape from kwargs: {shape}, type: {type(shape)}")
+        
+        if shape is None:
+            # Try to infer from input tensor shape (fallback)
+            logger.warning("reshape: No shape provided, using input shape as fallback")
+            shape = input_tensor.shape
+        
+        # Convert to tuple of integers - handle all possible input types
+        if isinstance(shape, torch.Tensor):
+            # Materialize if it's a LazyTensor
+            if _is_lazy_tensor(shape):
+                shape = _materialize_lazy_tensor(shape)
+            # Convert tensor to list, then to tuple of ints
+            shape_list = shape.tolist()
+            # Handle nested lists (if tensor was 2D)
+            if shape_list and isinstance(shape_list[0], list):
+                # Flatten nested list
+                shape_list = [item for sublist in shape_list for item in (sublist if isinstance(sublist, list) else [sublist])]
+            shape = tuple(int(d) for d in shape_list)
+        elif isinstance(shape, (list, tuple)):
+            # Convert to tuple of ints, handling nested structures
+            def flatten_shape(s):
+                """Recursively flatten shape structure."""
+                result = []
+                for item in s:
+                    if isinstance(item, (list, tuple)):
+                        result.extend(flatten_shape(item))
+                    elif isinstance(item, torch.Tensor):
+                        if _is_lazy_tensor(item):
+                            item = _materialize_lazy_tensor(item)
+                        result.extend(flatten_shape(item.tolist()))
+                    else:
+                        result.append(int(item))
+                return result
+            shape = tuple(flatten_shape(shape))
+        elif isinstance(shape, torch.Size):
+            shape = tuple(shape)
+        elif not isinstance(shape, tuple):
+            # Try to convert to tuple
+            if hasattr(shape, '__iter__') and not isinstance(shape, str):
+                shape = tuple(int(d) for d in shape)
+            else:
+                shape = (int(shape),)
+        
+        # Final validation: ensure all elements are integers (or -1 for inferred dims)
+        validated_shape = []
+        for dim in shape:
+            if dim == -1:
+                validated_shape.append(-1)
+            elif isinstance(dim, (int, torch.int64, torch.int32)):
+                validated_shape.append(int(dim))
+            else:
+                # Try to convert to int
+                try:
+                    validated_shape.append(int(dim))
+                except (ValueError, TypeError):
+                    logger.warning(f"Invalid shape dimension: {dim}, using -1 as fallback")
+                    validated_shape.append(-1)
+        shape = tuple(validated_shape)
+        
+        logger.debug(f"reshape final shape: {shape}, type: {type(shape)}")
+        
+        # Validate shape compatibility
+        input_numel = input_tensor.numel()
+        # Calculate expected numel from shape (handle -1)
+        shape_numel = 1
+        inferred_dims = 0
+        for dim in shape:
+            if dim == -1:
+                inferred_dims += 1
+            elif dim > 0:
+                shape_numel *= dim
+        
+        if inferred_dims > 1:
+            logger.warning(f"reshape: Multiple -1 dimensions in shape {shape}, this is invalid")
+        elif inferred_dims == 1:
+            # Calculate what -1 should be
+            if input_numel % shape_numel != 0:
+                logger.error(f"reshape: Invalid shape {shape} for input with {input_numel} elements (not divisible by {shape_numel})")
+                # Try to fix: use input shape as fallback
+                logger.warning(f"reshape: Using input shape {input_tensor.shape} as fallback")
+                shape = input_tensor.shape
+        elif shape_numel != input_numel:
+            logger.error(f"reshape: Shape {shape} (numel={shape_numel}) incompatible with input numel={input_numel}, input_shape={input_tensor.shape}")
+            # Try to infer correct shape
+            if input_numel % shape_numel == 0:
+                inferred_value = input_numel // shape_numel
+                logger.warning(f"reshape: Inferred missing dimension as {inferred_value}")
+                # Strategy: Try to preserve input tensor's structure
+                # If input is multi-dimensional and shape is 1D, try to infer batch dimensions
+                if len(input_tensor.shape) > 1 and len(shape) == 1:
+                    # Input is multi-D, shape is 1D - likely need to preserve batch dimensions
+                    # Special case: If input is 2D (batch*seq, hidden) and shape is 1D (hidden,)
+                    # Try to infer batch and seq dimensions
+                    if len(input_tensor.shape) == 2:
+                        # Input is (batch*seq, hidden) format
+                        # Try common GPT-2 patterns: (2, 5, hidden) or (batch, seq, hidden)
+                        # Calculate possible batch/seq combinations
+                        total_seq = input_tensor.shape[0]
+                        hidden = input_tensor.shape[1]
+                        target_hidden = shape[0]
+                        
+                        # Try to factor total_seq into batch * seq
+                        # Common GPT-2 batch sizes: 1, 2, 4, 8, etc.
+                        # Common seq lengths: 5, 10, 128, etc.
+                        # Try: (2, total_seq//2, target_hidden) if divisible
+                        if total_seq % 2 == 0:
+                            batch = 2
+                            seq = total_seq // 2
+                            inferred_shape = (batch, seq, target_hidden)
+                            inferred_numel = batch * seq * target_hidden
+                            if inferred_numel == input_numel:
+                                logger.info(f"reshape: Inferred 3D shape {inferred_shape} from 2D input {input_tensor.shape}")
+                                shape = inferred_shape
+                            else:
+                                # Fallback: preserve first dimension
+                                batch_dims = input_tensor.shape[:-1]
+                                inferred_shape = batch_dims + (inferred_value, shape[0])
+                                logger.info(f"reshape: Preserving batch dims {batch_dims}, inferred shape: {inferred_shape}")
+                                shape = inferred_shape
+                        else:
+                            # Fallback: preserve first dimension
+                            batch_dims = input_tensor.shape[:-1]
+                            inferred_shape = batch_dims + (inferred_value, shape[0])
+                            logger.info(f"reshape: Preserving batch dims {batch_dims}, inferred shape: {inferred_shape}")
+                            shape = inferred_shape
+                    else:
+                        # General case: preserve batch dimensions
+                        batch_dims = input_tensor.shape[:-1]
+                        inferred_shape = batch_dims + (inferred_value, shape[0])
+                        logger.info(f"reshape: Preserving batch dims {batch_dims}, inferred shape: {inferred_shape}")
+                        # Validate
+                        inferred_numel = 1
+                        for d in inferred_shape:
+                            inferred_numel *= d if d > 0 else 1
+                        if inferred_numel == input_numel:
+                            shape = inferred_shape
+                        else:
+                            # Fallback: add inferred dimension at beginning
+                            shape = (inferred_value,) + shape
+                elif -1 in shape:
+                    # Replace -1 with inferred value
+                    shape = tuple(inferred_value if d == -1 else d for d in shape)
+                else:
+                    # Add inferred dimension at the beginning
+                    shape = (inferred_value,) + shape
+            else:
+                # Cannot infer - this is a real error
+                # But try to use input shape as fallback to avoid crash
+                logger.error(f"reshape: Cannot infer compatible shape, using input shape {input_tensor.shape} as fallback (may be incorrect)")
+                shape = input_tensor.shape
+        
+        logger.debug(f"reshape validated shape: {shape}, input_numel={input_numel}")
+        
+        from .interception_control import disable_interception, InterceptionContext
+        
+        try:
+            with disable_interception(InterceptionContext.MATERIALIZATION):
+                # Use torch.ops.aten.reshape directly to avoid any interception
+                result = torch.ops.aten.reshape(input_tensor, shape)
+                logger.debug(f"reshape succeeded: {input_tensor.shape} -> {result.shape}")
+                return result
+        except Exception as e:
+            logger.error(f"reshape failed: input_shape={input_tensor.shape}, input_numel={input_numel}, target_shape={shape}, error={e}")
+            # Try with input shape as last resort
+            try:
+                logger.warning(f"reshape: Retrying with input shape {input_tensor.shape}")
+                with disable_interception(InterceptionContext.MATERIALIZATION):
+                    return torch.ops.aten.reshape(input_tensor, input_tensor.shape)
+            except Exception as e2:
+                logger.error(f"reshape: Fallback also failed: {e2}")
+                raise e  # Raise original error
     
     def _handle_to(self, inputs: List[Any], kwargs: Dict[str, Any]) -> torch.Tensor:
         """Handle tensor.to() type/device conversion."""

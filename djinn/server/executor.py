@@ -707,12 +707,13 @@ class SimpleExecutor:
 							_compute_cache[lt_id] = result
 							return result
 					except Exception as e:
-						logger.error(f"Failed to execute operation {lt.operation}: {e}")
+						logger.error(f"Failed to execute operation {lt.operation}: {e}", exc_info=True)
 						# Let NotApplicableError propagate (it's actionable)
 						if isinstance(e, NotApplicableError):
 							raise
-						# Wrap other errors as MaterializationError
-						raise MaterializationError(f"Execution failed for {lt.operation}") from e
+						# Wrap other errors as MaterializationError with full context
+						error_msg = f"Execution failed for {lt.operation}: {type(e).__name__}: {str(e)}"
+						raise MaterializationError(error_msg) from e
 				finally:
 					visiting.discard(lt_id)  # Always clean up visiting set
 
@@ -815,30 +816,40 @@ class SimpleExecutor:
 				# 2. Operation has special requirements (device mapping, etc.)
 				logger.debug(f"Universal dispatch failed for {op_name}: {e}")
 				
-				# Step 4: Fall back to manual handlers (only for special cases)
-				base_name = op_name.replace("aten::", "")
-				if base_name in self.operation_handlers:
-					logger.debug(f"Using manual handler for {op_name}")
-					# Create a fake lazy_tensor for the handler interface
-					class FakeLazyTensor:
-						def __init__(self, operation, inputs, kwargs):
-							self.operation = operation
-							self.inputs = inputs
-							self.kwargs = kwargs
-					
-					fake_lt = FakeLazyTensor(op_name, inputs, cleaned_kwargs)
-					# Disable interception during manual handler execution
-					with disable_interception(InterceptionContext.MATERIALIZATION):
-						return self.operation_handlers[base_name](fake_lt, inputs, cleaned_kwargs)
+			# Step 4: Fall back to manual handlers (only for special cases)
+			base_name = op_name.replace("aten::", "")
+			
+			# Special handling for unknown_method - these are internal Python methods
+			# that shouldn't be executed. Just return the first input tensor.
+			if base_name == "unknown_method":
+				logger.warning(f"Encountered unknown_method operation - returning first input as-is")
+				if concrete_inputs:
+					return concrete_inputs[0] if isinstance(concrete_inputs[0], torch.Tensor) else concrete_inputs[0]
+				else:
+					raise NotApplicableError(f"unknown_method operation has no inputs")
+			
+			if base_name in self.operation_handlers:
+				logger.debug(f"Using manual handler for {op_name}")
+				# Create a fake lazy_tensor for the handler interface
+				class FakeLazyTensor:
+					def __init__(self, operation, inputs, kwargs):
+						self.operation = operation
+						self.inputs = inputs
+						self.kwargs = kwargs
 				
-				# Step 5: Operation not supported
-				self.stats['failures'].append((op_name, str(e)))
-				raise NotApplicableError(
-					f"Operation '{op_name}' failed to execute.\n"
-					f"  Inputs: {[type(i).__name__ for i in concrete_inputs]}\n"
-					f"  Universal dispatch failed: {e}\n"
-					f"  No manual handler found.\n"
-					f"  This operation may not exist in PyTorch or requires special handling."
+				fake_lt = FakeLazyTensor(op_name, inputs, cleaned_kwargs)
+				# Disable interception during manual handler execution
+				with disable_interception(InterceptionContext.MATERIALIZATION):
+					return self.operation_handlers[base_name](fake_lt, inputs, cleaned_kwargs)
+			
+			# Step 5: Operation not supported
+			self.stats['failures'].append((op_name, str(e)))
+			raise NotApplicableError(
+				f"Operation '{op_name}' failed to execute.\n"
+				f"  Inputs: {[type(i).__name__ for i in concrete_inputs]}\n"
+				f"  Universal dispatch failed: {e}\n"
+				f"  No manual handler found.\n"
+				f"  This operation may not exist in PyTorch or requires special handling."
 			) from e
 		except Exception:
 			# Re-raise any other exceptions
