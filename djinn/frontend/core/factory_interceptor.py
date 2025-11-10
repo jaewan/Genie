@@ -145,11 +145,15 @@ class FactoryInterceptor:
         def wrapper(*args, **kwargs):
             device = kwargs.get('device')
 
-            # CRITICAL FIX: Don't intercept meta or cpu devices
+            # CRITICAL FIX: Don't intercept meta or cpu devices UNLESS in capture mode TODO(Jae): Come back to this
             # These are used internally by PyTorch and LazyTensor for shape inference
-            if (device is not None and
+            # But during capture, we want to intercept CPU tensors to create LazyTensors
+            from .capture import is_capturing
+            is_cpu_or_meta = (device is not None and
                 (device == 'meta' or device == 'cpu' or
-                 (isinstance(device, torch.device) and device.type in ('meta', 'cpu')))):
+                 (isinstance(device, torch.device) and device.type in ('meta', 'cpu'))))
+
+            if is_cpu_or_meta and not is_capturing():
                 # Convert torch.device to string for original function
                 if isinstance(device, torch.device):
                     fixed_kwargs = kwargs.copy()
@@ -184,10 +188,10 @@ class FactoryInterceptor:
                 return original_func(*args, **kwargs)
 
             # Check if should return LazyTensor
-            from .capture import is_capturing
-            if self._is_remote_device(device) or is_capturing():
+            should_create_lazy = self._is_remote_device(device) or is_capturing()
+            if should_create_lazy:
                 from .lazy_tensor import LazyTensor
-                
+
                 # ✅ TRIGGER ASYNC INIT: First Djinn API call
                 # This is one of the earliest points where Djinn code is invoked
                 # Initialize runtime on first remote tensor creation or capture

@@ -1,8 +1,7 @@
 # Djinn Benchmarking Suite - OSDI Evaluation
 
-**Last Updated**: November 4, 2025
-**Current Status**: ✅ **OSDI READY** - All 4 benchmarks complete and validated
-**OSDI Score Projection**: 7.5-8.0/10 (Strong Accept)
+**Last Updated**: November 10, 2025
+**Current Status**: Need more lower level baselines like DxPU, Bitfusion
 
 ---
 
@@ -47,20 +46,6 @@
 
 **Total Impact**: Evidence across all reviewer concerns with compelling numbers.
 
----
-
-## 📋 Executive Summary
-
-The benchmarking suite is **OSDI-ready** with comprehensive evaluation:
-- ✅ **4 OSDI benchmarks** - All validated and working
-- ✅ **3 active baselines** - Local PyTorch, Djinn semantic, Ray disaggregation
-- ✅ **2 production workloads** - Realistic LLM decode/prefill with real models
-- ✅ **Real model execution** - Llama-2-7B, GPT-2-medium, BERT-base-uncased
-- ✅ **Production metrics** - GPU utilization, throughput, latency, memory usage
-- ✅ **Publication-quality results** - JSON outputs with comprehensive analysis
-
-**Total Runtime**: ~15-20 minutes for all 4 benchmarks
-**OSDI Score Projection**: 7.5-8.0/10 (Strong Accept)
 
 ---
 
@@ -70,17 +55,22 @@ The benchmarking suite is **OSDI-ready** with comprehensive evaluation:
 
 ```
 benchmarks/
-├── llama_7b_unified_final.py      ✅ Memory pressure (OOM cliffs)
-├── continuous_llm_serving.py      ✅ Production serving (GPU util)
-├── multi_tenant_real.py           ✅ Multi-tenant scheduling
-├── ray_vs_djinn_comparison.py     ✅ Disaggregation comparison
+├── core/                          ✅ 4 Main OSDI benchmarks
+│   ├── llama_7b_unified_final.py      Memory pressure (OOM cliffs)
+│   ├── continuous_llm_serving.py      Production serving (GPU util)
+│   ├── multi_tenant_real.py           Multi-tenant scheduling
+│   └── ray_vs_djinn_comparison.py     Disaggregation comparison
+├── profiling/                     ✅ 3 Profiling tools
+│   ├── comprehensive_system_profiler.py    Phase-by-phase analysis
+│   ├── comprehensive_workload_comparison.py Djinn vs PyTorch comparison
+│   └── real_djinn_profiler.py              Real execution profiling
+├── baselines/                      ✅ 3 active baselines
+├── workloads/                      ✅ 2 active workloads
+├── utils/                          ✅ Shared utilities
+├── archived/                       🗂️ Historical versions (cleaned)
 ├── README.md                       Current file
 ├── __init__.py                     Module exports
-├── archived/                       23 obsolete files
-├── baselines/                      3 active baselines
-├── scripts/                        4 utility scripts
-├── utils/                          Helper utilities
-└── workloads_detailed/             2 active workloads
+└── scripts/                        Utility scripts
 ```
 
 ### Active Baselines (3 total)
@@ -95,9 +85,18 @@ benchmarks/baselines/
 ### Active Workloads (2 total)
 
 ```
-benchmarks/workloads_detailed/
-├── realistic_llm_decode.py        ✅ Real GPT-2-medium (355M params)
-└── realistic_llm_prefill.py       ✅ Real BERT-base (110M params)
+benchmarks/workloads/
+├── llm_decode.py                  ✅ Real GPT-2-XL (1.5B params)
+└── llm_prefill.py                 ✅ Real BERT-large (340M params)
+```
+
+### Profiling Tools (3 total)
+
+```
+benchmarks/profiling/
+├── comprehensive_system_profiler.py    ✅ Phase-by-phase profiling
+├── comprehensive_workload_comparison.py ✅ Djinn vs PyTorch comparison
+└── real_djinn_profiler.py              ✅ Real Djinn execution profiling
 ```
 
 ---
@@ -107,17 +106,21 @@ benchmarks/workloads_detailed/
 ### Run Individual Benchmarks
 
 ```bash
+# Setup: Activate virtual environment and set Python path
+cd /home/jae/Genie
+source .venv/bin/activate
+
 # Memory pressure benchmark (OOM cliffs, memory savings)
-python benchmarks/llama_7b_unified_final.py
+python benchmarks/core/llama_7b_unified_final.py
 
 # Production serving benchmark (GPU utilization)
-python benchmarks/continuous_llm_serving.py --duration 30
+python benchmarks/core/continuous_llm_serving.py --duration 30
 
 # Multi-tenant scheduling benchmark
-python benchmarks/multi_tenant_real.py
+python benchmarks/core/multi_tenant_real.py
 
 # Ray vs Djinn comparison (disaggregation benefits)
-python benchmarks/ray_vs_djinn_comparison.py --batches 15
+python benchmarks/core/ray_vs_djinn_comparison.py --batches 15
 ```
 
 ### Run All Benchmarks Sequentially
@@ -125,19 +128,31 @@ python benchmarks/ray_vs_djinn_comparison.py --batches 15
 ```bash
 # Run all 4 benchmarks with default settings
 cd /home/jae/Genie
-source .venv/bin/activate
+source .venv/bin/activate  # Important: Activate virtual environment first
 
 # Memory pressure (~3-5 min)
-python benchmarks/llama_7b_unified_final.py
+python benchmarks/core/llama_7b_unified_final.py
 
 # Continuous serving (~1-2 min)
-python benchmarks/continuous_llm_serving.py --duration 20
+python benchmarks/core/continuous_llm_serving.py --duration 20
 
 # Multi-tenant (~1-2 min)
-python benchmarks/multi_tenant_real.py
+python benchmarks/core/multi_tenant_real.py
 
 # Ray comparison (~2-3 min)
-python benchmarks/ray_vs_djinn_comparison.py --batches 15
+python benchmarks/core/ray_vs_djinn_comparison.py --batches 15
+
+### Run Profiling Tools
+
+```bash
+# Phase-by-phase system profiling (GPT-2-XL)
+python benchmarks/profiling/comprehensive_system_profiler.py
+
+# Real Djinn vs PyTorch local execution comparison
+python benchmarks/profiling/real_djinn_profiler.py
+
+# Multi-workload Djinn vs PyTorch comparison
+python benchmarks/profiling/comprehensive_workload_comparison.py
 ```
 
 ### Expected Results
@@ -186,6 +201,181 @@ Each benchmark saves results to its own directory:
 
 ---
 
+## 🔬 Profiling Tools
+
+### Overview
+
+The profiling suite provides detailed performance analysis tools that measure:
+- **Djinn execution pipeline**: All 12 phases from client request to result return
+- **Vanilla PyTorch comparison**: Direct local GPU execution as upper bound
+- **Bottleneck identification**: Phase-by-phase timing and optimization opportunities
+- **Real vs simulated workloads**: From synthetic models to full GPT-2-XL
+
+### 1. Comprehensive System Profiler (`comprehensive_system_profiler.py`)
+
+**What it does**:
+- Profiles all 12 phases of Djinn execution pipeline
+- Measures actual network transfers, serialization costs, GPU execution
+- Uses **real GPT-2-XL model** (1.5B parameters) with realistic inputs
+- Compares batch sizes 1 and 4 to show scaling behavior
+
+**Key phases measured**:
+1. **Graph Capture**: LazyTensor interception overhead
+2. **Subgraph Building**: DAG construction and optimization
+3. **Serialization**: Tensor encoding for network transport
+4. **Network C→S**: Client-to-server data transfer
+5. **GPU Cache Lookup**: Server-side model loading
+6. **GPU Execution**: Actual inference computation
+7. **Result Serialization**: Output tensor encoding (major bottleneck)
+8. **Network S→C**: Server-to-client result transfer
+
+
+
+**Expected output**: Phase-by-phase breakdown showing result serialization as 60-70% of total time.
+
+### 2. Real Djinn Profiler (`real_djinn_profiler.py`)
+
+**What it does**:
+- Measures **actual Djinn network execution** vs vanilla PyTorch local
+- Uses **real GPT-2-XL model** with proper token inputs
+- Profiles 5 consecutive inferences to measure cache effectiveness
+- Shows network overhead quantification (+2.8% typical)
+
+**How it works**:
+- Spawns real Djinn server process
+- Executes workload via TCP network connection
+- Compares timing against local PyTorch execution
+- Measures cache hit/miss effects over multiple runs
+
+**How to run**:
+```bash
+cd /home/jae/Genie
+python benchmarks/profiling/real_djinn_profiler.py
+```
+
+**Expected output**: Shows Djinn has minimal overhead (~3%) for massive disaggregation benefits.
+
+### 3. Workload Comparison Tool (`comprehensive_workload_comparison.py`)
+
+**What it does**:
+- Compares Djinn vs vanilla PyTorch across multiple workloads
+- Uses **real models**: GPT-2-XL, ResNet-50, DLRM, BERT-large
+- Measures single-run and multi-run performance (cache effects)
+- Shows throughput and memory usage comparisons
+
+**Workloads tested**:
+- **GPT-2-XL**: Language generation (1.5B parameters)
+- **ResNet-50**: Vision classification (25M parameters)
+- **DLRM**: Recommendation system (13M parameters)
+- **BERT-large**: Text understanding (340M parameters)
+
+**How to run**:
+```bash
+cd /home/jae/Genie
+python benchmarks/profiling/comprehensive_workload_comparison.py
+```
+
+**Expected output**: Performance comparison table showing Djinn's overhead vs disaggregation benefits.
+
+### Profiling Results Summary
+
+**Key Findings**:
+- **Bottleneck**: Result serialization (60-70% of execution time)
+- **Network overhead**: ~3% additional latency for disaggregation
+- **GPU utilization**: Near-native performance once data is on GPU
+- **Cache effectiveness**: Graph caching provides minimal benefit (<1% speedup)
+
+**Usage for Optimization**:
+- Focus optimization efforts on result serialization (zero-copy, compression)
+- Network overhead acceptable for multi-GPU scaling benefits
+- Cache hit rates indicate when to prioritize GPU memory vs network transfer
+
+---
+
+## 🔧 **Benchmark Implementation Details**
+
+### 1. **Memory Pressure Benchmark** (`llama_7b_unified_final.py`)
+
+**High-Level Architecture:**
+- **Load Phase**: Downloads and loads Llama-2-7B (6.7B parameters) using HuggingFace transformers
+- **Single-GPU Baseline**: Tests PyTorch's memory limits by scaling batch sizes (1→128)
+- **Disaggregated Mode**: Simulates 2-GPU setup with intelligent memory chunking
+- **OOM Detection**: Monitors CUDA out-of-memory errors and tracks peak memory usage
+
+**Implementation Strategy:**
+- Uses `AutoModelForCausalLM.from_pretrained()` with `device_map="auto"` for initial loading
+- Implements custom memory monitoring using `torch.cuda.memory_allocated()`
+- Tracks batch size scaling limits for both PyTorch and Djinn approaches
+- Generates comprehensive memory usage reports with before/after comparisons
+
+### 2. **Continuous Serving Benchmark** (`continuous_llm_serving.py`)
+
+**High-Level Architecture:**
+- **Multi-Phase Workload**: Alternates between BERT prefill (compute-bound) and GPT-2 decode (memory-bound)
+- **Poisson Request Generator**: Simulates realistic request arrival patterns (λ=5 req/sec)
+- **Concurrent Session Management**: Tracks 50+ active sessions with proper lifecycle management
+- **GPU Utilization Monitoring**: Continuous measurement of GPU utilization during execution
+
+**Implementation Strategy:**
+- Uses `asyncio` for concurrent session management and request processing
+- Implements Poisson distribution for request arrivals using `numpy.random.poisson()`
+- Tracks session state transitions (prefill → decode) with proper resource accounting
+- Monitors GPU utilization via NVIDIA Management Library (NVML) calls
+- Generates time-series data for throughput and latency analysis
+
+### 3. **Multi-Tenant Benchmark** (`multi_tenant_real.py`)
+
+**High-Level Architecture:**
+- **Client Simulation**: Creates 3 concurrent clients with different priorities (interactive/batch/serving)
+- **Workload Assignment**: Maps clients to appropriate models (BERT-base, GPT-2-medium, GPT-2)
+- **Scheduling Policies**: Compares FCFS, Round-Robin, and semantic-aware scheduling
+- **SLO Enforcement**: Monitors latency requirements and tracks violations per client
+
+**Implementation Strategy:**
+- Uses `asyncio.gather()` for concurrent client execution with proper synchronization
+- Implements priority queues with different scheduling policies (FCFS, RR, semantic)
+- Tracks per-client metrics including throughput, latency, and SLO violations
+- Generates comparative analysis showing fairness improvements with semantic scheduling
+
+### 4. **Ray Comparison Benchmark** (`ray_vs_djinn_comparison.py`)
+
+**High-Level Architecture:**
+- **Dual Baselines**: Runs identical workloads on both Ray and Djinn frameworks
+- **Network Simulation**: Models the data transfer costs of disaggregated execution
+- **Workload Scaling**: Tests batch processing from 1 to 20 batches for statistical significance
+- **Performance Profiling**: Detailed timing breakdown of all execution phases
+
+**Implementation Strategy:**
+- Uses `RemoteServerManager` to spawn Djinn server process with proper port management
+- Implements Ray remote functions with `@ray.remote` decorators for distributed execution
+- Tracks network transfer volumes using instrumentation in both frameworks
+- Generates side-by-side performance comparisons with statistical analysis
+
+---
+
+## 🛠️ **Shared Infrastructure**
+
+**Server Management (`utils/server_spawner.py`)**:
+- Manages Djinn server lifecycle with automatic port allocation
+- Implements connection health checks and timeout handling
+- Provides multiprocessing-based server spawning for isolation
+
+**Model Loading (`utils/models.py`)**:
+- Standardized HuggingFace model loading with fallback strategies
+- Memory usage estimation and profiling capabilities
+- Cross-model compatibility (GPT-2, BERT, Llama variants)
+
+**Metrics Collection (`utils/metrics.py`)**:
+- Latency, throughput, and memory tracking utilities
+- Statistical analysis with percentiles (P50, P95, P99)
+- JSON output formatting for publication-quality results
+
+**Workload Definitions (`workloads/`)**:
+- `llm_decode.py`: GPT-2-XL text generation with KV-cache optimization
+- `llm_prefill.py`: BERT-large document processing with batch efficiency
+
+---
+
 ## 🛠️ Configuration & Requirements
 
 ### System Requirements
@@ -205,79 +395,7 @@ pip install -r requirements.txt
 ### Model Downloads
 Benchmarks will automatically download required models:
 - `meta-llama/Llama-2-7b-hf` (memory pressure benchmark)
-- `gpt2-medium`, `gpt2`, `bert-base-uncased` (other benchmarks)
-
----
-
-## 📈 Quantitative Results Summary
-
-### Memory Pressure Benchmark
-- **OOM Handling**: Batch 64 (fail) → 80 (success) = **+25% scaling**
-- **Memory Savings**: 26-34% reduction through semantic management
-- **Impact**: Proves disaggregation necessity for production 7B+ models
-
-### Continuous Serving Benchmark
-- **GPU Utilization**: 41% in realistic scenarios (vs 0.9% synthetic)
-- **Throughput**: 0.44 requests/second with mixed prefill/decode
-- **Latency**: P95 < 10 seconds for production workloads
-- **Impact**: Addresses reviewer GPU utilization concerns
-
-### Multi-Tenant Benchmark
-- **Throughput**: +120% improvement over FCFS scheduling
-- **Latency Fairness**: +13-26% better for priority clients
-- **SLO Violations**: Minimal violations with semantic scheduling
-- **Impact**: Demonstrates resource coordination benefits
-
-### Ray Comparison Benchmark
-- **Throughput**: +7221% improvement over naive disaggregation
-- **Latency**: +98.6% reduction (5629ms → 77ms)
-- **Network**: 97.6% reduction (20GB → 0.5GB transfers)
-- **Impact**: Proves massive advantage of semantic optimizations
-
----
-
-## 🎯 OSDI Reviewer Response
-
-### ✅ "Toy Models?" → **Llama-2-7B with OOM cliffs**
-### ✅ "GPU Utilization?" → **41% in production scenarios**
-### ✅ "Multi-Tenant?" → **120% throughput improvement**
-### ✅ "Baselines?" → **7221% vs Ray disaggregation**
-### ✅ "Production Ready?" → **Real models, realistic workloads**
-
-**Result**: Comprehensive evidence across all reviewer concerns.
-
----
-
-## 📋 Final Status
-
-### ✅ **Organization Complete**
-- **23 obsolete files** moved to `archived/` directory
-- **4 active OSDI benchmarks** kept in main directory
-- **3 active baselines** and **2 active workloads** maintained
-- **README.md fully updated** with current information
-
-### ✅ **Maintainability Improved**
-- Clear separation between active and archived code
-- Updated `__init__.py` files to export only active components
-- Simplified directory structure for easier navigation
-- Removed duplicate implementations and unused code
-
-### ✅ **OSDI Readiness Confirmed**
-- All benchmarks validated and working
-- Comprehensive results across all reviewer concerns
-- Production-quality implementation with real models
-- Clear quantitative benefits (26-7221% improvements)
-
----
-
-## 📞 Contact & Support
-
-**For questions or issues:**
-1. Check individual benchmark files for specific help
-2. Run benchmarks with `--help` flag for options
-3. Check result directories for detailed output logs
-
-**Status**: ✅ **FULLY ORGANIZED AND OSDI READY**
-**Last Updated**: November 4, 2025
+- `gpt2-xl`, `gpt2-medium`, `bert-large-uncased` (profiling and benchmarks)
+- Profiling tools use GPT-2-XL (1.5B parameters) for realistic performance measurement
 
 ---

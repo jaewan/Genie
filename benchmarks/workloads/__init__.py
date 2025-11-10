@@ -5,8 +5,8 @@ This module implements the active workload configurations used in the
 4 main OSDI benchmarks.
 """
 
-from .realistic_llm_decode import RealisticLLMDecodeWorkload
-from .realistic_llm_prefill import RealisticLLMPrefillWorkload
+from .llm_decode import RealisticLLMDecodeWorkload
+from .llm_prefill import RealisticLLMPrefillWorkload
 
 __all__ = [
     'RealisticLLMDecodeWorkload',

@@ -517,13 +517,14 @@ class LazyTensor(torch.Tensor):
     @staticmethod
     def __new__(
         cls,
-        operation: str,
-        inputs: List[Any],
+        operation: str = None,
+        inputs: List[Any] = None,
         kwargs: Optional[Dict[str, Any]] = None,
         shape: Optional[torch.Size] = None,
         dtype: Optional[torch.dtype] = None,
         device: Optional[torch.device] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        **extra_kwargs  # CRITICAL FIX: Accept extra kwargs from PyTorch (e.g., Parameter construction)
     ):
         """
         Create LazyTensor wrapper.
@@ -536,7 +537,26 @@ class LazyTensor(torch.Tensor):
         - _physical_device: Always 'meta' (no actual storage)
         
         This prevents device mismatch errors when mixing LazyTensors with real tensors.
+        
+        ✅ PYTORCH COMPATIBILITY:
+        - Accepts **extra_kwargs to handle PyTorch's internal machinery
+        - When Parameter(lazytensor) is called, PyTorch passes extra kwargs
+        - These are safely ignored (stored as fallback operation/inputs if needed)
         """
+        # CRITICAL FIX: Handle case where LazyTensor is called from PyTorch machinery
+        # (e.g., Parameter construction) with minimal arguments
+        if operation is None:
+            # Called from PyTorch (Parameter, etc.) with minimal args
+            # Use placeholder values for LazyTensor semantics
+            operation = 'aten::clone'  # Generic placeholder operation
+            inputs = []
+            kwargs = {}
+        
+        if inputs is None:
+            inputs = []
+        if kwargs is None:
+            kwargs = {}
+        
         with disable_interception(InterceptionContext.CONSTRUCTION):
             # Infer shape/dtype if not provided
             if shape is None:
@@ -618,20 +638,33 @@ class LazyTensor(torch.Tensor):
 
     def __init__(
         self,
-        operation: str,
-        inputs: List[Any],
+        operation: str = None,
+        inputs: List[Any] = None,
         kwargs: Optional[Dict[str, Any]] = None,
         shape: Optional[torch.Size] = None,
         dtype: Optional[torch.dtype] = None,
         device: Optional[torch.device] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        **extra_kwargs  # CRITICAL FIX: Accept extra kwargs from PyTorch
     ):
         """
         Initialize LazyTensor metadata.
 
         Note: __new__ has already created the tensor wrapper.
         Here we attach operation metadata for graph building.
+        
+        ✅ PYTORCH COMPATIBILITY:
+        - Accepts **extra_kwargs to handle PyTorch's internal machinery
+        - Extra kwargs are safely ignored (LazyTensor semantics preserved)
         """
+        # CRITICAL FIX: Handle case where LazyTensor is called from PyTorch machinery
+        if operation is None:
+            operation = 'aten::clone'  # Use placeholder
+        if inputs is None:
+            inputs = []
+        if kwargs is None:
+            kwargs = {}
+        
         # Store operation info
         # These become attributes of the tensor instance
         object.__setattr__(self, '_operation', operation)
@@ -721,8 +754,9 @@ class LazyTensor(torch.Tensor):
                     return arg
             
             # ✅ ONLY check for disabled contexts (construction, materialization)
+            # CAPTURING context should allow interception to build the DAG
             from .interception_control import get_current_context, InterceptionContext
-            if get_current_context() != InterceptionContext.NONE:
+            if get_current_context() in (InterceptionContext.CONSTRUCTION, InterceptionContext.MATERIALIZATION):
                 # We're inside LazyTensor construction or materialization - skip
                 result = func(*args, **kwargs)
                 return result
@@ -3318,24 +3352,36 @@ class LazyTensor(torch.Tensor):
     # These handle operations with mixed local/remote inputs by determining
     # the most efficient execution location.
     
-    def _handle_binary_operation(self, other, operation: str, 
+    def _handle_binary_operation(self, other, operation: str,
                                  fallback_fn) -> 'LazyTensor':
         """
         Generic handler for binary operations with mixed placement.
-        
+
+        During capture: Always create LazyTensor (defer execution). TODO(Jae): Come back to this
+        During execution: Use placement strategy to optimize
+
         Strategy:
         1. Determine if inputs are local/remote
         2. Execute where most data resides
         3. Avoid unnecessary data transfers
-        
+
         Args:
             other: Second operand
             operation: Operation name (e.g., 'add', 'matmul')
             fallback_fn: Function to call if need to materialize
-        
+
         Returns:
             LazyTensor or result depending on execution path
         """
+        # During capture, always create LazyTensor without placement decisions
+        from .capture import is_capturing
+        if is_capturing():
+            return LazyTensor(
+                operation=operation,
+                inputs=[self, other],
+                metadata={'captured': True}
+            )
+
         # Check if we can keep both as lazy (remote)
         if isinstance(other, LazyTensor):
             # Both remote - execute there
@@ -3344,11 +3390,11 @@ class LazyTensor(torch.Tensor):
                 inputs=[self, other],
                 metadata={'optimization': 'binary_lazy'}
             )
-        
+
         # Mixed case: self is LazyTensor, other is concrete
         # Use placement strategy to decide
         should_remote = PlacementStrategy.should_execute_remotely([self, other])
-        
+
         if should_remote:
             # Keep operation remote (will materialize other if needed on remote)
             return LazyTensor(

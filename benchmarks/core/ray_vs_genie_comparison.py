@@ -20,7 +20,7 @@ import logging
 
 # Import Djinn components
 from benchmarks.baselines import LocalPyTorchBaseline, DjinnFullBaseline
-from benchmarks.workloads_detailed import RealisticLLMDecodeWorkload
+from benchmarks.workloads import RealisticLLMDecodeWorkload
 from benchmarks.utils import RemoteServerManager
 
 logger = logging.getLogger(__name__)

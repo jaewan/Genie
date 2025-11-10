@@ -36,7 +36,7 @@ from collections import deque
 
 # Import Djinn components
 from benchmarks.baselines import DjinnFullBaseline, LocalPyTorchBaseline
-from benchmarks.workloads_detailed import RealisticLLMPrefillWorkload, RealisticLLMDecodeWorkload
+from benchmarks.workloads import RealisticLLMPrefillWorkload, RealisticLLMDecodeWorkload
 
 
 class ServingPhase(Enum):

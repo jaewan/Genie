@@ -12,17 +12,24 @@ import torch
 import torch.nn as nn
 import time
 import gc
-import logging
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
 import json
 import sys
-import subprocess
+
+# Import shared utilities
+from benchmarks.utils import (
+    setup_logging,
+    get_gpu_utilization,
+    measure_utilization_during_execution,
+    BenchmarkOutputManager,
+    model_manager,
+    BenchmarkMetrics
+)
 
 # Use print instead of logger for inline updates
-logging.basicConfig(level=logging.INFO, format='%(message)s')
-logger = logging.getLogger(__name__)
+logger = setup_logging(__name__)
 
 
 @dataclass
@@ -34,40 +41,6 @@ class ExperimentResult:
     avg_gpu_util: Optional[float]
     time_ms: Optional[float]
     error_msg: Optional[str]
-
-
-def get_gpu_utilization(device_id: int = 0) -> float:
-    """Get GPU utilization for a specific device."""
-    try:
-        result = subprocess.run(
-            ["nvidia-smi", f"--id={device_id}", "--query-gpu=utilization.gpu", 
-             "--format=csv,noheader,nounits"],
-            capture_output=True,
-            text=True,
-            timeout=2
-        )
-        try:
-            return float(result.stdout.strip())
-        except:
-            return 0.0
-    except:
-        return 0.0
-
-
-def measure_utilization_during_inference(device_id: int, duration_ms: int = 1000, 
-                                         interval_ms: int = 100) -> float:
-    """Measure GPU utilization during inference."""
-    measurements = []
-    start = time.time()
-    
-    while (time.time() - start) * 1000 < duration_ms:
-        util = get_gpu_utilization(device_id)
-        measurements.append(util)
-        time.sleep(interval_ms / 1000.0)
-    
-    if measurements:
-        return sum(measurements) / len(measurements)
-    return 0.0
 
 
 def run_unified_llama_experiment():
@@ -84,31 +57,14 @@ def run_unified_llama_experiment():
     # Load model
     print("Loading Llama-2-7B (6.7B parameters, ~14GB in FP16)...")
     try:
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-
-        device = torch.device("cuda:0")
-        model = AutoModelForCausalLM.from_pretrained(
-            "meta-llama/Llama-2-7b-hf",
-            dtype=torch.float16,
-            device_map="auto",
-            low_cpu_mem_usage=True,
-            trust_remote_code=True,
-            local_files_only=True
-        )
-
-        tokenizer = AutoTokenizer.from_pretrained(
-            "meta-llama/Llama-2-7b-hf",
-            trust_remote_code=True,
-            local_files_only=True
-        )
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
+        model, tokenizer = model_manager.load_llama("meta-llama/Llama-2-7b-hf", device="auto")
 
         torch.cuda.synchronize()
-        model_mem_gb = torch.cuda.memory_allocated() / (1024**3)
-        total_gpu_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        model_info = model_manager.get_model_info(model, tokenizer)
+        memory_info = model_manager.estimate_model_memory(model)
 
-        print(f"✅ Model loaded: {model_mem_gb:.1f} GB weights on {total_gpu_mem:.1f} GB GPU")
+        print(f"✅ Model loaded: {memory_info:.1f} GB weights")
+        print(f"   Model info: {model_info['num_parameters']:,} parameters, {model_info['dtype']}")
         print("")
 
     except Exception as e:
@@ -160,7 +116,7 @@ def run_unified_llama_experiment():
             peak_memory = torch.cuda.max_memory_allocated() / (1024**3)
 
             # Measure utilization
-            util = measure_utilization_during_inference(0, duration_ms=int(elapsed_ms))
+            util = measure_utilization_during_execution(0, duration_ms=int(elapsed_ms))
 
             print(f"✅ Success | Memory: {peak_memory:5.1f} GB | Util: {util:5.1f}% | Time: {elapsed_ms:6.0f} ms")
 
@@ -244,7 +200,7 @@ def run_unified_llama_experiment():
             peak_memory = torch.cuda.max_memory_allocated() / (1024**3)
 
             # Measure utilization
-            util = measure_utilization_during_inference(0, duration_ms=int(elapsed_ms))
+            util = measure_utilization_during_execution(0, duration_ms=int(elapsed_ms))
 
             print(f"✅ Success | Memory: {peak_memory:5.1f} GB | Util: {util:5.1f}% | Time: {elapsed_ms:6.0f} ms")
 

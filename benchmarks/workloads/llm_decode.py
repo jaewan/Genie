@@ -203,7 +203,7 @@ class RealisticLLMDecodeWorkload:
         throughput_tokens_per_sec = total_tokens / max(latency_sec, 0.001)
 
         return {
-            'workload': 'realistic_llm_decode',
+            'workload': 'llm_decode',
             'latency_sec': latency_sec,
             'latency_ms': latency_sec * 1000,
             'throughput_tokens_per_sec': throughput_tokens_per_sec,
@@ -266,7 +266,7 @@ class RealisticLLMDecodeWorkload:
     def get_metadata(self) -> Dict[str, Any]:
         """Get workload metadata."""
         return {
-            'workload': 'realistic_llm_decode',
+            'workload': 'llm_decode',
             'model': self.model_name,
             'max_new_tokens': self.max_new_tokens,
             'batch_size': self.batch_size,

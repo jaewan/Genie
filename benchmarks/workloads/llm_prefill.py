@@ -198,7 +198,7 @@ class RealisticLLMPrefillWorkload:
         throughput_docs_per_sec = self.batch_size / max(latency_sec, 0.001)
 
         return {
-            'workload': 'realistic_llm_prefill',
+            'workload': 'llm_prefill',
             'latency_sec': latency_sec,
             'latency_ms': latency_sec * 1000,
             'throughput_docs_per_sec': throughput_docs_per_sec,
@@ -211,7 +211,7 @@ class RealisticLLMPrefillWorkload:
     def get_metadata(self) -> Dict[str, Any]:
         """Get workload metadata."""
         return {
-            'workload': 'realistic_llm_prefill',
+            'workload': 'llm_prefill',
             'model': self.model_name,
             'batch_size': self.batch_size,
             'max_length': self.max_length,

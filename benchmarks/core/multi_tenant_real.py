@@ -19,7 +19,7 @@ import logging
 
 # Import Djinn components
 from benchmarks.baselines import LocalPyTorchBaseline, DjinnFullBaseline
-from benchmarks.workloads_detailed import RealisticLLMDecodeWorkload, RealisticLLMPrefillWorkload
+from benchmarks.workloads import RealisticLLMDecodeWorkload, RealisticLLMPrefillWorkload
 
 logger = logging.getLogger(__name__)
 

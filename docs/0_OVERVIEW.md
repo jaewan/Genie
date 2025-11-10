@@ -1,7 +1,7 @@
 # Djinn: Semantic-Driven GPU Disaggregation
 
 **Status**: Framework-Level GPU Disaggregation System
-**Last Updated**: November 5, 2025
+**Last Updated**: November 7, 2025
 **Version**: 1.0.0
 
 ---
@@ -312,6 +312,102 @@ output = model(input_tensor)
 - **Execution Phase Classification**: Prefill, decode, vision encoding phases
 - **Cost Estimation**: FLOPs, memory footprint, operational intensity calculations
 - **Workload Characterization**: Model architecture and resource requirement analysis
+
+### Key Implementation Optimizations
+
+#### **Materialization Triggers for Control Flow**
+
+**Problem**: PyTorch operations that return Python types (scalars, booleans) must materialize immediately to enable control flow decisions in ML code.
+
+**Solution**: Context-aware operation classification detects operations that return non-tensor types and automatically materializes them:
+
+```python
+# Materialization triggers detected automatically:
+tensor.all()    # → bool (materializes)
+tensor.item()   # → scalar (materializes)
+tensor.sum()    # → scalar if no dim parameter (materializes)
+tensor.argmax() # → tensor indices (deferred, can be remote)
+```
+
+**Detection Mechanism**: Operations are classified into five categories:
+- **MATERIALIZATION_TRIGGER**: Must execute immediately (bool, scalar returns)
+- **REDUCTION_OPERATION**: Dramatically reduce data size (argmax, sum with dim)
+- **SHAPE_DEPENDENT**: Data-dependent output shapes (nonzero, unique)
+- **TUPLE_RETURNING**: Multi-return operations (topk, sort)
+- **COMPUTE_OPERATION**: Standard deferred execution
+
+#### **Remote CPU Operations for Network Reduction**
+
+**Problem**: Some operations like `argmax` reduce large tensors (196MB logits) to small results (8KB tokens), creating optimal opportunities for remote execution to minimize network transfer.
+
+**Why Remote**: These reduction operations are shipped to remote GPUs because:
+- **Network Savings**: 25,000x reduction (196MB → 8KB for GPT-2 token generation)
+- **GPU Efficiency**: GPUs excel at parallel reductions
+- **Memory Hierarchy**: Keeps large intermediate tensors on GPU memory
+
+**Implementation**: Cost-based decision in `reduction_optimizer.py`:
+```python
+# Execute remotely if: >100x reduction ratio AND >1MB input
+if reduction_ratio > 100 and input_size_mb > 1.0:
+    execute_reduction_remotely(tensor, operation, args, kwargs)
+```
+
+#### **Shape Inference for Control Flow**
+
+**Problem**: Control flow depends on tensor shapes, but shapes aren't available in deferred LazyTensor DAG.
+
+**Solution**: Lazy shape inference computes shapes without materialization using 50+ transformation rules:
+```python
+# Shape inference without execution:
+repeat([2, 3], 2, 1) → [4, 3]
+transpose([2, 3]) → [3, 2]
+sum([2, 3, 4], dim=1) → [2, 4]
+matmul([2, 3], [3, 4]) → [2, 4]
+```
+
+**Key Benefit**: Enables `if tensor.shape[0] > batch_size:` style control flow in ML code.
+
+#### **Materialization Cache for Redundant Operations**
+
+**Problem**: Transformer control flow often executes identical operations repeatedly.
+
+**Solution**: Semantic hashing caches by operation structure, not object identity:
+```python
+# Same operation different objects → same cache entry
+# Eliminates redundant executions in attention loops
+hash = compute_semantic_hash(operation, inputs, kwargs)
+cached_result = cache.get(hash)
+```
+
+**Impact**: ~1M redundant control checks → ~100 unique executions (10,000x reduction).
+
+**Operation Classification** (`djinn/frontend/core/operation_classifier.py`):
+- **Context-Aware Classification**: Operations classified based on arguments (sum with/without dim)
+- **Shape-Dependent Operations**: Special handling for operations with data-dependent output shapes
+- **Tuple-Returning Operations**: Multi-return operation support (topk, sort, eig)
+- **Transformer-Specific Operations**: Dedicated classification for activation functions, attention mechanisms
+
+**Shape Inference System** (`djinn/frontend/core/shape_inference.py`):
+- **Meta-Tensor Approach**: Zero-overhead shape inference using PyTorch meta tensors
+- **50+ Shape Rules**: Comprehensive shape transformation rules for all major operations
+- **Broadcasting Support**: Automatic shape inference for element-wise operations
+- **Transformer-Specific Rules**: Specialized shape inference for attention and activation operations
+
+**Materialization Cache** (`djinn/frontend/core/materialization_cache.py`):
+- **Semantic Hashing**: Cache based on operation structure, not object identity
+- **LRU Eviction**: Bounded cache with configurable size limits
+- **Thread-Safe Operations**: Concurrent access protection with proper locking
+
+**Transformer Operations** (`djinn/frontend/core/transformer_operations.py`):
+- **Operation Classification**: 6 categories for transformer-specific operations
+- **Execution Strategy**: Intelligent local vs remote decision making
+- **Semantic Understanding**: Shape-preserving and fusion-compatible operation tracking
+
+**Performance Tuning** (`djinn/frontend/core/performance_tuner.py`):
+- **Operation Profiling**: Real-time execution time and frequency tracking
+- **Bottleneck Detection**: Automatic identification of slow operations
+- **Optimization Recommendations**: Data-driven suggestions for execution improvements
+- **Threshold Tuning**: Adaptive parameter adjustment based on profiling data
 
 **Device Compatibility Layer** (`djinn/core/device_compatibility.py`):
 - **Automatic Model Conversion**: `model.to('remote_accelerator:0')` automatically converts model parameters and buffers to LazyTensors
