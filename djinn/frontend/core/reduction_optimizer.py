@@ -52,50 +52,30 @@ class RemoteReductionOptimizer:
         Decide whether to execute reduction remotely based on cost model.
         
         Core decision logic:
-        - If output is 100x+ smaller than input, execute remotely
-        - This amortizes the cost of computation against transfer savings
-        - Also requires input to be large enough to matter (>1MB)
+        - If inputs are LazyTensors: ALWAYS return True (keep lazy for graph construction)
+        - Materialization only happens during explicit materialization (.cpu(), .numpy(), etc.)
+        - Size-based optimization applies during execution, not during graph construction
         
         Args:
             operation: Operation name (e.g., 'argmax', 'sum')
             inputs: List of input tensors/LazyTensors
         
         Returns:
-            True if remote execution is beneficial
+            True if remote execution is beneficial (always True for LazyTensor inputs)
         """
-        # Only optimize known reduction operations
-        if operation not in self.REDUCTION_OPERATIONS:
-            return False
-        
         if not inputs:
             return False
         
-        try:
-            # Calculate data sizes
-            input_size = self._estimate_input_size(inputs)
-            output_size = self._estimate_output_size(operation, inputs)
-            
-            if input_size == 0 or output_size == 0:
-                return False
-            
-            # Calculate reduction factor
-            reduction_factor = input_size / output_size
-            
-            # Remote execution beneficial if:
-            # - Data is reduced by at least 100x (conservative threshold)
-            # - Input is large enough to matter (>1MB)
-            # - Output is small enough to transfer quickly
-            should_remote = (
-                reduction_factor > 100.0 and 
-                input_size > 1_000_000 and  # At least 1MB input
-                output_size < 10_000_000  # Less than 10MB output
-            )
-            
-            return should_remote
+        # Check if inputs are LazyTensors
+        has_lazy = any(type(inp).__name__ == 'LazyTensor' for inp in inputs)
+        if not has_lazy:
+            return False  # No LazyTensors, execute locally
         
-        except Exception:
-            # Conservative: don't optimize if we can't calculate
-            return False
+        # ✅ CRITICAL FIX: ALWAYS keep LazyTensors lazy during graph construction
+        # Materialization decisions should only apply during explicit materialization
+        # (e.g., .cpu(), .numpy(), .item()), not during operation calls
+        # This ensures the graph is built correctly regardless of tensor size
+        return True
     
     def _estimate_input_size(self, inputs: List) -> int:
         """Estimate total input size in bytes."""

@@ -582,6 +582,14 @@ class LazyTensor(torch.Tensor):
             if logical_device is None and kwargs:
                 logical_device = kwargs.get('device')
             
+            # ✅ CRITICAL FIX: Preserve original device string BEFORE mapping
+            # This is needed for _like functions and vander to correctly infer device from LazyTensor inputs
+            original_device_str = None
+            if isinstance(logical_device, str):
+                original_device_str = logical_device
+            elif isinstance(logical_device, torch.device):
+                original_device_str = str(logical_device)
+            
             # Default to CPU if no device specified
             if logical_device is None:
                 logical_device = torch.device('cpu')
@@ -622,8 +630,14 @@ class LazyTensor(torch.Tensor):
         object.__setattr__(wrapper, '_logical_device', logical_device)
         object.__setattr__(wrapper, '_physical_device', physical_device)
         
-        # Keep _original_device for backward compatibility
-        object.__setattr__(wrapper, '_original_device', logical_device)
+        # ✅ CRITICAL FIX: Store original device string (before mapping) for device inference
+        # Preserve 'remote_accelerator:0' even though logical_device is mapped to 'cuda:0'
+        # Needed for _like functions and vander to correctly infer device from LazyTensor inputs
+        if 'original_device_str' in locals() and original_device_str and 'remote_accelerator' in original_device_str:
+            object.__setattr__(wrapper, '_original_device', original_device_str)
+        else:
+            # For non-remote devices, use the logical device
+            object.__setattr__(wrapper, '_original_device', logical_device)
 
         # Replace the device in kwargs with logical device for __init__
         if kwargs:
@@ -873,15 +887,24 @@ class LazyTensor(torch.Tensor):
                 # Look for device in input LazyTensors
                 for arg in args:
                     if type(arg).__name__ == 'LazyTensor':
-                        # Check original device first
+                        # Check original device first - preserve the string if it contains remote_accelerator
                         if hasattr(arg, '_original_device') and arg._original_device:
-                            inferred_device = arg._original_device
-                            break
+                            orig_dev = arg._original_device
+                            # Preserve string representation if it contains remote_accelerator
+                            if isinstance(orig_dev, str) and 'remote_accelerator' in orig_dev:
+                                inferred_device = orig_dev
+                                break
+                            elif isinstance(orig_dev, torch.device) and 'remote_accelerator' in str(orig_dev):
+                                inferred_device = str(orig_dev)
+                                break
+                            else:
+                                inferred_device = orig_dev
+                                break
                         # Then check if it's a remote device by checking the device type
                         elif hasattr(arg, 'device') and arg.device:
                             device_str = str(arg.device)
                             if 'remote_accelerator' in device_str or 'privateuseone' in device_str:
-                                inferred_device = arg._original_device or arg.device
+                                inferred_device = device_str
                                 break
 
             # ✅ OPTIMIZATION: Defer expensive computations until actually needed
@@ -894,7 +917,8 @@ class LazyTensor(torch.Tensor):
             # Defer all shape/dtype/device inference until property access
             inferred_shape = None
             inferred_dtype = None
-            if inferred_device is None:
+            # Use inferred device from LazyTensor inputs if available
+            if 'inferred_device' not in locals() or inferred_device is None:
                 inferred_device = torch.device('cpu')
             
             # Create LazyTensor with inferred metadata
@@ -908,10 +932,15 @@ class LazyTensor(torch.Tensor):
                 inputs=list(args),
                 kwargs=call_kwargs,
                 shape=inferred_shape,     # ✅ NEW: Inferred shape
-                device=inferred_device,   # Pass device directly
+                device=inferred_device,   # Pass device directly (preserves remote_accelerator string)
                 dtype=inferred_dtype,     # Pass inferred dtype
                 metadata=metadata         # ✅ NEW: Pass semantic metadata
             )
+            
+            # ✅ DEBUG: Log device for vander operations
+            if op_name == 'aten::vander':
+                import sys
+                print(f"DEBUG vander: inferred_device={inferred_device}, type={type(inferred_device)}", file=sys.stderr)
 
             return result
 
@@ -1369,6 +1398,23 @@ class LazyTensor(torch.Tensor):
 
             # For operations involving LazyTensors inside capture context, create new LazyTensor
             op_name = cls._normalize_op_name(func)
+            
+            # ✅ FIX: Infer device from input LazyTensors for operations like vander
+            # that don't have device in kwargs
+            inferred_device = None
+            if 'device' not in kwargs:
+                for arg in args:
+                    if type(arg).__name__ == 'LazyTensor':
+                        # Preserve _original_device string (e.g., remote_accelerator:0)
+                        if hasattr(arg, '_original_device') and arg._original_device:
+                            orig_dev = arg._original_device
+                            if isinstance(orig_dev, str) and 'remote_accelerator' in orig_dev:
+                                inferred_device = orig_dev
+                            elif isinstance(orig_dev, torch.device) and 'remote_accelerator' in str(orig_dev):
+                                inferred_device = str(orig_dev)
+                            else:
+                                inferred_device = orig_dev
+                            break
             
             # ✅ PHASE 2: Try automatic dispatch first (handles ALL operations automatically)
             from .automatic_dispatch import get_automatic_dispatcher

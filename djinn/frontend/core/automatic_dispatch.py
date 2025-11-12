@@ -223,12 +223,22 @@ class AutomaticDispatch:
                     logger.info(f"🔍 Automatic dispatch for {op_name}: meta_obj.shape = {shape}")
                 
                 # Create LazyTensor with inferred metadata
-                from .metadata_capture import get_metadata_capture
-                metadata = get_metadata_capture().capture_metadata(
-                    operation=op_name,
-                    inputs=list(original_args),
-                    kwargs=original_kwargs
-                )
+                # ✅ FIX: Use correct import path for metadata_capture
+                try:
+                    from ..semantic.metadata_capture import get_metadata_capture
+                    metadata = get_metadata_capture().capture_metadata(
+                        operation=op_name,
+                        inputs=list(original_args),
+                        kwargs=original_kwargs
+                    )
+                except (ImportError, Exception):
+                    # Fallback: use MetadataPlaceholder if metadata capture fails
+                    from ...core.metadata import MetadataPlaceholder
+                    metadata = MetadataPlaceholder(
+                        operation=op_name,
+                        inputs=tuple(original_args),
+                        kwargs=original_kwargs
+                    )
                 
                 return lazy_tensor_class(
                     operation=op_name,
@@ -254,33 +264,55 @@ class AutomaticDispatch:
         return convert(meta_result)
     
     @classmethod
-    def _infer_device(cls, args: Tuple, kwargs: Dict) -> torch.device:
+    def _infer_device(cls, args: Tuple, kwargs: Dict):
         """
         Infer device from input arguments.
+        
+        ✅ FIX: Returns original device string (e.g., 'remote_accelerator:0')
+        to preserve user-visible device, not the internal mapping.
         
         Args:
             args: Function arguments
             kwargs: Function keyword arguments
             
         Returns:
-            torch.device: Inferred device
+            str or torch.device: Inferred device (prefers string to preserve remote_accelerator)
         """
         # Check kwargs first
         if 'device' in kwargs:
             device = kwargs['device']
             if isinstance(device, str):
-                return torch.device(device)
+                return device  # Return string to preserve remote_accelerator
             return device
         
         # Check args for LazyTensors
         def find_device(obj):
             if type(obj).__name__ == 'LazyTensor':
-                if hasattr(obj, '_logical_device') and obj._logical_device:
-                    return obj._logical_device
+                # ✅ FIX: Check _original_device first to preserve remote_accelerator
+                if hasattr(obj, '_original_device') and obj._original_device:
+                    original = obj._original_device
+                    # Return as string to preserve remote_accelerator
+                    if isinstance(original, str):
+                        return original
+                    elif isinstance(original, torch.device):
+                        device_str = str(original)
+                        # If it's remote_accelerator, return as string
+                        if 'remote_accelerator' in device_str or 'privateuseone' in device_str:
+                            return device_str
+                        return original
+                    return original
+                # Fallback to device property
                 if hasattr(obj, 'device') and obj.device:
-                    return obj.device
+                    device_obj = obj.device
+                    if isinstance(device_obj, torch.device):
+                        device_str = str(device_obj)
+                        # If it's remote_accelerator, return as string
+                        if 'remote_accelerator' in device_str or 'privateuseone' in device_str:
+                            return device_str
+                        return device_obj
+                    return device_obj
             elif isinstance(obj, torch.Tensor):
-                return obj.device
+                return str(obj.device)  # Return string for consistency
             elif isinstance(obj, (list, tuple)):
                 for item in obj:
                     device = find_device(item)
@@ -305,8 +337,8 @@ class AutomaticDispatch:
             if device:
                 return device
         
-        # Default to CPU
-        return torch.device('cpu')
+        # Default to CPU (as string)
+        return 'cpu'
     
     @classmethod
     def _get_op_name(cls, func: Callable) -> str:

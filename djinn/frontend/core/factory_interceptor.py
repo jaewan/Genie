@@ -80,6 +80,8 @@ class FactoryInterceptor:
     """
 
     # Functions to intercept (complete list)
+    # Based on validation script: 43 functions tested, 24 currently intercepted
+    # Added high/medium priority functions to improve coverage from 24 → 40 functions
     FACTORY_FUNCTIONS = [
         # Basic creation
         'randn', 'rand', 'randint', 'randn_like', 'rand_like', 'randint_like',
@@ -94,9 +96,30 @@ class FactoryInterceptor:
 
         # Random distributions
         'normal', 'randperm',
+        # ✅ ADDED: Advanced random distributions (medium priority)
+        'bernoulli', 'multinomial', 'poisson',
+
+        # ✅ ADDED: Matrix operations (high priority - commonly used)
+        'diag', 'diagflat', 'tril', 'triu', 'vander',
+
+        # ✅ ADDED: Shape manipulation (high priority)
+        'atleast_1d', 'atleast_2d', 'atleast_3d',
+
+        # ✅ ADDED: Grid generation (medium priority)
+        'meshgrid', 'cartesian_prod',
+
+        # ✅ ADDED: Complex numbers (medium priority)
+        'complex', 'polar',
+
+        # ✅ ADDED: Special functions (medium priority)
+        'heaviside',
 
         # Advanced memory layout
         'empty_strided',
+        
+        # ⏸️  DEFERRED: PyTorch 2.0+ window functions (have compatibility errors)
+        # 'asarray', 'kaiser_window', 'hann_window', 'hamming_window',
+        # 'bartlett_window', 'blackman_window', 'frombuffer'
     ]
 
     def __init__(self):
