@@ -230,6 +230,7 @@ result = output.cpu()        # Executes remotely
 3. **Mixed device operations** trigger early materialization
 4. **Custom operations** require manual registration
 5. **Debugging complexity** increases with remote execution
+6. **Tuple operations** return `LazyTuple` (works like tuple but preserves laziness)
 
 ### Performance Limitations
 
@@ -242,7 +243,7 @@ result = output.cpu()        # Executes remotely
 
 **Shape Inference Failures:**
 - Circuit breaker activates after 10 consecutive failures
-- Falls back to eager materialization
+- Falls back to materialization (eager execution)
 - Check logs for problematic operations
 
 **Network Issues:**
@@ -333,7 +334,13 @@ A: No, just change the device to `remote_accelerator:0`.
 A: 10-20ms for warm execution, 50-200ms for cold start. Varies by workload.
 
 **Q: Does it work with HuggingFace Transformers?**  
-A: Yes, the device compatibility layer handles standard frameworks.
+A: Yes, the device compatibility layer handles standard frameworks. vmap operations (used for attention masking) are automatically supported.
+
+**Q: Can I use torch.vmap with LazyTensors?**  
+A: Yes, it works automatically. No code changes or configuration needed.
+
+**Q: How do tuple operations like split() work?**  
+A: Tuple operations return `LazyTuple`, which preserves laziness. Only accessed elements materialize, enabling efficient execution. For example, `chunks = x.split(300)` returns a LazyTuple, and only `chunks[0].cpu()` materializes the first chunk.
 
 **Q: Can I mix Djinn with regular PyTorch tensors?**  
 A: Yes, mixed operations automatically materialize as needed.

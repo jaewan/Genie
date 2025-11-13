@@ -281,13 +281,21 @@ async def _genie_init_async_impl(
         logger.info(f"  ✓ Thread pool created")
         
         # Step 3: Call initialization hooks
-        logger.info("[3/5] Calling initialization hooks...")
+        logger.info("[3/6] Calling initialization hooks...")
         _call_init_hooks(_runtime_state, config)
         logger.info(f"  ✓ {len(_init_hooks)} hooks executed")
         
-        # Step 4: Connect to remote server (if configured)
+        # Step 4: Install vmap compatibility layer (silent, automatic)
+        try:
+            from ...frontend.core.vmap_compat import install
+            install()
+        except Exception as e:
+            # Silent failure - vmap will work with regular tensors, just not LazyTensors
+            logger.debug(f"vmap compatibility installation failed: {e}")
+        
+        # Step 5: Connect to remote server (if configured)
         if server_address and auto_connect:
-            logger.info(f"[4/5] Connecting to remote server at {server_address}...")
+            logger.info(f"[5/6] Connecting to remote server at {server_address}...")
             try:
                 from ...core.coordinator import DjinnCoordinator, CoordinatorConfig
 
@@ -319,10 +327,10 @@ async def _genie_init_async_impl(
                 logger.info("  Falling back to local execution")
                 _runtime_state.coordinator = None
         else:
-            logger.info("[4/5] Remote server not configured, using local execution")
+            logger.info("[5/6] Remote server not configured, using local execution")
         
-        # Step 5: Query GPU capabilities (if remote connected)
-        logger.info("[5/5] Querying capabilities...")
+        # Step 6: Query GPU capabilities (if remote connected)
+        logger.info("[6/6] Querying capabilities...")
         if _runtime_state.coordinator:
             try:
                 capabilities = await _runtime_state.coordinator.get_capabilities()

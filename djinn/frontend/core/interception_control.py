@@ -31,13 +31,20 @@ def should_intercept(device=None, context_override=None):
     Returns:
         bool: Should we intercept this operation?
     """
-    # Check if we're in a disabled context
+    # Get current interception context
     current_context = getattr(_interception_context, 'context', InterceptionContext.NONE)
 
+    # ✅ DESIGN FIX: CAPTURING context should ENABLE interception, not disable it
+    # CAPTURING is used to mark that we're building a computation graph, so we MUST intercept
+    if current_context == InterceptionContext.CAPTURING:
+        return True
+    
+    # Check if we're in a disabled context (CONSTRUCTION, MATERIALIZATION, PROPERTY_ACCESS)
+    # These contexts disable interception to avoid recursion
     if current_context != InterceptionContext.NONE:
         return False
 
-    # Check capture context
+    # Check capture context (fallback check)
     from .capture import is_capturing
     if is_capturing():
         return True

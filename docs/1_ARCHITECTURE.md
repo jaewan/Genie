@@ -108,6 +108,32 @@ class LazyTensor(torch.Tensor):
 - **Lazy Properties**: Shape/metadata computed only when needed
 - **Dual Devices**: Logical (user-visible) vs physical (meta)
 
+### 2.1.1 LazyTuple: Tuple Operations
+
+For operations that return tuples (e.g., `split()`, `chunk()`, `topk()`), Djinn uses `LazyTuple` to preserve laziness:
+
+```python
+class LazyTuple(tuple):
+    """Tuple of LazyTensors with deferred materialization."""
+    
+    # Contains LazyTensor elements (still lazy)
+    # Materializes only when elements accessed
+    # Behaves like Python tuple but preserves laziness
+```
+
+**Key Properties:**
+- **Lazy Preservation**: Elements remain LazyTensors until accessed
+- **Transparent**: Works like regular Python tuple
+- **Efficient**: Only accessed chunks materialize, not entire tensor
+- **Examples**: `split()`, `chunk()`, `unbind()`, `topk()`, `sort()`
+
+**Usage:**
+```python
+chunks = x.split(300, dim=2)  # Returns LazyTuple (lazy)
+a, b, c = chunks              # Unpacking works (still lazy)
+result = a.cpu()              # Only chunk 0 materializes
+```
+
 ### 2.2 Semantically Rich Graph (SRG)
 
 The SRG annotates the LazyTensor DAG with ML semantics:
@@ -357,7 +383,7 @@ class OperationClass(Enum):
 | **MATERIALIZATION_TRIGGER** | `item()`, `all()`, `numpy()` | Immediate local execution |
 | **REDUCTION_OPERATION** | `argmax()`, `sum(dim=)` | Remote execution preferred |
 | **SHAPE_DEPENDENT** | `nonzero()`, `unique()` | Must materialize |
-| **TUPLE_RETURNING** | `topk()`, `sort()` | Special unpacking |
+| **TUPLE_RETURNING** | `split()`, `chunk()`, `topk()`, `sort()` | Returns LazyTuple (lazy) |
 | **COMPUTE_OPERATION** | `matmul()`, `add()` | Deferred execution |
 
 ### 5.2 Universal Dispatcher
@@ -386,7 +412,12 @@ value = tensor.item()  # Must materialize
 
 # Data-dependent shapes
 indices = tensor.nonzero()  # Shape depends on values
+
+# Device transfers (materialize for transfer)
+result = tensor.cpu()  # Materializes before transfer
 ```
+
+**Note**: Tuple operations (`split()`, `chunk()`, etc.) return `LazyTuple` and remain lazy until elements are accessed. This enables efficient execution where only needed chunks are materialized.
 
 ---
 
@@ -724,7 +755,7 @@ MEMORY_BUDGETS = {
 |-------------|-----------|----------|----------|
 | Network timeout | 30s timeout | Retry with backoff | Local execution |
 | GPU OOM | CUDA error | Evict cache → Retry | Smaller batch |
-| Shape inference fail | Exception/timeout | Skip inference | Eager materialization |
+| Shape inference fail | Exception/timeout | Skip inference | Materialization fallback |
 | Remote node crash | Heartbeat loss | Failover to replica | Local execution |
 | Serialization error | Exception | Skip optimization | Local execution |
 
@@ -931,6 +962,7 @@ Djinn's architecture represents a pragmatic approach to GPU disaggregation that 
 
 The four-layer architecture cleanly separates concerns while maintaining semantic flow. Key components include:
 - **LazyTensor**: Deferred execution with zero memory overhead
+- **LazyTuple**: Lazy tuple operations for efficient chunked execution
 - **Universal Dispatcher**: Automatic handling of 95% of operations
 - **Memory Pressure Handler**: Proactive memory management with three-tier thresholds
 - **Materialization Optimizer**: CUDA streams and pinned memory for efficiency

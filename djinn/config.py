@@ -12,6 +12,12 @@ from typing import Optional, Dict, Any
 import yaml
 from .core.types import TransportType, ExecutionPhase
 
+# Week 1-2: Import materialization config
+from .frontend.core.materialization_control import (
+    get_config as get_materialization_config_internal,
+    MaterializationConfig
+)
+
 
 class LogLevel(Enum):
     """Log levels."""
@@ -259,6 +265,21 @@ class DjinnConfig:
     # Global settings
     debug_mode: bool = False
     config_file: Optional[str] = None
+    
+    @property
+    def materialization(self) -> MaterializationConfig:
+        """
+        Materialization behavior configuration.
+        
+        Week 1-2: Default is eager tuple operations (safe but slow)
+        Week 3-4: Default changes to lazy (performant)
+        
+        Example:
+            >>> import djinn
+            >>> # Experimental: Enable lazy tuples (may be unstable)
+            >>> djinn.config.materialization.eager_tuple_operations = False
+        """
+        return get_materialization_config_internal()
 
     def get_network_config(self) -> NetworkConfig:
         """Get network configuration."""

@@ -54,33 +54,36 @@ def serialize_tensor(
         use_numpy=False: 1.347ms (fallback)
         use_fp16=True:   0.450ms + 50% smaller (lossy)
     """
-    buffer = io.BytesIO()
-    
-    # Move tensor to CPU if needed
-    tensor_cpu = tensor.cpu().detach()
-    
-    if use_numpy:
-        # Write format header
-        buffer.write(FORMAT_NUMPY)
+    # ✅ PROFILING: Record serialization time
+    from .profiling_context import record_phase
+    with record_phase('serialization', metadata={'shape': str(tensor.shape), 'dtype': str(tensor.dtype)}):
+        buffer = io.BytesIO()
         
-        # Convert to float16 if requested
-        if use_fp16 and tensor_cpu.dtype == torch.float32:
-            tensor_cpu = tensor_cpu.half()
+        # Move tensor to CPU if needed
+        tensor_cpu = tensor.cpu().detach()
         
-        # Serialize with numpy (faster)
-        np.save(buffer, tensor_cpu.numpy(), allow_pickle=False)
+        if use_numpy:
+            # Write format header
+            buffer.write(FORMAT_NUMPY)
+            
+            # Convert to float16 if requested
+            if use_fp16 and tensor_cpu.dtype == torch.float32:
+                tensor_cpu = tensor_cpu.half()
+            
+            # Serialize with numpy (faster)
+            np.save(buffer, tensor_cpu.numpy(), allow_pickle=False)
+            
+            logger.debug(f"Serialized tensor {tensor.shape} with numpy (fp16={use_fp16})")
+        else:
+            # Write format header
+            buffer.write(FORMAT_TORCH)
+            
+            # Serialize with torch.save (slower but more compatible)
+            torch.save(tensor_cpu, buffer)
+            
+            logger.debug(f"Serialized tensor {tensor.shape} with torch.save")
         
-        logger.debug(f"Serialized tensor {tensor.shape} with numpy (fp16={use_fp16})")
-    else:
-        # Write format header
-        buffer.write(FORMAT_TORCH)
-        
-        # Serialize with torch.save (slower but more compatible)
-        torch.save(tensor_cpu, buffer)
-        
-        logger.debug(f"Serialized tensor {tensor.shape} with torch.save")
-    
-    return buffer.getvalue()
+        return buffer.getvalue()
 
 
 def deserialize_tensor(
@@ -101,33 +104,36 @@ def deserialize_tensor(
         Automatically detects format (numpy vs torch.save) from header.
         Falls back to torch.load for backward compatibility with old data.
     """
-    buffer = io.BytesIO(data)
-    
-    # Try to read header
-    header = buffer.read(HEADER_SIZE)
-    
-    if header == FORMAT_NUMPY:
-        # Numpy format (new, fast)
-        result_np = np.load(buffer, allow_pickle=False)
-        tensor = torch.from_numpy(result_np)
-        logger.debug(f"Deserialized tensor {tensor.shape} from numpy format")
+    # ✅ PROFILING: Record deserialization time
+    from .profiling_context import record_phase
+    with record_phase('deserialization', metadata={'data_size_bytes': len(data)}):
+        buffer = io.BytesIO(data)
         
-    elif header == FORMAT_TORCH:
-        # Torch format (compatible)
-        tensor = torch.load(buffer)
-        logger.debug(f"Deserialized tensor {tensor.shape} from torch format")
+        # Try to read header
+        header = buffer.read(HEADER_SIZE)
         
-    else:
-        # No header - old format, fallback to torch.load
-        logger.debug("No format header detected, falling back to torch.load")
-        buffer.seek(0)
-        tensor = torch.load(buffer)
-    
-    # Move to target device if specified
-    if device is not None:
-        tensor = tensor.to(device)
-    
-    return tensor
+        if header == FORMAT_NUMPY:
+            # Numpy format (new, fast)
+            result_np = np.load(buffer, allow_pickle=False)
+            tensor = torch.from_numpy(result_np)
+            logger.debug(f"Deserialized tensor {tensor.shape} from numpy format")
+            
+        elif header == FORMAT_TORCH:
+            # Torch format (compatible)
+            tensor = torch.load(buffer)
+            logger.debug(f"Deserialized tensor {tensor.shape} from torch format")
+            
+        else:
+            # No header - old format, fallback to torch.load
+            logger.debug("No format header detected, falling back to torch.load")
+            buffer.seek(0)
+            tensor = torch.load(buffer)
+        
+        # Move to target device if specified
+        if device is not None:
+            tensor = tensor.to(device)
+        
+        return tensor
 
 
 def measure_serialization_overhead(

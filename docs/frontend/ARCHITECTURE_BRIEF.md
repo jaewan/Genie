@@ -76,7 +76,10 @@ LazyTensor ────► Graph Builder ────► Semantic Analyzer
     ├── Interception     ├── Metadata         ├── Pattern Plugins
     ├── Shape Inference  ├── Caching          └── Phase Detection
     ├── Deferred Exec    └── Optimization     └── Cost Estimation
-    └── Device Compat.   └── Subgraph Exec.   └── Memory Management
+    ├── LazyTuple        └── Subgraph Exec.   └── Memory Management
+    └── Device Compat.
+
+LazyTuple ────► LazyTensor (chunks) ────► Materialization on demand
 
 Device Compatibility ────► Model Conversion ────► LazyTensor Weights
 ```
@@ -91,6 +94,7 @@ Device Compatibility ────► Model Conversion ────► LazyTensor
 | **Semantic Analyzer** | Pattern recognition & phase detection | Accuracy vs computational cost |
 | **Operation Classifier** | Context-aware operation classification (5 categories) for hybrid execution | Correctness vs performance |
 | **Shape Inference** | Lazy shape computation without materialization | Control flow support vs complexity |
+| **LazyTuple** | Lazy tuple operations (split, chunk, unbind) preserving deferred execution | Performance vs implementation complexity |
 | **Materialization Cache** | Semantic caching for redundant operations | Memory usage vs execution speed |
 | **Device Compatibility** | PyTorch device semantics for remote accelerators | Framework integration vs implementation complexity |
 | **MetadataPlaceholder** | Lazy evaluation system | Memory efficiency vs complexity |
@@ -327,16 +331,20 @@ tensor.sum(dim=0)   # Returns tensor with reduced dimension
 tensor.nonzero()    # Shape depends on data values
 tensor.unique()     # Output size unknown until execution
 
-# TUPLE_RETURNING - Multi-return operations
-tensor.topk(k=5)    # Returns (values, indices)
-tensor.sort()       # Returns (values, indices)
+# TUPLE_RETURNING - Multi-return operations (return LazyTuple)
+tensor.split(300)    # Returns LazyTuple (lazy, preserves deferred execution)
+tensor.chunk(3)      # Returns LazyTuple (lazy)
+tensor.topk(k=5)     # Returns LazyTuple (lazy)
+tensor.sort()        # Returns LazyTuple (lazy)
 
 # COMPUTE_OPERATION - Standard deferred execution
-tensor + 1          # Standard tensor operations
-tensor.matmul(b)    # Matrix multiplication
+tensor + 1           # Returns LazyTensor (lazy)
+tensor.matmul(b)     # Returns LazyTensor (lazy)
 ```
 
 **Detection**: Arguments and operation type determine category.
+
+**Tuple Operations**: Operations like `split()`, `chunk()`, `unbind()` return `LazyTuple` (not materialized), preserving laziness until individual elements are accessed. This enables optimal performance by only materializing accessed chunks.
 
 ### Shape Inference Without Materialization (Phase 6B)
 

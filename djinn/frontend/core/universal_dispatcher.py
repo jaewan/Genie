@@ -805,51 +805,71 @@ class UniversalDispatcher:
         # Normalize operation name
         op_name = operation.replace('aten::', '')
         
+        # Handle operations with .default suffix (e.g., new_ones.default)
+        # Strip .default for hasattr checks, but keep it for actual calls
+        base_op_name = op_name.split('.')[0]  # e.g., 'new_ones' from 'new_ones.default'
+        has_default_suffix = '.' in op_name
+        
         # Step 1: Argument preprocessing (if needed)
-        if op_name in self.argument_preprocessors:
-            inputs, kwargs = self.argument_preprocessors[op_name](inputs, kwargs)
+        if base_op_name in self.argument_preprocessors:
+            inputs, kwargs = self.argument_preprocessors[base_op_name](inputs, kwargs)
             self.stats['argument_preprocessing_used'] += 1
-            logger.debug(f"Preprocessed arguments for {op_name}")
+            logger.debug(f"Preprocessed arguments for {base_op_name}")
         
         # Step 2: Check special handlers (only for PyTorch bugs)
-        if op_name in self.special_handlers:
+        if base_op_name in self.special_handlers:
             self.stats['special_handler_used'] += 1
-            logger.debug(f"Using special handler for {op_name}")
-            return self.special_handlers[op_name](inputs, kwargs)
+            logger.debug(f"Using special handler for {base_op_name}")
+            return self.special_handlers[base_op_name](inputs, kwargs)
         
         # Step 3: Try PyTorch's ATen namespace (most reliable)
         try:
-            if hasattr(torch.ops.aten, op_name):
-                aten_op = getattr(torch.ops.aten, op_name)
-                result = aten_op(*inputs, **kwargs)
+            if hasattr(torch.ops.aten, base_op_name):
+                aten_base = getattr(torch.ops.aten, base_op_name)
+                # If operation has .default suffix, try to get the .default variant
+                if has_default_suffix:
+                    # Try calling with .default suffix
+                    if hasattr(aten_base, 'default'):
+                        aten_op = getattr(aten_base, 'default')
+                        result = aten_op(*inputs, **kwargs)
+                        self.stats['universal_dispatch_success'] += 1
+                        logger.debug(f"✓ Universal dispatch succeeded for {op_name} via torch.ops.aten.{base_op_name}.default")
+                        return result
+                    # Fall back to calling base directly
+                    result = aten_base(*inputs, **kwargs)
+                else:
+                    result = aten_base(*inputs, **kwargs)
                 self.stats['universal_dispatch_success'] += 1
                 logger.debug(f"✓ Universal dispatch succeeded for {op_name} via torch.ops.aten")
                 return result
         except Exception as e:
-            logger.debug(f"torch.ops.aten.{op_name} failed: {e}")
+            # Log actual exception for debugging
+            logger.debug(f"torch.ops.aten.{op_name} failed: {e}", exc_info=True)
         
         # Step 4: Try PyTorch's torch namespace
         try:
-            if hasattr(torch, op_name):
-                torch_op = getattr(torch, op_name)
+            if hasattr(torch, base_op_name):
+                torch_op = getattr(torch, base_op_name)
                 result = torch_op(*inputs, **kwargs)
                 self.stats['universal_dispatch_success'] += 1
                 logger.debug(f"✓ Universal dispatch succeeded for {op_name} via torch")
                 return result
         except Exception as e:
-            logger.debug(f"torch.{op_name} failed: {e}")
+            # Log actual exception for debugging
+            logger.debug(f"torch.{base_op_name} failed: {e}", exc_info=True)
         
         # Step 5: Try as tensor method (e.g., tensor.float())
         try:
             if inputs and isinstance(inputs[0], torch.Tensor):
-                if hasattr(inputs[0], op_name):
-                    method = getattr(inputs[0], op_name)
+                if hasattr(inputs[0], base_op_name):
+                    method = getattr(inputs[0], base_op_name)
                     result = method(*inputs[1:], **kwargs)
                     self.stats['universal_dispatch_success'] += 1
                     logger.debug(f"✓ Universal dispatch succeeded for {op_name} via tensor method")
                     return result
         except Exception as e:
-            logger.debug(f"tensor.{op_name}() failed: {e}")
+            # Log actual exception for debugging
+            logger.debug(f"tensor.{base_op_name}() failed: {e}", exc_info=True)
         
         # Step 6: Dispatch failed
         self.stats['dispatch_failures'] += 1

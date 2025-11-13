@@ -55,6 +55,24 @@ class AutomaticDispatch:
         # softmax returns empty shape when called with meta tensors
         'aten::softmax',
         'aten::_softmax',
+        
+        # ✅ Week 3-4: Tuple-returning operations (handled by LazyTuple)
+        'aten::split',
+        'aten::chunk',
+        'aten::unbind',
+        'aten::hsplit',
+        'aten::vsplit',
+        'aten::dsplit',
+        'aten::tensor_split',
+        'aten::topk',
+        'aten::sort',
+        'aten::kthvalue',
+        'aten::median',
+        'aten::mode',
+        'aten::qr',
+        'aten::svd',
+        'aten::eig',
+        'aten::slogdet',
     }
     
     @classmethod
@@ -77,6 +95,10 @@ class AutomaticDispatch:
             func_name = func.__name__
             # Materialization operations
             if func_name in ('item', 'numpy', 'tolist', '__len__', '__bool__', '__int__', '__float__'):
+                return False
+            # ✅ Week 3-4: Tuple-returning operations (handled by LazyTuple)
+            if func_name in ('split', 'chunk', 'unbind', 'hsplit', 'vsplit', 'dsplit', 'tensor_split',
+                           'topk', 'sort', 'kthvalue', 'median', 'mode', 'qr', 'svd', 'eig', 'slogdet'):
                 return False
         
         return True
@@ -158,7 +180,11 @@ class AutomaticDispatch:
                 # Disable interception to avoid detach() issues
                 from .interception_control import disable_interception, InterceptionContext
                 with disable_interception(InterceptionContext.CONSTRUCTION):
-                    meta_tensor = torch.empty(shape, dtype=dtype, device='meta')
+                    # Handle scalar tensors (shape = ())
+                    if len(shape) == 0:
+                        meta_tensor = torch.empty((), dtype=dtype, device='meta')
+                    else:
+                        meta_tensor = torch.empty(shape, dtype=dtype, device='meta')
                 return meta_tensor
                 
             elif isinstance(x, torch.Tensor):

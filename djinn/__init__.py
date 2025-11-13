@@ -598,6 +598,12 @@ def get_optimization_hint(block_id):
     return optimizer.get_optimization_hint(block_id)
 
 
+# Week 1-2: Expose config for materialization control
+from .config import get_config as _get_config
+
+# Public config API
+config = _get_config()
+
 __all__ = [
     # Phase 1 (Core)
     'LazyTensor',
@@ -606,6 +612,7 @@ __all__ = [
     'is_capturing',
     'SubgraphBuilder',
     'RemoteSubgraph',
+    'config',  # Week 1-2: Materialization config
 
     # Phase 2 (Smart Fragmentation)
     'SmartSubgraphBuilder',

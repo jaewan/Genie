@@ -84,9 +84,13 @@ class CaptureContext:
         _capture_context.active = True
 
         # ✅ NEW: Set interception context to CAPTURING during graph capture
+        # NOTE: We use disable_interception() as a context manager, but CAPTURING actually
+        # ENABLES interception (see should_intercept() logic). This is a bit confusing but
+        # maintains the existing API while fixing the logic.
         from .interception_control import disable_interception, InterceptionContext, get_current_context
         self.prev_interception_context = get_current_context()
         # Store the context manager so we can exit it properly
+        # CAPTURING context marks that we're building a graph, so interception should be enabled
         self._interception_disabler = disable_interception(InterceptionContext.CAPTURING)
         self._interception_disabler.__enter__()
 

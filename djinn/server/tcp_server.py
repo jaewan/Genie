@@ -236,67 +236,70 @@ async def handle_execute_subgraph(request_data: bytes, writer) -> None:
     """Handle subgraph execution request."""
     global STATS
     
-    try:
-        STATS['subgraph_requests'] += 1
-        
-        # Parse request
-        request_str = request_data[:request_data.find(b'\0')].decode() if b'\0' in request_data else ""
-        
-        # Try to extract JSON from the message
+    # ✅ PROFILING: Record request handling time
+    from .profiling_context import record_phase
+    with record_phase('request_handling'):
         try:
-            # Message format: JSON with request and tensors_size, followed by tensor data
-            json_end = request_data.find(b'}') + 1
-            if json_end > 0:
-                metadata = json.loads(request_data[:json_end].decode())
-                request_json = metadata['request']
-                tensors_size = metadata['tensors_size']
-                tensors_data = request_data[json_end:json_end + tensors_size]
-            else:
-                raise ValueError("Could not parse request metadata")
-        except (json.JSONDecodeError, KeyError) as e:
-            logger.error(f"Failed to parse request: {e}")
-            error_response = str(e).encode()
-            await _send_message(writer, 0x05, error_response)  # ERROR
-            return
+            STATS['subgraph_requests'] += 1
+            
+            # Parse request
+            request_str = request_data[:request_data.find(b'\0')].decode() if b'\0' in request_data else ""
+            
+            # Try to extract JSON from the message
+            try:
+                # Message format: JSON with request and tensors_size, followed by tensor data
+                json_end = request_data.find(b'}') + 1
+                if json_end > 0:
+                    metadata = json.loads(request_data[:json_end].decode())
+                    request_json = metadata['request']
+                    tensors_size = metadata['tensors_size']
+                    tensors_data = request_data[json_end:json_end + tensors_size]
+                else:
+                    raise ValueError("Could not parse request metadata")
+            except (json.JSONDecodeError, KeyError) as e:
+                logger.error(f"Failed to parse request: {e}")
+                error_response = str(e).encode()
+                await _send_message(writer, 0x05, error_response)  # ERROR
+                return
 
-        # Parse subgraph request
-        subgraph_request = json.loads(request_json)
-        
-        # Deserialize input tensors
-        try:
-            input_data = deserialize_tensor(tensors_data)
-        except Exception as e:
-            logger.error(f"Failed to deserialize tensors: {e}")
-            error_response = str(e).encode()
-            await _send_message(writer, 0x05, error_response)
-            return
+            # Parse subgraph request
+            subgraph_request = json.loads(request_json)
+            
+            # Deserialize input tensors (profiling happens inside deserialize_tensor)
+            try:
+                input_data = deserialize_tensor(tensors_data)
+            except Exception as e:
+                logger.error(f"Failed to deserialize tensors: {e}")
+                error_response = str(e).encode()
+                await _send_message(writer, 0x05, error_response)
+                return
 
-        logger.info(f"🎯 Executing subgraph: {len(subgraph_request['operations'])} operations")
+            logger.info(f"🎯 Executing subgraph: {len(subgraph_request['operations'])} operations")
 
-        # Execute subgraph with optimizations
-        try:
-            result = OPTIMIZATION_EXECUTOR.executor.execute(subgraph_request, input_data)
-        except Exception as e:
-            logger.error(f"❌ Subgraph execution failed: {e}")
-            error_response = str(e).encode()
-            await _send_message(writer, 0x05, error_response)
-            return
+            # Execute subgraph with optimizations (profiling happens inside executor)
+            try:
+                result = OPTIMIZATION_EXECUTOR.executor.execute(subgraph_request, input_data)
+            except Exception as e:
+                logger.error(f"❌ Subgraph execution failed: {e}")
+                error_response = str(e).encode()
+                await _send_message(writer, 0x05, error_response)
+                return
 
-        # Serialize result
-        try:
-            if USE_OPTIMIZED_SERIALIZATION and OPTIMIZED_SERIALIZATION_AVAILABLE:
-                logger.info("✅ Using optimized numpy.save serialization")
-                result_bytes = serialize_tensor(result, use_numpy=True)
-            else:
-                logger.warning("⚠️ Using fallback torch.save serialization")
-                result_buffer = io.BytesIO()
-                torch.save(result, result_buffer)
-                result_bytes = result_buffer.getvalue()
-        except Exception as e:
-            logger.error(f"Failed to serialize result: {e}")
-            error_response = str(e).encode()
-            await _send_message(writer, 0x05, error_response)
-            return
+            # Serialize result (profiling happens inside serialize_tensor)
+            try:
+                if USE_OPTIMIZED_SERIALIZATION and OPTIMIZED_SERIALIZATION_AVAILABLE:
+                    logger.info("✅ Using optimized numpy.save serialization")
+                    result_bytes = serialize_tensor(result, use_numpy=True)
+                else:
+                    logger.warning("⚠️ Using fallback torch.save serialization")
+                    result_buffer = io.BytesIO()
+                    torch.save(result, result_buffer)
+                    result_bytes = result_buffer.getvalue()
+            except Exception as e:
+                logger.error(f"Failed to serialize result: {e}")
+                error_response = str(e).encode()
+                await _send_message(writer, 0x05, error_response)
+                return
 
         # Send result (type=0x04: RESULT)
         await _send_message(writer, 0x04, result_bytes)

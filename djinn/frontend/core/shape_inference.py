@@ -10,6 +10,7 @@ Key idea: Lazy shape evaluation - only materialize if we can't infer the shape.
 
 from typing import Optional, Tuple, List, Union, Any
 import numpy as np
+import torch
 
 
 class ShapeInference:
@@ -97,6 +98,38 @@ class ShapeInference:
         '__floordiv__': lambda x, y: _broadcast_shape(x, y),
         '__mod__': lambda x, y: _broadcast_shape(x, y),
         '__pow__': lambda x, y: _broadcast_shape(x, y),
+        # Also support non-dunder names (for aten::add, etc.)
+        'add': lambda x, y: _broadcast_shape(x, y),
+        'sub': lambda x, y: _broadcast_shape(x, y),
+        'mul': lambda x, y: _broadcast_shape(x, y),
+        'div': lambda x, y: _broadcast_shape(x, y),
+        'truediv': lambda x, y: _broadcast_shape(x, y),
+        'floordiv': lambda x, y: _broadcast_shape(x, y),
+        'mod': lambda x, y: _broadcast_shape(x, y),
+        'pow': lambda x, y: _broadcast_shape(x, y),
+        # In-place operations (add_, sub_, etc.) - same shape as input
+        'add_': lambda x, y: _broadcast_shape(x, y),
+        'sub_': lambda x, y: _broadcast_shape(x, y),
+        'mul_': lambda x, y: _broadcast_shape(x, y),
+        'div_': lambda x, y: _broadcast_shape(x, y),
+        'truediv_': lambda x, y: _broadcast_shape(x, y),
+        'floordiv_': lambda x, y: _broadcast_shape(x, y),
+        'mod_': lambda x, y: _broadcast_shape(x, y),
+        'pow_': lambda x, y: _broadcast_shape(x, y),
+        
+        # Factory functions (no input shapes, shape determined by arguments)
+        'arange': lambda *args, **kwargs: _arange_shape(*args, **kwargs),
+        'linspace': lambda *args, **kwargs: _linspace_shape(*args, **kwargs),
+        'logspace': lambda *args, **kwargs: _logspace_shape(*args, **kwargs),
+        'zeros': lambda *args, **kwargs: _zeros_shape(*args, **kwargs),
+        'ones': lambda *args, **kwargs: _ones_shape(*args, **kwargs),
+        'empty': lambda *args, **kwargs: _empty_shape(*args, **kwargs),
+        'randn': lambda *args, **kwargs: _randn_shape(*args, **kwargs),
+        'rand': lambda *args, **kwargs: _rand_shape(*args, **kwargs),
+        # Tensor factory methods (new_ones, new_zeros, etc.) - shape from first arg
+        'new_ones': lambda self, *args, **kwargs: _new_tensor_shape(self, *args, **kwargs),
+        'new_zeros': lambda self, *args, **kwargs: _new_tensor_shape(self, *args, **kwargs),
+        'new_empty': lambda self, *args, **kwargs: _new_tensor_shape(self, *args, **kwargs),
         
         # Element-wise operations (preserve shape)
         'abs': lambda x: x,
@@ -152,17 +185,50 @@ class ShapeInference:
         try:
             rule = cls.SHAPE_RULES[op_name]
             
+            # Factory functions (no input shapes, shape determined by arguments)
+            factory_ops = ['arange', 'linspace', 'logspace', 'zeros', 'ones', 'empty', 'randn', 'rand']
+            if op_name in factory_ops:
+                # Factory functions don't have input shapes, only args/kwargs
+                result_shape = rule(*args, **kwargs)
+                return result_shape if result_shape else None
+            
             # input_shapes is a tuple of input shapes
             # For single-input operations, extract the first shape
             # For multi-input operations (cat, stack, matmul, mm, bmm, add, mul, etc.), pass all shapes
             multi_input_ops = ['cat', 'stack', 'matmul', '__matmul__', 'mm', 'bmm',
-                               '__add__', '__sub__', '__mul__', '__truediv__', '__floordiv__', '__mod__', '__pow__']
+                               '__add__', '__sub__', '__mul__', '__truediv__', '__floordiv__', '__mod__', '__pow__',
+                               'add', 'sub', 'mul', 'div', 'truediv', 'floordiv', 'mod', 'pow',
+                               'add_', 'sub_', 'mul_', 'div_', 'truediv_', 'floordiv_', 'mod_', 'pow_']
             
             if op_name in multi_input_ops:
                 # Multiple input shapes
                 if len(input_shapes) == 1:
-                    # Single shape provided, try with it
-                    return rule(input_shapes[0], *args, **kwargs)
+                    # Single shape provided - check if second arg is a scalar
+                    # For broadcasting ops (add, mul, etc.), scalar should be treated as empty shape
+                    broadcasting_ops = ('__add__', '__sub__', '__mul__', '__truediv__', '__floordiv__', '__mod__', '__pow__',
+                                      'add', 'sub', 'mul', 'div', 'truediv', 'floordiv', 'mod', 'pow',
+                                      'add_', 'sub_', 'mul_', 'div_', 'truediv_', 'floordiv_', 'mod_', 'pow_')
+                    if op_name in broadcasting_ops:
+                        # Broadcasting operation - if second arg is scalar, use empty shape
+                        if len(args) > 0:
+                            second_arg = args[0]
+                            # Check if second arg is a scalar (Python int/float or 0-dimensional tensor)
+                            is_scalar = False
+                            if not isinstance(second_arg, (tuple, list, torch.Tensor)) and not hasattr(second_arg, 'shape'):
+                                # Python scalar (int/float)
+                                is_scalar = True
+                            elif hasattr(second_arg, 'shape') and len(second_arg.shape) == 0:
+                                # 0-dimensional tensor (scalar tensor)
+                                is_scalar = True
+                            
+                            if is_scalar:
+                                # Second argument is a scalar, treat as empty shape for broadcasting
+                                return rule(input_shapes[0], ())
+                        # Try with single shape (might work for some operations)
+                        return rule(input_shapes[0], *args, **kwargs)
+                    else:
+                        # Non-broadcasting multi-input op - try with single shape
+                        return rule(input_shapes[0], *args, **kwargs)
                 elif len(input_shapes) == 2:
                     # Two shapes (matmul, add, etc.)
                     return rule(input_shapes[0], input_shapes[1], *args, **kwargs)
@@ -189,6 +255,11 @@ class ShapeInference:
         
         except Exception as e:
             # If inference fails, return None
+            # Debug: log the exception for troubleshooting
+            if op_name in ('add', '__add__', 'sub', '__sub__', 'mul', '__mul__'):
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.debug(f"Shape inference failed for {op_name}: {e}")
             return None
 
 
@@ -417,3 +488,157 @@ def _attention_shape(q_shape: Tuple, k_shape: Tuple, v_shape: Tuple) -> Tuple:
     """
     # Output shape = query shape
     return q_shape
+
+
+# Factory function shape inference helpers
+
+def _arange_shape(*args, **kwargs) -> Tuple:
+    """
+    Infer shape for torch.arange(start, end, step, ...).
+    
+    Shape is 1D: (length,) where length = ceil((end - start) / step)
+    
+    Note: torch.arange always returns a 1D tensor, even for scalar inputs.
+    """
+    if len(args) == 0:
+        return ()  # No arguments, can't infer
+    
+    # Helper to extract int value from tensor or scalar
+    def _extract_int(value):
+        """Extract integer value from tensor or scalar."""
+        if isinstance(value, (int, float)):
+            return int(value)
+        elif isinstance(value, torch.Tensor):
+            # If it's a tensor, extract the value
+            # Handle both scalar tensors and 1-element tensors
+            if value.numel() == 1:
+                return int(value.item())
+            else:
+                # Multi-element tensor - can't use as arange argument
+                return None
+        elif hasattr(value, 'item'):  # LazyTensor or similar
+            try:
+                return int(value.item())
+            except:
+                return None
+        return None
+    
+    # torch.arange(end) -> shape (end,)
+    if len(args) == 1:
+        end = _extract_int(args[0])
+        if end is not None:
+            return (max(0, end),)
+    
+    # torch.arange(start, end, step) -> shape (ceil((end-start)/step),)
+    if len(args) >= 2:
+        start = _extract_int(args[0])
+        end = _extract_int(args[1])
+        step = _extract_int(args[2]) if len(args) >= 3 else 1
+        
+        if start is None or end is None:
+            return ()  # Can't infer
+        
+        if step is None:
+            step = 1
+        
+        if step == 0:
+            return ()  # Invalid step
+        
+        length = max(0, int((end - start) / step))
+        return (length,)
+    
+    return ()  # Can't infer
+
+
+def _linspace_shape(*args, **kwargs) -> Tuple:
+    """Infer shape for torch.linspace(start, end, steps)."""
+    if len(args) >= 3:
+        steps = args[2]
+        if isinstance(steps, (int, float)):
+            return (int(steps),)
+    return ()  # Can't infer
+
+
+def _logspace_shape(*args, **kwargs) -> Tuple:
+    """Infer shape for torch.logspace(start, end, steps)."""
+    if len(args) >= 3:
+        steps = args[2]
+        if isinstance(steps, (int, float)):
+            return (int(steps),)
+    return ()  # Can't infer
+
+
+def _zeros_shape(*args, **kwargs) -> Tuple:
+    """Infer shape for torch.zeros(*size)."""
+    if 'size' in kwargs:
+        size = kwargs['size']
+        if isinstance(size, (tuple, list)):
+            return tuple(size)
+        elif isinstance(size, int):
+            return (size,)
+    elif len(args) > 0:
+        # torch.zeros(d1, d2, ...) or torch.zeros((d1, d2, ...))
+        if len(args) == 1 and isinstance(args[0], (tuple, list)):
+            return tuple(args[0])
+        else:
+            return tuple(args)
+    return ()  # Can't infer
+
+
+def _ones_shape(*args, **kwargs) -> Tuple:
+    """Infer shape for torch.ones(*size)."""
+    return _zeros_shape(*args, **kwargs)  # Same as zeros
+
+
+def _empty_shape(*args, **kwargs) -> Tuple:
+    """Infer shape for torch.empty(*size)."""
+    return _zeros_shape(*args, **kwargs)  # Same as zeros
+
+
+def _randn_shape(*args, **kwargs) -> Tuple:
+    """Infer shape for torch.randn(*size)."""
+    return _zeros_shape(*args, **kwargs)  # Same as zeros
+
+
+def _rand_shape(*args, **kwargs) -> Tuple:
+    """Infer shape for torch.rand(*size)."""
+    return _zeros_shape(*args, **kwargs)  # Same as zeros
+
+
+def _new_tensor_shape(self, *args, **kwargs) -> Tuple:
+    """
+    Infer shape for tensor.new_ones(size), tensor.new_zeros(size), etc.
+    
+    Args:
+        self: The tensor (LazyTensor) - not used for shape, but needed for signature
+        *args: Size argument(s) - can be int, tuple, or list
+        **kwargs: Optional dtype, device, etc.
+    
+    Returns:
+        Shape tuple
+    """
+    if len(args) == 0:
+        return ()  # No size argument, can't infer
+    
+    size_arg = args[0]
+    
+    # Handle different size argument types
+    if isinstance(size_arg, (tuple, list)):
+        # Size is a tuple/list: new_ones((2, 3)) -> shape (2, 3)
+        # Handle empty tuple: new_ones(()) -> shape () (scalar)
+        if len(size_arg) == 0:
+            return ()
+        return tuple(int(s) for s in size_arg)
+    elif isinstance(size_arg, (int, float)):
+        # Size is a single int: new_ones(5) -> shape (5,)
+        return (int(size_arg),)
+    elif isinstance(size_arg, torch.Tensor):
+        # Size is a tensor: convert to tuple
+        if size_arg.numel() == 0:
+            return ()  # Empty tensor -> scalar
+        elif size_arg.numel() == 1:
+            return (int(size_arg.item()),)
+        else:
+            return tuple(int(s) for s in size_arg.tolist())
+    else:
+        return ()  # Can't infer

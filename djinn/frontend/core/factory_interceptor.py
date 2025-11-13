@@ -167,6 +167,25 @@ class FactoryInterceptor:
         @functools.wraps(original_func)
         def wrapper(*args, **kwargs):
             device = kwargs.get('device')
+            
+            # ✅ FIX: For arange, extract scalar values from tensor arguments
+            # torch.arange always returns a 1D tensor, even when given scalar tensors
+            # We need to normalize arguments before creating LazyTensor or calling original
+            if func_name == 'arange':
+                normalized_args = []
+                for arg in args:
+                    if isinstance(arg, torch.Tensor) and arg.numel() == 1:
+                        # Extract scalar value from tensor
+                        normalized_args.append(arg.item())
+                    elif hasattr(arg, 'numel') and hasattr(arg, 'item') and arg.numel() == 1:
+                        # LazyTensor or similar - extract value
+                        try:
+                            normalized_args.append(arg.item())
+                        except:
+                            normalized_args.append(arg)
+                    else:
+                        normalized_args.append(arg)
+                args = tuple(normalized_args)
 
             # CRITICAL FIX: Don't intercept meta or cpu devices UNLESS in capture mode TODO(Jae): Come back to this
             # These are used internally by PyTorch and LazyTensor for shape inference
@@ -184,6 +203,13 @@ class FactoryInterceptor:
                     return original_func(*args, **fixed_kwargs)
                 else:
                     return original_func(*args, **kwargs)
+            # ✅ CRITICAL FIX: Check if interception should be disabled
+            # This respects disable_interception(MATERIALIZATION) context
+            from .interception_control import should_intercept
+            if not should_intercept(device=device):
+                # Interception disabled - call original function directly
+                return original_func(*args, **kwargs)
+            
             # Check if we're inside executor materialization (skip interception in that case)
             if _executor_module:
                 executor_active = getattr(_executor_module._in_executor, 'active', False)

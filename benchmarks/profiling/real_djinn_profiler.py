@@ -279,6 +279,12 @@ class RealDjinnProfiler:
         import sys
         sys.path.insert(0, '/home/jae/Genie')
         import djinn
+        
+        # ✅ PROFILING: Set up profiling context to collect actual measurements
+        from djinn.server.profiling_context import ProfilingContext, set_profiler, get_profiler
+        profiler = ProfilingContext(enabled=True)
+        set_profiler(profiler)
+        profiler.start()
 
         # Create phases list to track timing
         phases = []
@@ -326,34 +332,62 @@ class RealDjinnProfiler:
             # Measure total Djinn execution time
             total_djinn_time = (time.perf_counter() - total_start_time) * 1000
 
-            # The total_djinn_time includes all phases from materialization
-            # Since we can't break down the individual phases without instrumenting Djinn,
-            # we'll use the total time as the Djinn execution time and create reasonable phase estimates
-
-            # GPU execution should be similar to PyTorch baseline minus overhead
-            estimated_gpu_time = pytorch_baseline_time * 0.8  # Assume 80% of baseline time
-
-            # Distribute remaining time across phases
-            remaining_time = total_djinn_time - estimated_gpu_time
+            # ✅ PROFILING: Get actual phase measurements from profiling context
+            actual_phases = profiler.get_phase_dict()
+            logger.info(f"📊 Actual measured phases: {actual_phases}")
+            
+            # Map profiling context phases to DjinnProfilePhase enum
+            phase_mapping = {
+                'serialization': DjinnProfilePhase.SERIALIZATION,
+                'deserialization': DjinnProfilePhase.RESULT_DESERIALIZATION,
+                'gpu_execution': DjinnProfilePhase.GPU_EXECUTION,
+                'request_handling': DjinnProfilePhase.REQUEST_HANDLING,
+            }
+            
+            # Add actual measured phases
+            measured_phase_names = set()
+            for phase_name, duration_ms in actual_phases.items():
+                if phase_name in phase_mapping:
+                    phases.append(PhaseMetrics(
+                        phase_mapping[phase_name],
+                        duration_ms,
+                        time.time()
+                    ))
+                    measured_phase_names.add(phase_mapping[phase_name])
+            
+            # Calculate remaining time for phases not yet instrumented
+            measured_time = sum(actual_phases.values())
+            graph_capture_time = phases[0].duration_ms if phases else 0
+            subgraph_building_time = phases[1].duration_ms if len(phases) > 1 else 0
+            remaining_time = total_djinn_time - graph_capture_time - subgraph_building_time - measured_time
+            
+            logger.info(f"📊 Time breakdown: total={total_djinn_time:.2f}ms, graph_capture={graph_capture_time:.2f}ms, "
+                       f"subgraph_building={subgraph_building_time:.2f}ms, measured={measured_time:.2f}ms, "
+                       f"remaining={remaining_time:.2f}ms")
+            
+            # For phases not yet instrumented, estimate based on remaining time
+            # These will be replaced with actual measurements as we add more instrumentation
             if remaining_time > 0:
-                # Estimate phase breakdown based on known ratios
-                network_time = min(remaining_time * 0.1, 50.0)  # Network ~10%
-                serialize_time = remaining_time * 0.5  # Serialization ~50%
-                deserialize_time = remaining_time * 0.1  # Deserialization ~10%
-                cache_time = remaining_time * 0.1  # Cache operations ~10%
-                other_time = remaining_time - network_time - serialize_time - deserialize_time - cache_time
-
-                phases.extend([
-                    PhaseMetrics(DjinnProfilePhase.SERIALIZATION, serialize_time, time.time()),
-                    PhaseMetrics(DjinnProfilePhase.NETWORK_CLIENT_TO_SERVER, network_time * 0.4, time.time()),
-                    PhaseMetrics(DjinnProfilePhase.REQUEST_HANDLING, other_time * 0.1, time.time()),
-                    PhaseMetrics(DjinnProfilePhase.GPU_CACHE_LOOKUP, cache_time * 0.7, time.time()),
-                    PhaseMetrics(DjinnProfilePhase.GRAPH_CACHE_LOOKUP, cache_time * 0.3, time.time()),
-                    PhaseMetrics(DjinnProfilePhase.GPU_EXECUTION, estimated_gpu_time, time.time()),
-                    PhaseMetrics(DjinnProfilePhase.RESULT_SERIALIZATION, serialize_time * 0.8, time.time()),
-                    PhaseMetrics(DjinnProfilePhase.NETWORK_SERVER_TO_CLIENT, network_time * 0.6, time.time()),
-                    PhaseMetrics(DjinnProfilePhase.RESULT_DESERIALIZATION, deserialize_time, time.time()),
-                ])
+                # Estimate network time (will be replaced with actual measurements)
+                network_time = min(remaining_time * 0.2, 50.0)
+                cache_time = remaining_time * 0.1
+                other_time = remaining_time - network_time - cache_time
+                
+                # Only add estimated phases if we don't already have measured ones
+                if DjinnProfilePhase.NETWORK_CLIENT_TO_SERVER not in measured_phase_names:
+                    phases.append(PhaseMetrics(DjinnProfilePhase.NETWORK_CLIENT_TO_SERVER, network_time * 0.4, time.time()))
+                if DjinnProfilePhase.REQUEST_HANDLING not in measured_phase_names:
+                    phases.append(PhaseMetrics(DjinnProfilePhase.REQUEST_HANDLING, other_time * 0.1, time.time()))
+                if DjinnProfilePhase.GPU_CACHE_LOOKUP not in measured_phase_names:
+                    phases.append(PhaseMetrics(DjinnProfilePhase.GPU_CACHE_LOOKUP, cache_time * 0.7, time.time()))
+                if DjinnProfilePhase.GRAPH_CACHE_LOOKUP not in measured_phase_names:
+                    phases.append(PhaseMetrics(DjinnProfilePhase.GRAPH_CACHE_LOOKUP, cache_time * 0.3, time.time()))
+                if DjinnProfilePhase.RESULT_SERIALIZATION not in measured_phase_names:
+                    result_serialization = actual_phases.get('serialization', 0) * 0.8
+                    if result_serialization > 0:
+                        phases.append(PhaseMetrics(DjinnProfilePhase.RESULT_SERIALIZATION, result_serialization, time.time()))
+                if DjinnProfilePhase.NETWORK_SERVER_TO_CLIENT not in measured_phase_names:
+                    phases.append(PhaseMetrics(DjinnProfilePhase.NETWORK_SERVER_TO_CLIENT, network_time * 0.6, time.time()))
 
             return total_djinn_time, phases
 

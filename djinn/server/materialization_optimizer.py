@@ -71,23 +71,31 @@ class MaterializationOptimizer:
             lt_id = id(lt)
             
             if lt_id in visited:
+                logger.debug(f"Already visited {lt.operation} (id={lt_id}), returning ID")
                 return lt_id
             
             visited.add(lt_id)
+            logger.debug(f"Building schedule for {lt.operation} (id={lt_id}), inputs={len(lt.inputs)}")
             
             # Schedule inputs first (DFS post-order)
             input_ids = []
-            for inp in lt.inputs:
+            for i, inp in enumerate(lt.inputs):
                 from ..frontend.core.lazy_tensor import LazyTensor
                 if isinstance(inp, LazyTensor):
-                    input_ids.append(build_schedule_recursive(inp))
+                    inp_id = build_schedule_recursive(inp)
+                    input_ids.append(inp_id)
+                    logger.debug(f"  Input {i}: LazyTensor {inp.operation} -> ID {inp_id}")
                 else:
                     # Concrete input - register it
-                    input_ids.append(id(inp))
+                    inp_id = id(inp)
+                    input_ids.append(inp_id)
+                    logger.debug(f"  Input {i}: Concrete -> ID {inp_id}")
             
             # Schedule this operation
             op_id = op_counter[0]
             op_counter[0] += 1
+            
+            logger.debug(f"Scheduling {lt.operation}: op_id={op_id}, input_ids={input_ids}, output_id={lt_id}")
             
             schedule_entry = OperationSchedule(
                 operation_id=op_id,
@@ -157,29 +165,35 @@ class MaterializationOptimizer:
                            executor, result_cache: Dict[int, torch.Tensor],
                            concrete_inputs: Dict[int, torch.Tensor]) -> torch.Tensor:
         """Execute schedule sequentially without batch executor (avoids recursion)."""
+        from ..frontend.core.interception_control import disable_interception, InterceptionContext
+        from ..frontend.core.lazy_tensor import LazyTensor
+        
+        # ✅ FIX: Disable interception for entire execution
+        with disable_interception(InterceptionContext.MATERIALIZATION):
+            for entry in schedule:
+                # Resolve inputs from cache or concrete inputs
+                resolved_inputs = []
+                for inp_id in entry.input_ids:
+                    if inp_id in result_cache:
+                        resolved_inputs.append(result_cache[inp_id])
+                    elif inp_id in concrete_inputs:
+                        resolved_inputs.append(concrete_inputs[inp_id])
+                    else:
+                        # This input must be from a previous operation
+                        logger.warning(f"Missing input {inp_id} for {entry.operation_name}")
+                        continue
 
-        for entry in schedule:
-            # Resolve inputs from cache or concrete inputs
-            resolved_inputs = []
-            for inp_id in entry.input_ids:
-                if inp_id in result_cache:
-                    resolved_inputs.append(result_cache[inp_id])
-                elif inp_id in concrete_inputs:
-                    resolved_inputs.append(concrete_inputs[inp_id])
-                else:
-                    # This input must be from a previous operation
-                    logger.warning(f"Missing input {inp_id} for {entry.operation_name}")
-                    continue
-
-            # Materialize any remaining LazyTensor inputs before dispatch
-            from ..frontend.core.universal_dispatcher import _materialize_lazy_tensor
+            # ✅ FIX: Should never have LazyTensors here with interception disabled
             materialized_inputs = []
             for inp in resolved_inputs:
-                if isinstance(inp, torch.Tensor):
-                    materialized = _materialize_lazy_tensor(inp)
-                    materialized_inputs.append(materialized)
-                else:
-                    materialized_inputs.append(inp)
+                if isinstance(inp, LazyTensor):
+                    raise AssertionError(
+                        f"BUG: LazyTensor in resolved_inputs during materialization\n"
+                        f"  Operation: {entry.operation_name}\n"
+                        f"  Input: {inp.operation if hasattr(inp, 'operation') else 'unknown'}\n"
+                        f"  This should not happen with interception disabled.\n"
+                    )
+                materialized_inputs.append(inp)
             
             # Execute operation directly using executor's handlers or universal dispatcher
             op_handler = executor.operation_handlers.get(entry.operation_name)
@@ -198,13 +212,31 @@ class MaterializationOptimizer:
                 dispatcher = get_universal_dispatcher()
                 result = dispatcher.dispatch(entry.operation_name, materialized_inputs, entry.kwargs)
 
+            # ✅ FIX: Verify result is concrete
+            if isinstance(result, LazyTensor):
+                raise AssertionError(
+                    f"BUG: Operation returned LazyTensor during materialization\n"
+                    f"  Operation: {entry.operation_name}\n"
+                    f"  Handler: {op_handler.__name__ if op_handler else 'fallback'}\n"
+                    f"  This indicates interception is not properly disabled.\n"
+                )
+            
             # Cache the result
             result_cache[entry.output_id] = result
 
         # Return the final result (last operation's output)
         if schedule:
             final_output_id = schedule[-1].output_id
-            return result_cache.get(final_output_id, torch.tensor(0.0))
+            final_result = result_cache.get(final_output_id, torch.tensor(0.0))
+            
+            # ✅ FIX: Final sanity check
+            if isinstance(final_result, LazyTensor):
+                raise AssertionError(
+                    f"BUG: Final result is LazyTensor\n"
+                    f"  This should be impossible.\n"
+                )
+            
+            return final_result
         else:
             return torch.tensor(0.0)
     
@@ -213,52 +245,100 @@ class MaterializationOptimizer:
                               concrete_inputs: Dict[int, torch.Tensor]) -> torch.Tensor:
         """Execute schedule using CUDA streams for pipelining"""
         from ..frontend.core.lazy_tensor import LazyTensor
+        from ..frontend.core.interception_control import disable_interception, InterceptionContext
         
-        # Use streams to overlap computation and transfer
-        with torch.cuda.stream(self.compute_stream):
-            for entry in schedule:
-                # Resolve inputs
-                resolved_inputs = []
-                for inp_id in entry.input_ids:
-                    if inp_id in result_cache:
-                        tensor = result_cache[inp_id]
-                        # Ensure LazyTensors are materialized
-                        if type(tensor).__name__ == 'LazyTensor':
-                            tensor = tensor.materialize()
-                        resolved_inputs.append(tensor)
-                    elif inp_id in concrete_inputs:
-                        tensor = concrete_inputs[inp_id]
-                        # Ensure LazyTensors are materialized
-                        if type(tensor).__name__ == 'LazyTensor':
-                            tensor = tensor.materialize()
-                        resolved_inputs.append(tensor)
-                
-                # Execute operation - use UniversalDispatcher for 99% of ops
-                op_handler = executor.operation_handlers.get(entry.operation_name)
-                if op_handler:
-                    # Special case handlers (layer_norm, reshape, embedding, dropout, etc.)
-                    dummy_lt = type('obj', (object,), {
-                        'operation': entry.operation_name,
-                        'kwargs': entry.kwargs  # Preserve original kwargs
-                    })()
-                    result = op_handler(dummy_lt, resolved_inputs, entry.kwargs)
-                else:
-                    # Default: use UniversalDispatcher (handles 99% automatically)
-                    result = executor._execute_fallback_eager(entry.operation_name, resolved_inputs, entry.kwargs)
-                
-                result_cache[entry.output_id] = result
-        
-        # Synchronize streams - transfer_stream waits for compute_stream
-        if self.transfer_stream is not None and self.compute_stream is not None:
-            self.transfer_stream.wait_stream(self.compute_stream)
-        torch.cuda.synchronize()
+        # ✅ FIX: Disable interception for entire materialization
+        with disable_interception(InterceptionContext.MATERIALIZATION):
+            # Use streams to overlap computation and transfer
+            with torch.cuda.stream(self.compute_stream):
+                for entry in schedule:
+                    # Resolve inputs
+                    resolved_inputs = []
+                    logger.debug(f"Executing {entry.operation_name}: looking for {len(entry.input_ids)} inputs")
+                    for inp_id in entry.input_ids:
+                        if inp_id in result_cache:
+                            tensor = result_cache[inp_id]
+                            logger.debug(f"  Found input {inp_id} in result_cache: shape={tensor.shape if hasattr(tensor, 'shape') else 'N/A'}")
+                            
+                            # ✅ FIX: Should NEVER be LazyTensor with interception disabled
+                            if isinstance(tensor, LazyTensor):
+                                raise AssertionError(
+                                    f"BUG: LazyTensor in result_cache during materialization\n"
+                                    f"  Operation: {entry.operation_name}\n"
+                                    f"  Input ID: {inp_id}\n"
+                                    f"  Tensor operation: {tensor.operation}\n"
+                                    f"  This should be impossible with interception disabled.\n"
+                                )
+                            
+                            resolved_inputs.append(tensor)
+                        elif inp_id in concrete_inputs:
+                            tensor = concrete_inputs[inp_id]
+                            logger.debug(f"  Found input {inp_id} in concrete_inputs: shape={tensor.shape if hasattr(tensor, 'shape') else 'N/A'}")
+                            
+                            # ✅ FIX: Same check for concrete inputs
+                            if isinstance(tensor, LazyTensor):
+                                raise AssertionError(
+                                    f"BUG: LazyTensor in concrete_inputs\n"
+                                    f"  This indicates factory operations are still intercepted.\n"
+                                )
+                            
+                            resolved_inputs.append(tensor)
+                        else:
+                            logger.warning(f"  Input {inp_id} not found in result_cache or concrete_inputs for {entry.operation_name}")
+                            logger.debug(f"  result_cache keys: {list(result_cache.keys())}")
+                            logger.debug(f"  concrete_inputs keys: {list(concrete_inputs.keys())}")
+                    
+                    # Execute operation - use UniversalDispatcher for 99% of ops
+                    # Check both base_name and full operation_name for handler lookup
+                    base_name = entry.operation_name.replace("aten::", "")
+                    op_handler = executor.operation_handlers.get(base_name) or executor.operation_handlers.get(entry.operation_name)
+                    
+                    if op_handler:
+                        # Special case handlers (layer_norm, reshape, embedding, dropout, split, etc.)
+                        logger.debug(f"Using handler {op_handler.__name__} for {entry.operation_name}")
+                        dummy_lt = type('obj', (object,), {
+                            'operation': entry.operation_name,
+                            'kwargs': entry.kwargs  # Preserve original kwargs
+                        })()
+                        result = op_handler(dummy_lt, resolved_inputs, entry.kwargs)
+                        logger.debug(f"Handler returned: type={type(result).__name__}, shape={result.shape if hasattr(result, 'shape') else 'N/A'}")
+                    else:
+                        # Default: use UniversalDispatcher (handles 99% automatically)
+                        logger.debug(f"No handler found for {entry.operation_name}, using UniversalDispatcher")
+                        result = executor._execute_fallback_eager(entry.operation_name, resolved_inputs, entry.kwargs)
+                    
+                    # ✅ FIX: Verify result is concrete
+                    if isinstance(result, LazyTensor):
+                        raise AssertionError(
+                            f"BUG: Operation returned LazyTensor during materialization\n"
+                            f"  Operation: {entry.operation_name}\n"
+                            f"  Handler: {op_handler.__name__ if op_handler else 'fallback'}\n"
+                            f"  This indicates interception is not properly disabled.\n"
+                        )
+                    
+                    logger.debug(f"Storing result for {entry.operation_name}: output_id={entry.output_id}, shape={result.shape if hasattr(result, 'shape') else 'N/A'}")
+                    result_cache[entry.output_id] = result
+            
+            # Synchronize streams - transfer_stream waits for compute_stream
+            if self.transfer_stream is not None and self.compute_stream is not None:
+                self.transfer_stream.wait_stream(self.compute_stream)
+            torch.cuda.synchronize()
 
-        # Fix: Return the final result, not id(None)
-        if schedule:
-            final_output_id = schedule[-1].output_id
-            return result_cache.get(final_output_id, torch.tensor(0.0))
-        else:
-            return torch.tensor(0.0)
+            # Return final result
+            if schedule:
+                final_output_id = schedule[-1].output_id
+                final_result = result_cache.get(final_output_id, torch.tensor(0.0))
+                
+                # ✅ FIX: Final sanity check
+                if isinstance(final_result, LazyTensor):
+                    raise AssertionError(
+                        f"BUG: Final result is LazyTensor\n"
+                        f"  This should be impossible.\n"
+                    )
+                
+                return final_result
+            else:
+                return torch.tensor(0.0)
 
 
 class PinnedMemoryPool:

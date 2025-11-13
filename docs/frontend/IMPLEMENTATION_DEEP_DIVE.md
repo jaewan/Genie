@@ -50,10 +50,12 @@ y = x + 1  # Automatic interception
 djinn/frontend/
 ├── core/
 │   ├── lazy_tensor.py           # Core LazyTensor implementation
+│   ├── lazy_tuple.py            # LazyTuple for tuple-returning operations
 │   ├── factory_interceptor.py   # Tensor creation interception
 │   ├── automatic_dispatch.py    # Meta-tensor shape inference
 │   ├── operation_registry.py    # Operation definitions
 │   ├── shape_inference.py       # Shape inference engine
+│   ├── materialization_control.py # Materialization decision logic
 │   └── graph_builder.py         # LazyTensor DAG construction
 ├── semantic/
 │   ├── semantic_metadata.py     # Metadata schema
@@ -172,7 +174,7 @@ class NodeProtocol(Protocol):
 
 ### §3.1 LazyTensor: The Heart of Interception
 
-**File**: `djinn/frontend/core/lazy_tensor.py` (2,811 lines )
+**File**: `djinn/frontend/core/lazy_tensor.py` (2,811 lines)
 
 #### Key Features
 
@@ -188,6 +190,7 @@ class LazyTensor(torch.Tensor):
     - Lazy shape inference with caching
     - Thread-safe via _MinimalTensorWrapper
     - Dual materialization paths: local optimizer vs remote subgraph execution
+    - Tuple operations (split, chunk, unbind) return LazyTuple (not materialized)
     """
 
     def __init__(self, operation, inputs, kwargs=None, shape=None, dtype=None, device=None, metadata=None):
@@ -324,7 +327,7 @@ class MetadataPlaceholder:
 - **With lazy evaluation**: Optimized performance through deferred computation
 - **Deferred to scheduling**: Full semantic context available
 
-### §3.3 Device Compatibility Layer
+### §3.4 Device Compatibility Layer
 
 **File**: `djinn/core/device_compatibility.py` (115 lines)
 
@@ -392,7 +395,7 @@ class RemoteAcceleratorSupport:
 - **Automatic Conversion**: Transparently converts parameters, buffers, and nested modules to LazyTensors
 - **Thread-Safe Implementation**: Uses proper parameter replacement to avoid PyTorch's Parameter constraints
 
-### §3.4 AutomaticDispatch: Meta-Tensor Magic
+### §3.5 AutomaticDispatch: Meta-Tensor Magic
 
 **File**: `djinn/frontend/core/automatic_dispatch.py` (350+ lines)
 
@@ -1189,11 +1192,17 @@ def _materialize_remote(self) -> torch.Tensor:
 
 **Materialization Triggers:**
 ```python
-# These operations trigger materialization:
+# These operations trigger materialization (Python protocol ops):
 result = lazy_tensor.cpu()      # Move to CPU device
 result = lazy_tensor.numpy()    # Convert to NumPy array
 result = lazy_tensor.item()     # Extract scalar value
 result = lazy_tensor.tolist()   # Convert to Python list
+bool_result = bool(lazy_tensor)  # Boolean conversion
+
+# Tuple operations return LazyTuple (lazy):
+chunks = lazy_tensor.split(300)  # Returns LazyTuple (no execution)
+a, b, c = chunks                 # Still lazy
+result = a.cpu()                 # Only chunk 0 materializes
 
 # Property access may trigger partial computation:
 shape = lazy_tensor.shape        # May trigger shape inference
@@ -1258,11 +1267,13 @@ def _materialize_factory_op(self, tensor: LazyTensor) -> torch.Tensor:
 | Component | Status | File | Implementation Notes |
 |-----------|--------|------|---------------------|
 | **LazyTensor Core** | ✅ Complete | `djinn/frontend/core/lazy_tensor.py` | torch.Tensor subclass with lazy properties and dual materialization paths |
+| **LazyTuple** | ✅ Complete | `djinn/frontend/core/lazy_tuple.py` | Lazy tuple operations (split, chunk, unbind) preserving deferred execution |
 | **Factory Interception** | ✅ Complete | `djinn/frontend/core/factory_interceptor.py` | Device-aware tensor creation wrapping 20+ factory functions |
 | **__torch_dispatch__** | ✅ Complete | `djinn/frontend/core/lazy_tensor.py` | Primary interception mechanism with AutomaticDispatch integration |
 | **Universal Dispatcher** | ✅ Complete | `djinn/frontend/core/universal_dispatcher.py` | Meta-tensor shape inference for automatic operation coverage with selective interception |
 | **Operation Registry** | ✅ Complete | `djinn/frontend/core/operation_registry.py` | Client-server operation parity with 50+ operations |
 | **Shape Inference** | ✅ Complete | `djinn/frontend/core/shape_inference.py` | Meta-tensor inference with special handlers for edge cases |
+| **Materialization Control** | ✅ Complete | `djinn/frontend/core/materialization_control.py` | Decision logic for Python protocol ops (only ops that must materialize) |
 | **Graph Construction** | ✅ Complete | `djinn/frontend/core/graph_builder.py` | LazyTensor DAG construction with graph caching |
 | **MetadataPlaceholder** | ✅ Complete | `djinn/core/metadata.py` | Thread-safe lazy evaluation for expensive metadata |
 | **Semantic Metadata** | ✅ Complete | `djinn/frontend/semantic/semantic_metadata.py` | 15+ field annotation schema with execution phases |
@@ -1430,8 +1441,8 @@ tensor + 1          # Standard tensor operations
 - **MATERIALIZATION_TRIGGER**: Must execute immediately (bool/scalar returns)
 - **REDUCTION_OPERATION**: Dramatically reduce data size (argmax, sum with dim)
 - **SHAPE_DEPENDENT**: Data-dependent output shapes (nonzero, unique)
-- **TUPLE_RETURNING**: Multi-return operations (topk, sort, eig)
-- **COMPUTE_OPERATION**: Standard deferred execution
+- **TUPLE_RETURNING**: Multi-return operations return LazyTuple (split, chunk, unbind, topk, sort, eig)
+- **COMPUTE_OPERATION**: Standard deferred execution (returns LazyTensor)
 
 **Impact**: Enables natural ML control flow while maintaining deferred execution benefits.
 
@@ -1530,12 +1541,14 @@ def compute_semantic_hash(operation, inputs, kwargs):
 
 ```python
 class OperationClass(Enum):
-    MATERIALIZATION_TRIGGER = "materialization_trigger"  # Must execute immediately
+    MATERIALIZATION_TRIGGER = "materialization_trigger"  # Must execute immediately (Python protocols)
     REDUCTION_OPERATION = "reduction_operation"         # Can be remote for network reduction
     SHAPE_DEPENDENT = "shape_dependent"                 # Data-dependent output shapes
-    TUPLE_RETURNING = "tuple_returning"                 # Multi-return operations
-    COMPUTE_OPERATION = "compute_operation"             # Standard deferred execution
+    TUPLE_RETURNING = "tuple_returning"                 # Returns LazyTuple (split, chunk, unbind, topk, sort, etc.)
+    COMPUTE_OPERATION = "compute_operation"             # Standard deferred execution (returns LazyTensor)
 ```
+
+**Note**: Tuple-returning operations (split, chunk, unbind, topk, sort, etc.) return `LazyTuple` instances, preserving laziness until individual elements are accessed. This enables optimal performance by only materializing accessed chunks.
 
 **Context-Dependent Logic**:
 ```python
@@ -1668,6 +1681,7 @@ The Djinn frontend provides **transparent semantic capture** for GPU disaggregat
 ✅ **Production-ready architecture** with comprehensive error handling and testing
 
 **Key Innovations**:
+- **LazyTuple**: Lazy tuple operations (split, chunk, unbind) preserving deferred execution for optimal performance
 - **Enhanced Operation Classification**: Context-aware classification with 5 categories and context-dependent semantics
 - **Advanced Shape Inference**: 50+ shape transformation rules with meta-tensor approach and eager inference during construction
 - **Semantic Caching**: Materialization cache with semantic hashing for eliminating redundant graph execution
@@ -1679,3 +1693,4 @@ The Djinn frontend provides **transparent semantic capture** for GPU disaggregat
 - **Subgraph Execution**: O(1) network transfers vs O(n) individual operations
 - **Memory Management**: Three-phase optimization with adaptive budgeting and Prometheus metrics
 - **Thread-Safe Implementation**: MetadataPlaceholder system with comprehensive testing
+- **Materialization Control**: Simplified decision logic - only Python protocol ops materialize immediately, everything else is lazy
