@@ -48,7 +48,13 @@ class SimpleGPUCache:
             device: Target device (defaults to cuda:0 if available, else cpu)
             max_memory_mb: Maximum total memory in MB (optional). If set, enables memory-aware eviction.
         """
-        self.cache: OrderedDict[str, Dict[int, torch.Tensor]] = OrderedDict()
+        # Support both old and new formats during migration
+        self.cache_old: OrderedDict[str, Dict[int, torch.Tensor]] = OrderedDict()  # Old: model_id → {tensor_id → tensor}
+        self.cache_new: OrderedDict[str, torch.Tensor] = OrderedDict()  # New: identifier → tensor
+        
+        # Backward compatibility: alias cache to cache_old for existing code
+        self.cache = self.cache_old
+        
         self.max_models = max_models
         self.max_memory_mb = max_memory_mb  # None = unlimited
         self.device = device or (
@@ -64,6 +70,10 @@ class SimpleGPUCache:
             "oom_recovery_count": 0,
         }
         self._model_memory: Dict[str, int] = {}  # Track memory per model
+        
+        # Migration flag
+        self._migrated = False
+        
         logger.info(
             "SimpleGPUCache initialized: max_models=%d, max_memory_mb=%s, device=%s",
             max_models,
@@ -86,16 +96,47 @@ class SimpleGPUCache:
         Returns:
             Dictionary mapping tensor IDs to GPU tensors
         """
-        # Cache hit - move to end (LRU)
-        if model_id in self.cache:
+        # ✅ PROFILING: Measure GPU cache lookup time
+        try:
+            from .profiling_context import get_profiler, record_phase
+            profiler = get_profiler()
+            if profiler and profiler.enabled:
+                with record_phase('gpu_cache_lookup', metadata={'model_id': model_id}):
+                    # Cache hit - move to end (LRU)
+                    if model_id in self.cache_old:
+                        self.stats["hits"] += 1
+                        self.cache_old.move_to_end(model_id)
+                        logger.debug(
+                            "GPU cache HIT for model_id=%s (hit_rate=%.1f%%)",
+                            model_id,
+                            100 * self.stats["hits"] / (self.stats["hits"] + self.stats["misses"]),
+                        )
+                        return self.cache_old[model_id]
+            else:
+                # No profiling - check cache normally
+                if model_id in self.cache_old:
+                    self.stats["hits"] += 1
+                    self.cache_old.move_to_end(model_id)
+                    logger.debug(
+                        "GPU cache HIT for model_id=%s (hit_rate=%.1f%%)",
+                        model_id,
+                        100 * self.stats["hits"] / (self.stats["hits"] + self.stats["misses"]),
+                    )
+                    return self.cache_old[model_id]
+        except ImportError:
+            # Fallback if profiling not available
+            pass
+        
+        # Check cache (old format)
+        if model_id in self.cache_old:
             self.stats["hits"] += 1
-            self.cache.move_to_end(model_id)
+            self.cache_old.move_to_end(model_id)
             logger.debug(
                 "GPU cache HIT for model_id=%s (hit_rate=%.1f%%)",
                 model_id,
                 100 * self.stats["hits"] / (self.stats["hits"] + self.stats["misses"]),
             )
-            return self.cache[model_id]
+            return self.cache_old[model_id]
 
         # Cache miss - deserialize and load to GPU
         self.stats["misses"] += 1
@@ -107,7 +148,7 @@ class SimpleGPUCache:
         )
 
         # Evict oldest model if at capacity (by count)
-        while len(self.cache) >= self.max_models:
+        while len(self.cache_old) >= self.max_models:
             self._evict_oldest_model()
 
         # Deserialize numpy → torch → GPU (this is the expensive part we're caching)
@@ -134,7 +175,7 @@ class SimpleGPUCache:
                     freed_mb,
                 )
 
-        self.cache[model_id] = gpu_weights
+        self.cache_old[model_id] = gpu_weights
         self._model_memory[model_id] = total_bytes
         self.stats["total_memory_bytes"] += total_bytes
         self.stats["max_memory_bytes_seen"] = max(
@@ -202,11 +243,11 @@ class SimpleGPUCache:
 
     def _evict_oldest_model(self) -> None:
         """Evict the oldest (least recently used) model."""
-        if not self.cache:
+        if not self.cache_old:
             return
         
-        evicted_id = next(iter(self.cache))
-        evicted_weights = self.cache.pop(evicted_id)
+        evicted_id = next(iter(self.cache_old))
+        evicted_weights = self.cache_old.pop(evicted_id)
         evicted_memory = sum(
             t.element_size() * t.numel() for t in evicted_weights.values()
         )
@@ -223,17 +264,84 @@ class SimpleGPUCache:
 
     def has_model(self, model_id: str) -> bool:
         """Check if model is cached without updating LRU."""
-        return model_id in self.cache
+        return model_id in self.cache_old
 
     def get_model_memory_mb(self, model_id: str) -> float:
         """Get memory usage of a cached model in MB."""
         return self._model_memory.get(model_id, 0) / (1024 * 1024)
 
+    def _migrate_to_new_format(self):
+        """
+        Migrate old cache to new identifier-based format.
+        
+        Called lazily on first cache query to avoid blocking initialization.
+        For now, this is a placeholder - actual migration requires model registry
+        to map old tensor IDs to new identifiers.
+        """
+        if self._migrated:
+            return
+        
+        # For Phase 1, we'll start fresh with identifier-based cache
+        # Migration from old format will be handled when we receive new identifiers
+        logger.debug("Cache migration: Starting fresh with identifier-based format")
+        self._migrated = True
+    
+    def get_weights_by_identifier(
+        self,
+        weight_dict: Dict[str, torch.Tensor]
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Get cached weights by identifier (new API for Phase 1).
+        
+        Args:
+            weight_dict: Dictionary mapping identifiers to tensors
+        
+        Returns:
+            Dictionary mapping identifiers to GPU tensors
+        """
+        # Ensure migration is complete
+        self._migrate_to_new_format()
+        
+        gpu_weights = {}
+        
+        for identifier, tensor_data in weight_dict.items():
+            if identifier in self.cache_new:
+                # Cache hit - move to end (LRU)
+                self.stats["hits"] += 1
+                self.cache_new.move_to_end(identifier)
+                gpu_weights[identifier] = self.cache_new[identifier]
+                logger.debug(f"GPU cache HIT for identifier={identifier}")
+            else:
+                # Cache miss - load to GPU
+                self.stats["misses"] += 1
+                gpu_tensor = tensor_data.to(self.device, non_blocking=True)
+                
+                # Evict if needed (by count - rough estimate: 100 tensors per model)
+                while len(self.cache_new) >= self.max_models * 100:
+                    # Evict oldest
+                    oldest_id = next(iter(self.cache_new))
+                    evicted_tensor = self.cache_new.pop(oldest_id)
+                    evicted_bytes = evicted_tensor.element_size() * evicted_tensor.numel()
+                    self.stats["total_memory_bytes"] -= evicted_bytes
+                    self.stats["evictions"] += 1
+                
+                # Cache the tensor
+                self.cache_new[identifier] = gpu_tensor
+                tensor_bytes = gpu_tensor.element_size() * gpu_tensor.numel()
+                self.stats["total_memory_bytes"] += tensor_bytes
+                gpu_weights[identifier] = gpu_tensor
+                logger.debug(f"GPU cache MISS for identifier={identifier}, cached")
+        
+        return gpu_weights
+    
     def clear(self) -> None:
         """Clear all cached weights."""
-        self.cache.clear()
+        self.cache_old.clear()
+        self.cache_new.clear()
+        self.cache = self.cache_old  # Reset alias
         self._model_memory.clear()
         self.stats["total_memory_bytes"] = 0
+        self._migrated = False
         logger.info("GPU cache cleared")
 
     def get_stats(self) -> Dict[str, Any]:
@@ -244,7 +352,7 @@ class SimpleGPUCache:
         )
         return {
             **self.stats,
-            "cached_models": len(self.cache),
+            "cached_models": len(self.cache_old),
             "hit_rate_percent": hit_rate,
             "total_memory_mb": self.stats["total_memory_bytes"] / 1024**2,
             "max_memory_mb_seen": self.stats["max_memory_bytes_seen"] / 1024**2,
@@ -258,7 +366,7 @@ class SimpleGPUCache:
         This allows clients to warm up the cache before the first real request,
         eliminating cold-start latency.
         """
-        if model_id not in self.cache:
+        if model_id not in self.cache_old:
             self.get_weights(model_id, weight_dict)
             logger.info("GPU cache warmed up model_id=%s", model_id)
 

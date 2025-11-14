@@ -1,0 +1,336 @@
+"""
+Resilient Model Handler: Production-grade error handling with automatic recovery.
+
+Features:
+- Automatic retry with exponential backoff
+- Circuit breaker for repeated failures
+- Graceful fallback to graph execution
+- Comprehensive error tracking
+
+This is part of the redesign plan (Week 2).
+"""
+
+import asyncio
+import logging
+import traceback
+from collections import defaultdict
+from enum import Enum
+from typing import Dict, Optional
+
+import torch
+
+logger = logging.getLogger(__name__)
+
+
+class ErrorType(Enum):
+    """Error types for classification."""
+    MODEL_NOT_FOUND = "model_not_found"
+    OOM = "out_of_memory"
+    EXECUTION_FAILED = "execution_failed"
+    TIMEOUT = "timeout"
+    SECURITY_ERROR = "security_error"
+
+
+class ResilientModelHandler:
+    """
+    Production-grade error handling with automatic recovery.
+    
+    Features:
+    - Automatic retry with exponential backoff
+    - Circuit breaker for repeated failures
+    - Graceful fallback to graph execution
+    - Comprehensive error tracking
+    """
+    
+    def __init__(self, gpu_id: int = 0):
+        from .memory_aware_model_cache import MemoryAwareModelCache
+        from .model_security import ModelSecurityValidator
+        
+        self.model_cache = MemoryAwareModelCache(device=f'cuda:{gpu_id}')
+        self.security_validator = ModelSecurityValidator()
+        
+        # Fallback to graph execution
+        from .subgraph_executor import SubgraphExecutor
+        self.graph_executor = SubgraphExecutor(gpu_id)
+        
+        # Error tracking for circuit breaker
+        self.error_counts = defaultdict(int)
+        self.error_threshold = 5
+        self.circuit_breaker_open = False
+        
+        # Retry configuration
+        self.max_retries = 3
+        self.timeout_seconds = 30.0
+        
+        logger.info(f"ResilientModelHandler initialized (gpu_id={gpu_id})")
+    
+    async def handle_request(self, request: Dict) -> Dict:
+        """
+        Handle request with comprehensive error recovery.
+        
+        Args:
+            request: Request dictionary with 'type' field
+        
+        Returns:
+            Response dictionary with 'status' and result/error
+        """
+        
+        # Circuit breaker check
+        if self.circuit_breaker_open:
+            return self._circuit_breaker_response()
+        
+        request_type = request.get('type')
+        
+        try:
+            if request_type == 'EXECUTE_MODEL':
+                return await self._execute_with_recovery(request)
+            elif request_type == 'REGISTER_MODEL':
+                return await self._register_with_recovery(request)
+            else:
+                # Unknown request - fall back to graph
+                return await self._fallback_to_graph(request)
+                
+        except Exception as e:
+            return self._handle_fatal_error(e, request)
+    
+    async def _execute_with_recovery(self, request: Dict) -> Dict:
+        """
+        Execute with multiple recovery strategies.
+        
+        Implements:
+        - Retry with exponential backoff
+        - OOM recovery with cache clearing
+        - Fallback to graph execution
+        """
+        
+        fingerprint = request['fingerprint']
+        
+        for attempt in range(self.max_retries):
+            try:
+                # Validate inputs (security)
+                self.security_validator.validate_inputs(request['inputs'])
+                
+                # Try model cache execution
+                result = await asyncio.wait_for(
+                    self._execute_model(request),
+                    timeout=self.timeout_seconds
+                )
+                
+                # Success - reset error count
+                self.error_counts[fingerprint] = 0
+                return result
+                
+            except asyncio.TimeoutError:
+                if attempt < self.max_retries - 1:
+                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                    continue
+                return self._timeout_response(fingerprint)
+                
+            except ValueError as e:
+                if 'not found' in str(e):
+                    # Model not registered - log and request registration
+                    logger.warning(f"Model {fingerprint} not found in cache. Available models: {list(self.model_cache.models.keys())}")
+                    return self._request_registration_response(fingerprint)
+                raise
+                
+            except RuntimeError as e:
+                if 'out of memory' in str(e):
+                    # OOM - clear cache and retry
+                    if self.model_cache.device.type == 'cuda':
+                        torch.cuda.empty_cache()
+                    if attempt < self.max_retries - 1:
+                        continue
+                    # Final attempt - fall back to graph
+                    return await self._fallback_to_graph(request)
+                raise
+                
+            except Exception as e:
+                # Track errors
+                self.error_counts[fingerprint] += 1
+                logger.error(f"Model cache execution failed (attempt {attempt+1}/{self.max_retries}): {e}")
+                import traceback
+                logger.debug(f"Traceback:\n{traceback.format_exc()}")
+                
+                # Check circuit breaker
+                if self.error_counts[fingerprint] > self.error_threshold:
+                    self.circuit_breaker_open = True
+                    logger.error(f"Circuit breaker opened for {fingerprint}")
+                
+                # Last resort - graph execution
+                if attempt == self.max_retries - 1:
+                    logger.warning(f"All retries exhausted, falling back to graph execution")
+                    return await self._fallback_to_graph(request)
+        
+        # Should not reach here, but handle gracefully
+        return self._error_response("Max retries exceeded", ErrorType.EXECUTION_FAILED)
+    
+    async def _register_with_recovery(self, request: Dict) -> Dict:
+        """
+        Register model with security validation.
+        
+        Returns:
+            Success or error response
+        """
+        
+        try:
+            # Security validation
+            self.security_validator.validate_model_registration(
+                fingerprint=request['fingerprint'],
+                architecture_data=request.get('architecture_data'),
+                state_dict=request.get('uncached_weights', {})
+            )
+            
+            # Register model
+            self.model_cache.register_model(
+                fingerprint=request['fingerprint'],
+                descriptor=request['descriptor'],
+                weight_ids=request['weight_ids'],
+                uncached_weights=request.get('uncached_weights', {}),
+                architecture_data=request.get('architecture_data')
+            )
+            
+            return {
+                'status': 'success',
+                'fingerprint': request['fingerprint'],
+                'message': 'Model registered successfully'
+            }
+            
+        except Exception as e:
+            # Check if it's a security error
+            from .model_security import SecurityError
+            if isinstance(e, SecurityError):
+                return {
+                    'status': 'error',
+                    'error_type': ErrorType.SECURITY_ERROR.value,
+                    'message': str(e)
+                }
+            else:
+                logger.error(f"Model registration failed: {e}")
+                import traceback
+                logger.error(f"Traceback:\n{traceback.format_exc()}")
+                return {
+                    'status': 'error',
+                    'error_type': ErrorType.EXECUTION_FAILED.value,
+                    'message': str(e)
+                }
+    
+    async def _execute_model(self, request: Dict) -> Dict:
+        """
+        Execute using model cache (synchronous operation wrapped in async).
+        
+        This runs the actual model execution in a thread pool to avoid blocking.
+        """
+        
+        try:
+            # Run synchronous execution in executor
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: self.model_cache.execute(
+                    fingerprint=request['fingerprint'],
+                    inputs=request['inputs'],
+                    hints=request.get('hints', {})
+                )
+            )
+            
+            return {
+                'status': 'success',
+                'result': self._serialize_tensor(result),
+                'execution_path': 'model_cache',
+                'memory_status': self.model_cache.get_memory_status()
+            }
+        except Exception as e:
+            logger.error(f"Model cache execution failed: {e}")
+            import traceback
+            logger.error(f"Traceback:\n{traceback.format_exc()}")
+            raise
+    
+    async def _fallback_to_graph(self, request: Dict) -> Dict:
+        """
+        Fall back to graph execution.
+        
+        This provides backward compatibility when model cache fails.
+        Note: This fallback requires the client to send a subgraph, which
+        the model cache execution path doesn't provide. So this is mainly
+        for error handling - the client should handle fallback.
+        """
+        
+        # Model cache execution doesn't include subgraph, so we can't fallback here
+        # The client should handle fallback to graph execution
+        return {
+            'status': 'error',
+            'error_type': ErrorType.EXECUTION_FAILED.value,
+            'message': 'Model cache execution failed. Client should fallback to graph execution.',
+            'fallback_required': True
+        }
+    
+    def _request_registration_response(self, fingerprint: str) -> Dict:
+        """Response requesting model registration."""
+        return {
+            'status': 'error',
+            'error_type': ErrorType.MODEL_NOT_FOUND.value,
+            'fingerprint': fingerprint,
+            'required_action': 'register_model',
+            'message': f'Model {fingerprint} not found. Please register first.'
+        }
+    
+    def _timeout_response(self, fingerprint: str) -> Dict:
+        """Response for timeout errors."""
+        return {
+            'status': 'error',
+            'error_type': ErrorType.TIMEOUT.value,
+            'fingerprint': fingerprint,
+            'message': f'Request timed out after {self.timeout_seconds} seconds'
+        }
+    
+    def _circuit_breaker_response(self) -> Dict:
+        """Response when circuit breaker is open."""
+        return {
+            'status': 'error',
+            'error_type': 'circuit_breaker_open',
+            'message': 'Service temporarily unavailable due to errors',
+            'retry_after_seconds': 60
+        }
+    
+    def _handle_fatal_error(self, e: Exception, request: Dict) -> Dict:
+        """Handle fatal errors."""
+        logger.error(f"Fatal error handling request: {e}")
+        logger.error(traceback.format_exc())
+        
+        return {
+            'status': 'error',
+            'error_type': ErrorType.EXECUTION_FAILED.value,
+            'message': str(e),
+            'traceback': traceback.format_exc()
+        }
+    
+    def _error_response(self, message: str, error_type: ErrorType) -> Dict:
+        """Generic error response."""
+        return {
+            'status': 'error',
+            'error_type': error_type.value,
+            'message': message
+        }
+    
+    def _serialize_tensor(self, tensor: torch.Tensor) -> Dict:
+        """Safely serialize tensor."""
+        return {
+            'data': tensor.cpu().numpy().tolist(),
+            'shape': list(tensor.shape),
+            'dtype': str(tensor.dtype)
+        }
+    
+    def reset_circuit_breaker(self):
+        """Reset circuit breaker (for testing or manual recovery)."""
+        self.circuit_breaker_open = False
+        self.error_counts.clear()
+        logger.info("Circuit breaker reset")
+    
+    def get_stats(self) -> Dict:
+        """Get handler statistics."""
+        return {
+            'circuit_breaker_open': self.circuit_breaker_open,
+            'error_counts': dict(self.error_counts),
+            'model_cache_stats': self.model_cache.get_stats()
+        }
+

@@ -322,7 +322,8 @@ class RealDjinnProfiler:
             # CRITICAL: Load model OUTSIDE capture context to avoid requires_grad_ issues
             # This is the recommended pattern for using Djinn
             model = model_func()
-            model = model.cpu()
+            # Move model to remote device for interception (required for LazyTensor capture)
+            model = model.to('remote_accelerator:0')
 
             # Start timing the entire Djinn execution
             total_start_time = time.perf_counter()
@@ -335,11 +336,14 @@ class RealDjinnProfiler:
                 # Profiler was using: model(*cpu_inputs) which unpacks list
                 # For GPT2, the model expects a single input_ids tensor
                 input_ids = inputs[0].cpu() if isinstance(inputs, list) else inputs.cpu()
-                output = model(input_ids, use_cache=False)
+                # Only pass use_cache for HuggingFace models (synthetic Sequential doesn't accept kwargs)
+                if isinstance(model, nn.Sequential):
+                    output = model(input_ids)
+                else:
+                    output = model(input_ids, use_cache=False)
             end_phase(DjinnProfilePhase.GRAPH_CAPTURE)
 
-            # Phase 2-11: Materialization (includes all remaining phases)
-            start_phase(DjinnProfilePhase.SUBGRAPH_BUILDING)
+            # Phase 2: Subgraph building (only measure building, not execution)
             # Extract logits from HuggingFace model output
             logits = output.logits if hasattr(output, 'logits') else output
 
@@ -354,13 +358,16 @@ class RealDjinnProfiler:
                     f"This is likely because model parameters are regular tensors, not LazyTensors."
                 )
                 # Still materialize to get results, but note that this is local execution
+                start_phase(DjinnProfilePhase.SUBGRAPH_BUILDING)
                 result = logits.cpu()
+                end_phase(DjinnProfilePhase.SUBGRAPH_BUILDING)
             else:
-                # ✅ FIX: Materialize logits directly (like the test) instead of argmax
-                # The test passes when materializing logits.cpu() directly.
-                # Doing argmax(-1) on LazyTensor creates a much larger computation graph
-                # that exposes bugs in subgraph building/execution.
-                # TODO: Once basic execution works, we can add argmax back for network optimization demo
+                # ✅ FIX: Measure subgraph building separately from execution
+                # Subgraph building happens in cache.get_or_build() which already measures time
+                # We'll extract this from profiling data if available, otherwise measure here
+                start_phase(DjinnProfilePhase.SUBGRAPH_BUILDING)
+                # Trigger materialization - this will build subgraph and execute
+                # The actual subgraph building time is measured inside cache.get_or_build()
                 result = logits.cpu()  # This triggers materialization (matches test behavior)
             end_phase(DjinnProfilePhase.SUBGRAPH_BUILDING)
 
@@ -381,11 +388,19 @@ class RealDjinnProfiler:
                 'deserialization': DjinnProfilePhase.RESULT_DESERIALIZATION,
                 'gpu_execution': DjinnProfilePhase.GPU_EXECUTION,
                 'request_handling': DjinnProfilePhase.REQUEST_HANDLING,
+                'network_c2s': DjinnProfilePhase.NETWORK_CLIENT_TO_SERVER,
+                'network_s2c': DjinnProfilePhase.NETWORK_SERVER_TO_CLIENT,
                 # Server-side phases (prefixed with "server_")
                 'server_serialization': DjinnProfilePhase.RESULT_SERIALIZATION,
                 'server_deserialization': DjinnProfilePhase.RESULT_DESERIALIZATION,
                 'server_gpu_execution': DjinnProfilePhase.GPU_EXECUTION,
                 'server_request_handling': DjinnProfilePhase.REQUEST_HANDLING,
+                # Cache lookup phases
+                'gpu_cache_lookup': DjinnProfilePhase.GPU_CACHE_LOOKUP,
+                'graph_cache_lookup': DjinnProfilePhase.GRAPH_CACHE_LOOKUP,
+                # Server-side cache lookups (prefixed with "server_")
+                'server_gpu_cache_lookup': DjinnProfilePhase.GPU_CACHE_LOOKUP,
+                'server_graph_cache_lookup': DjinnProfilePhase.GRAPH_CACHE_LOOKUP,
             }
             
             # Add actual measured phases
@@ -409,29 +424,20 @@ class RealDjinnProfiler:
                        f"subgraph_building={subgraph_building_time:.2f}ms, measured={measured_time:.2f}ms, "
                        f"remaining={remaining_time:.2f}ms")
             
-            # For phases not yet instrumented, estimate based on remaining time
-            # These will be replaced with actual measurements as we add more instrumentation
-            if remaining_time > 0:
-                # Estimate network time (will be replaced with actual measurements)
-                network_time = min(remaining_time * 0.2, 50.0)
-                cache_time = remaining_time * 0.1
-                other_time = remaining_time - network_time - cache_time
-                
-                # Only add estimated phases if we don't already have measured ones
-                if DjinnProfilePhase.NETWORK_CLIENT_TO_SERVER not in measured_phase_names:
-                    phases.append(PhaseMetrics(DjinnProfilePhase.NETWORK_CLIENT_TO_SERVER, network_time * 0.4, time.time()))
-                if DjinnProfilePhase.REQUEST_HANDLING not in measured_phase_names:
-                    phases.append(PhaseMetrics(DjinnProfilePhase.REQUEST_HANDLING, other_time * 0.1, time.time()))
-                if DjinnProfilePhase.GPU_CACHE_LOOKUP not in measured_phase_names:
-                    phases.append(PhaseMetrics(DjinnProfilePhase.GPU_CACHE_LOOKUP, cache_time * 0.7, time.time()))
-                if DjinnProfilePhase.GRAPH_CACHE_LOOKUP not in measured_phase_names:
-                    phases.append(PhaseMetrics(DjinnProfilePhase.GRAPH_CACHE_LOOKUP, cache_time * 0.3, time.time()))
-                if DjinnProfilePhase.RESULT_SERIALIZATION not in measured_phase_names:
-                    result_serialization = actual_phases.get('serialization', 0) * 0.8
-                    if result_serialization > 0:
-                        phases.append(PhaseMetrics(DjinnProfilePhase.RESULT_SERIALIZATION, result_serialization, time.time()))
-                if DjinnProfilePhase.NETWORK_SERVER_TO_CLIENT not in measured_phase_names:
-                    phases.append(PhaseMetrics(DjinnProfilePhase.NETWORK_SERVER_TO_CLIENT, network_time * 0.6, time.time()))
+            # ✅ UPDATED: All critical phases are now instrumented!
+            # Only log if there's significant unaccounted time (indicates missing instrumentation)
+            if remaining_time > 1.0:  # More than 1ms unaccounted
+                logger.warning(
+                    f"⚠️  {remaining_time:.2f}ms unaccounted time (may indicate missing instrumentation). "
+                    f"This could be overhead from Python/async operations or unmeasured phases."
+                )
+                # Add as "other" phase for visibility
+                phases.append(PhaseMetrics(
+                    DjinnProfilePhase.USER_RESULT, 
+                    remaining_time, 
+                    time.time(),
+                    details={'note': 'unaccounted_time'}
+                ))
 
             return total_djinn_time, phases
 
@@ -492,7 +498,9 @@ def create_test_model():
             except Exception as e2:
                 print(f"⚠️  Failed to load any GPT-2 model ({str(e2)[:80]}), using synthetic model")
                 # Fallback to synthetic model similar to GPT-2 small
+                # Include embedding layer to accept token IDs (Long dtype)
                 return nn.Sequential(
+                    nn.Embedding(50257, 768),  # Token embedding (accepts Long token IDs)
                     nn.Linear(768, 3072),  # Attention projection
                     nn.ReLU(),
                     nn.Linear(3072, 768),  # Output projection

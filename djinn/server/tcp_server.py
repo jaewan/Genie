@@ -119,8 +119,294 @@ async def execute_subgraph_simple(subgraph: Dict[str, Any], input_data: Dict[str
         return torch.tensor([1.0])
 
 
+async def handle_cache_query(request_data: bytes, writer) -> None:
+    """
+    Handle cache query request from client.
+    
+    Protocol:
+    1. Receive: JSON with {'identifiers': [...]}
+    2. Check cache: which identifiers are cached?
+    3. Respond: JSON with {'cached_identifiers': [...]}
+    
+    This is Phase 1, Component 3 of the enhancement plan.
+    """
+    try:
+        # Parse JSON request
+        request = json.loads(request_data.decode('utf-8'))
+        identifiers = request.get('identifiers', [])
+        
+        logger.debug(f"Cache query: checking {len(identifiers)} identifiers")
+        
+        # Check which identifiers are cached
+        from .gpu_cache import get_global_cache
+        cache = get_global_cache()
+        
+        # Ensure cache is migrated to identifier-based format
+        if hasattr(cache, '_migrate_to_new_format'):
+            cache._migrate_to_new_format()
+        
+        # Lookup in identifier-based cache
+        cached_identifiers = []
+        if hasattr(cache, 'cache_new'):
+            # New identifier-based cache
+            cached_identifiers = [
+                ident for ident in identifiers
+                if ident in cache.cache_new
+            ]
+        elif hasattr(cache, 'cache'):
+            # Old model_id-based cache - check if we can look up by identifier
+            # For now, return empty (cache not migrated yet)
+            logger.debug("Cache not yet migrated to identifier-based format")
+            cached_identifiers = []
+        
+        logger.debug(
+            f"Cache query result: {len(cached_identifiers)}/{len(identifiers)} cached "
+            f"({100*len(cached_identifiers)/len(identifiers):.1f}% hit rate)" if identifiers else "0%"
+        )
+        
+        # Send response using standard message protocol
+        response = {
+            'cached_identifiers': cached_identifiers
+        }
+        response_json = json.dumps(response).encode('utf-8')
+        
+        # Use _send_message for consistent protocol (8-byte length)
+        await _send_message(writer, 0x04, response_json)
+        
+    except Exception as e:
+        logger.error(f"Cache query failed: {e}")
+        import traceback
+        logger.debug(f"Traceback:\n{traceback.format_exc()}")
+        # Send empty response on error (safe fallback)
+        response_json = json.dumps({'cached_identifiers': []}).encode('utf-8')
+        await _send_message(writer, 0x04, response_json)
+
+
+async def handle_register_model(request_data: bytes, writer) -> None:
+    """
+    Handle model registration request.
+    
+    Protocol:
+    1. Receive: Pickled dict with registration data
+    2. Validate security
+    3. Register model in cache
+    4. Respond: Success/error
+    
+    This is Week 2/3 integration.
+    """
+    global STATS
+    
+    try:
+        logger.info(f"📝 Received model registration request ({len(request_data)} bytes)")
+        
+        # Deserialize request
+        try:
+            logger.debug("🔧 Attempting to deserialize request...")
+            request = pickle.loads(request_data)
+            logger.info(f"✅ Request deserialized successfully: {list(request.keys())}")
+        except Exception as e:
+            logger.error(f"❌ Failed to deserialize request: {e}")
+            import traceback
+            logger.error(f"Traceback:\n{traceback.format_exc()}")
+            error_response = {
+                'status': 'error',
+                'message': f"Deserialization failed: {str(e)}"
+            }
+            try:
+                response_bytes = pickle.dumps(error_response)
+                await _send_message(writer, 0x05, response_bytes)
+            except Exception as send_error:
+                logger.error(f"❌ Failed to send error response: {send_error}")
+            return
+        
+        fingerprint = request.get('fingerprint')
+        descriptor = request.get('descriptor')
+        weight_ids = request.get('weight_ids', {})
+        uncached_weights = request.get('uncached_weights', {})
+        architecture_data = request.get('architecture_data')
+        
+        if not fingerprint:
+            raise ValueError("Missing fingerprint in request")
+        
+        logger.info(f"📝 Registering model {fingerprint} ({len(uncached_weights)} weights)")
+        
+        # Initialize resilient handler (singleton pattern)
+        # Use shared handler instance for both registration and execution
+        if not hasattr(handle_register_model, '_shared_handler'):
+            from .resilient_model_handler import ResilientModelHandler
+            handle_register_model._shared_handler = ResilientModelHandler(gpu_id=0)
+            # Also set for execute handler
+            handle_execute_model._shared_handler = handle_register_model._shared_handler
+        
+        handler = handle_register_model._shared_handler
+        
+        # Deserialize uncached weights (base64-encoded pickle)
+        import base64
+        
+        logger.debug(f"🔧 Deserializing {len(uncached_weights)} weights...")
+        deserialized_weights = {}
+        for i, (name, weight_data) in enumerate(uncached_weights.items()):
+            try:
+                if isinstance(weight_data.get('data'), str):
+                    # Base64-encoded pickle format
+                    tensor_bytes = base64.b64decode(weight_data['data'].encode('ascii'))
+                    tensor = pickle.loads(tensor_bytes)
+                else:
+                    # Legacy numpy array format (for backward compatibility)
+                    import numpy as np
+                    tensor_data = np.array(weight_data['data'], dtype=weight_data.get('dtype', 'float32'))
+                    tensor = torch.from_numpy(tensor_data)
+                    if list(tensor.shape) != weight_data['shape']:
+                        tensor = tensor.reshape(weight_data['shape'])
+                deserialized_weights[name] = tensor
+                
+                if (i + 1) % 10 == 0:
+                    logger.debug(f"  Deserialized {i + 1}/{len(uncached_weights)} weights")
+            except Exception as e:
+                logger.error(f"❌ Failed to deserialize weight {name}: {e}")
+                raise
+        
+        logger.info(f"✅ Deserialized {len(deserialized_weights)} weights")
+        
+        # Register model
+        logger.debug(f"🔧 Registering model with handler...")
+        try:
+            response = await handler._register_with_recovery({
+                'fingerprint': fingerprint,
+                'descriptor': descriptor,
+                'weight_ids': weight_ids,
+                'uncached_weights': deserialized_weights,
+                'architecture_data': architecture_data
+            })
+            logger.debug(f"✅ Handler returned response: {response.get('status')}")
+        except Exception as e:
+            logger.error(f"❌ Handler registration failed: {e}")
+            import traceback
+            logger.debug(f"Traceback:\n{traceback.format_exc()}")
+            raise
+        
+        # Send response
+        logger.debug(f"📤 Sending response...")
+        try:
+            response_bytes = pickle.dumps(response)
+            await _send_message(writer, 0x05, response_bytes)
+            logger.info(f"✅ Response sent successfully")
+        except Exception as e:
+            logger.error(f"❌ Failed to send response: {e}")
+            import traceback
+            logger.debug(f"Traceback:\n{traceback.format_exc()}")
+            raise
+        
+        if response.get('status') == 'success':
+            STATS['requests_success'] += 1
+        else:
+            STATS['requests_failed'] += 1
+        
+    except Exception as e:
+        logger.error(f"❌ Model registration failed: {e}")
+        import traceback
+        logger.error(f"Full traceback:\n{traceback.format_exc()}")
+        
+        try:
+            error_response = {
+                'status': 'error',
+                'message': str(e)
+            }
+            response_bytes = pickle.dumps(error_response)
+            await _send_message(writer, 0x05, response_bytes)
+        except Exception as send_error:
+            logger.error(f"❌ Failed to send error response: {send_error}")
+            # Connection might be closed, can't send error
+        STATS['requests_failed'] += 1
+
+
+async def handle_execute_model(request_data: bytes, writer) -> None:
+    """
+    Handle model execution request.
+    
+    Protocol:
+    1. Receive: Pickled dict with fingerprint + inputs
+    2. Execute via model cache
+    3. Respond: Result tensor
+    
+    This is Week 2/3 integration.
+    """
+    global STATS
+    
+    try:
+        # Deserialize request
+        request = pickle.loads(request_data)
+        
+        fingerprint = request['fingerprint']
+        inputs = request['inputs']
+        hints = request.get('hints', {})
+        
+        logger.info(f"Executing model {fingerprint}")
+        
+        # Initialize resilient handler (singleton pattern)
+        # Use shared handler instance for both registration and execution
+        if not hasattr(handle_execute_model, '_shared_handler'):
+            # Check if register handler already created one
+            if hasattr(handle_register_model, '_shared_handler'):
+                handle_execute_model._shared_handler = handle_register_model._shared_handler
+            else:
+                from .resilient_model_handler import ResilientModelHandler
+                handle_execute_model._shared_handler = ResilientModelHandler(gpu_id=0)
+                handle_register_model._shared_handler = handle_execute_model._shared_handler
+        
+        handler = handle_execute_model._shared_handler
+        
+        # Deserialize inputs
+        deserialized_inputs = {}
+        for key, value in inputs.items():
+            if isinstance(value, dict) and 'data' in value:
+                import numpy as np
+                # Fix dtype conversion - handle torch dtype strings
+                dtype_str = value.get('dtype', 'float32')
+                if dtype_str.startswith('torch.'):
+                    dtype_str = dtype_str.replace('torch.', '')
+                
+                tensor_data = np.array(value['data'], dtype=dtype_str)
+                tensor = torch.from_numpy(tensor_data)
+                if list(tensor.shape) != value['shape']:
+                    tensor = tensor.reshape(value['shape'])
+                deserialized_inputs[key] = tensor
+            else:
+                deserialized_inputs[key] = value
+        
+        # Execute model
+        response = await handler.handle_request({
+            'type': 'EXECUTE_MODEL',
+            'fingerprint': fingerprint,
+            'inputs': deserialized_inputs,
+            'hints': hints
+        })
+        
+        # Send response
+        response_bytes = pickle.dumps(response)
+        await _send_message(writer, 0x06, response_bytes)
+        
+        if response.get('status') == 'success':
+            STATS['requests_success'] += 1
+        else:
+            STATS['requests_failed'] += 1
+        
+    except Exception as e:
+        logger.error(f"Model execution failed: {e}")
+        import traceback
+        logger.debug(f"Traceback:\n{traceback.format_exc()}")
+        
+        error_response = {
+            'status': 'error',
+            'message': str(e)
+        }
+        response_bytes = pickle.dumps(error_response)
+        await _send_message(writer, 0x06, response_bytes)
+        STATS['requests_failed'] += 1
+
+
 async def handle_coordinator_subgraph(request_data: bytes, writer) -> None:
-    """Handle subgraph execution request from coordinator (pickled format)."""
+    """Handle subgraph execution request from coordinator (V1 pickle or V2 binary format)."""
     global STATS
 
     try:
@@ -128,29 +414,83 @@ async def handle_coordinator_subgraph(request_data: bytes, writer) -> None:
         print(f"🧪 SERVER: Received subgraph request, data length: {len(request_data)}")
         logger.info(f"🧪 SERVER: Received subgraph request, data length: {len(request_data)}")
 
-        # Parse coordinator's pickled message
-        try:
-            message = pickle.loads(request_data)
-            logger.info(f"🧪 SERVER: Coordinator message keys: {list(message.keys())}")
-            logger.info(f"🧪 SERVER: Message subgraph_data keys: {list(message.get('subgraph_data', {}).keys()) if isinstance(message.get('subgraph_data'), dict) else 'N/A'}")
-        except Exception as e:
-            error_msg = f"{type(e).__name__}: {str(e)}"
-            logger.error(f"Failed to unpickle coordinator message: {error_msg}")
-            error_response = f"Failed to parse message: {error_msg}".encode('utf-8')
-            await _send_message(writer, 0x05, error_response)
-            return
-
-        # Extract data from coordinator message
-        subgraph_data = message.get('subgraph_data', {})
-        # ✅ FIX: input_data is at the top level of the message, not nested in subgraph_data
-        input_data_pickled = message.get('input_data', {})
-        if not input_data_pickled:
-            # Fallback: check if it's nested in subgraph_data (old format)
-            input_data_pickled = subgraph_data.get('input_data', {})
-        timeout = message.get('timeout', 30)
+        # ✅ PHASE 2: Detect serialization format
+        # V2_BINARY format: [version (1)][metadata_size (4)][metadata_json][tensor_blob]
+        # V1_PICKLE format: pickled dict
+        # Try to detect V2 by checking first byte (should be 1 or 2 for SerializationVersion)
+        use_v2 = False
+        message = None
+        subgraph_data = None
+        input_data_pickled = None
+        cached_identifiers = []
+        cached_identifier_map = {}
+        uncached_identifier_map = {}
+        timeout = 30
         
-        logger.info(f"🔍 Message keys: {list(message.keys())}")
-        logger.info(f"🔍 input_data_pickled keys: {list(input_data_pickled.keys())}")
+        if len(request_data) >= 1:
+            first_byte = request_data[0]
+            # V2_BINARY uses SerializationVersion enum (1 or 2)
+            if first_byte in (1, 2):  # V1_PICKLE=1, V2_BINARY=2
+                try:
+                    from .fast_serialization import FastSerializer, SerializationVersion
+                    # Try to deserialize as V2_BINARY
+                    subgraph_message, input_data = FastSerializer.deserialize_subgraph(request_data)
+                    use_v2 = True
+                    logger.info("✅ Using V2_BINARY fast serialization format")
+                    
+                    # Extract data from SubgraphMessage
+                    subgraph_data = {
+                        'type': 'full_subgraph',
+                        'subgraph': {
+                            'operations': subgraph_message.operations,
+                            'output_id': subgraph_message.output_id
+                        }
+                    }
+                    # Convert input_data dict to pickled format (for compatibility with existing code)
+                    import pickle
+                    input_data_pickled = {k: pickle.dumps(v) for k, v in input_data.items()}
+                    cached_identifiers = subgraph_message.cached_identifiers
+                    cached_identifier_map = subgraph_message.cached_identifier_map
+                    uncached_identifier_map = subgraph_message.uncached_identifier_map
+                except (ImportError, ValueError, Exception) as e:
+                    logger.debug(f"V2 deserialization failed: {e}, trying V1 pickle")
+                    use_v2 = False
+        
+        # Fallback to V1_PICKLE format
+        if not use_v2:
+            try:
+                message = pickle.loads(request_data)
+                logger.info("✅ Using V1_PICKLE serialization format (compatibility mode)")
+                logger.info(f"🧪 SERVER: Coordinator message keys: {list(message.keys())}")
+                logger.info(f"🧪 SERVER: Message subgraph_data keys: {list(message.get('subgraph_data', {}).keys()) if isinstance(message.get('subgraph_data'), dict) else 'N/A'}")
+            except Exception as e:
+                error_msg = f"{type(e).__name__}: {str(e)}"
+                logger.error(f"Failed to parse coordinator message (both V1 and V2 failed): {error_msg}")
+                error_response = f"Failed to parse message: {error_msg}".encode('utf-8')
+                await _send_message(writer, 0x05, error_response)
+                return
+
+        # Extract data from coordinator message (V1 format)
+        if not use_v2:
+            subgraph_data = message.get('subgraph_data', {})
+            # ✅ FIX: input_data is at the top level of the message, not nested in subgraph_data
+            input_data_pickled = message.get('input_data', {})
+            if not input_data_pickled:
+                # Fallback: check if it's nested in subgraph_data (old format)
+                input_data_pickled = subgraph_data.get('input_data', {})
+            
+            # ✅ PHASE 1: Extract cached identifiers (NEW)
+            cached_identifiers = message.get('cached_identifiers', [])
+            cached_identifier_map = message.get('cached_identifier_map', {})
+            uncached_identifier_map = message.get('uncached_identifier_map', {})
+            timeout = message.get('timeout', 30)
+        
+        if cached_identifiers:
+            logger.info(f"📦 Received {len(cached_identifiers)} cached identifiers, {len(input_data_pickled)} tensors to deserialize")
+        
+        if not use_v2 and message:
+            logger.info(f"🔍 Message keys: {list(message.keys())}")
+        logger.info(f"🔍 input_data_pickled keys: {list(input_data_pickled.keys()) if input_data_pickled else 'None'}")
         logger.info(f"🔍 subgraph_data keys: {list(subgraph_data.keys()) if isinstance(subgraph_data, dict) else type(subgraph_data)}")
 
         # Handle differential graph protocol
@@ -164,11 +504,28 @@ async def handle_coordinator_subgraph(request_data: bytes, writer) -> None:
 
         # Deserialize input tensors
         input_data = {}
+        meta_tensors_filtered = 0
         try:
             for key, pickled_tensor in input_data_pickled.items():
                 if isinstance(pickled_tensor, bytes):
-                    input_data[key] = pickle.loads(pickled_tensor)
+                    tensor = pickle.loads(pickled_tensor)
+                    # ✅ FIX: Filter meta tensors after deserialization (final defense)
+                    if isinstance(tensor, torch.Tensor) and tensor.device.type == 'meta':
+                        logger.warning(
+                            f"⚠️  Deserialized meta tensor[{key}] - filtering before execution. "
+                            f"Meta tensors cannot be moved to GPU. This should have been filtered on client."
+                        )
+                        meta_tensors_filtered += 1
+                        continue
+                    input_data[key] = tensor
                 else:
+                    # ✅ FIX: Also check non-pickled tensors
+                    if isinstance(pickled_tensor, torch.Tensor) and pickled_tensor.device.type == 'meta':
+                        logger.warning(
+                            f"⚠️  Non-pickled meta tensor[{key}] - filtering before execution."
+                        )
+                        meta_tensors_filtered += 1
+                        continue
                     input_data[key] = pickled_tensor
         except Exception as e:
             error_msg = f"{type(e).__name__}: {str(e)}"
@@ -176,6 +533,76 @@ async def handle_coordinator_subgraph(request_data: bytes, writer) -> None:
             error_response = f"Failed to deserialize inputs: {error_msg}".encode('utf-8')
             await _send_message(writer, 0x05, error_response)
             return
+        
+        if meta_tensors_filtered > 0:
+            logger.warning(
+                f"⚠️  Filtered {meta_tensors_filtered} meta tensor(s) after deserialization. "
+                f"This may cause execution errors if these tensors are needed."
+            )
+        
+        # ✅ PHASE 1: Resolve cached identifiers from GPU cache (NEW)
+        # Extract cached identifier map (V1 format only - V2 already extracted above)
+        if not use_v2 and message:
+            cached_identifier_map = message.get('cached_identifier_map', {})
+        if cached_identifiers:
+            from .gpu_cache import get_global_cache
+            cache = get_global_cache()
+            cache._migrate_to_new_format()
+            
+            # Resolve cached tensors and map to original tensor_id_str
+            cached_tensors = {}
+            for identifier in cached_identifiers:
+                if identifier in cache.cache_new:
+                    # Get cached tensor (already on GPU)
+                    cached_tensor = cache.cache_new[identifier]
+                    
+                    # Map back to original tensor_id_str using the mapping
+                    tensor_id_str = cached_identifier_map.get(identifier)
+                    if tensor_id_str:
+                        # Add with original tensor_id_str key (operations expect this)
+                        cached_tensors[tensor_id_str] = cached_tensor.cpu()  # Move to CPU for consistency
+                        logger.debug(f"✓ Resolved cached tensor: {identifier} → {tensor_id_str}")
+                    else:
+                        logger.warning(
+                            f"⚠️  No tensor_id_str mapping for cached identifier {identifier}. "
+                            f"Using identifier as key."
+                        )
+                        cached_tensors[f"cached:{identifier}"] = cached_tensor.cpu()
+                else:
+                    logger.warning(
+                        f"⚠️  Identifier {identifier} marked as cached but not found in cache! "
+                        f"Client cache state may be stale. This could happen if: "
+                        f"(1) server restarted, (2) cache was evicted, or (3) migration incomplete."
+                    )
+            
+            # Merge cached tensors into input_data
+            input_data.update(cached_tensors)
+            logger.info(
+                f"🔍 Tensor resolution: {len(input_data)} total tensors "
+                f"({len(cached_tensors)} from cache, {len(input_data_pickled)} transferred)"
+            )
+        
+        # ✅ PHASE 1: Cache uncached tensors for future requests (NEW)
+        # Extract uncached identifier map (V1 format only - V2 already extracted above)
+        if not use_v2 and message:
+            uncached_identifier_map = message.get('uncached_identifier_map', {})
+        if uncached_identifier_map:
+            from .gpu_cache import get_global_cache
+            cache = get_global_cache()
+            cache._migrate_to_new_format()
+            
+            # Cache newly received tensors by identifier
+            tensors_to_cache = {}
+            for tensor_id_str, identifier in uncached_identifier_map.items():
+                if tensor_id_str in input_data:
+                    tensor = input_data[tensor_id_str]
+                    if isinstance(tensor, torch.Tensor):
+                        tensors_to_cache[identifier] = tensor
+            
+            if tensors_to_cache:
+                # Use new identifier-based cache API
+                cache.get_weights_by_identifier(tensors_to_cache)
+                logger.debug(f"💾 Cached {len(tensors_to_cache)} new tensors by identifier")
 
         # Execute subgraph
         try:
@@ -455,8 +882,12 @@ async def handle_execute_operation(request_data: bytes, writer) -> None:
 
 
 async def _send_message(writer, message_type: int, data: bytes) -> None:
-    """Send length-prefixed message."""
-    message = struct.pack('>BI', message_type, len(data)) + data
+    """Send length-prefixed message.
+    
+    Protocol: [message_type (1 byte)] [size (8 bytes)] [data]
+    Matches _recv_message protocol for large messages.
+    """
+    message = struct.pack('>BQ', message_type, len(data)) + data  # Q = 8-byte unsigned long long
     writer.write(message)
     await writer.drain()
 
@@ -468,25 +899,31 @@ async def _recv_message(reader, timeout: float = 300.0) -> Tuple[int, bytes]:
     Updated to support large messages > 4GB (for model weights).
     """
     try:
+        logger.debug("📥 Reading message type...")
         # Read message type (1 byte)
         msg_type_bytes = await asyncio.wait_for(
             reader.readexactly(1),
             timeout=timeout
         )
         msg_type = msg_type_bytes[0]
+        logger.debug(f"📥 Message type: {msg_type} (0x{msg_type:02x})")
         
         # Read size (8 bytes for large messages)
+        logger.debug("📥 Reading message length...")
         size_bytes = await asyncio.wait_for(
             reader.readexactly(8),
             timeout=timeout
         )
         length = int.from_bytes(size_bytes, 'big')
+        logger.debug(f"📥 Message length: {length} bytes")
         
         # Read data
+        logger.debug(f"📥 Reading {length} bytes of data...")
         data = await asyncio.wait_for(
             reader.readexactly(length),
             timeout=timeout
         )
+        logger.debug(f"✅ Received complete message: type={msg_type}, length={length}")
         return msg_type, data
     except asyncio.TimeoutError:
         raise RuntimeError("Message reception timeout")
@@ -501,9 +938,18 @@ async def handle_connection(reader: asyncio.StreamReader, writer: asyncio.Stream
     logger.info(f"✅ New connection from {client_addr}")
 
     try:
+        logger.debug(f"🔍 Entering message loop for {client_addr}")
         while not reader.at_eof():
+            logger.debug(f"🔍 Waiting for message from {client_addr}...")
             # Receive message
-            msg_type, data = await _recv_message(reader)
+            try:
+                msg_type, data = await _recv_message(reader)
+                logger.info(f"📨 Received message type {msg_type} (0x{msg_type:02x}) from {client_addr}, {len(data)} bytes")
+            except Exception as recv_error:
+                logger.error(f"❌ Error receiving message from {client_addr}: {recv_error}")
+                import traceback
+                logger.error(f"Traceback:\n{traceback.format_exc()}")
+                raise
 
             STATS['requests_total'] += 1
 
@@ -519,17 +965,48 @@ async def handle_connection(reader: asyncio.StreamReader, writer: asyncio.Stream
                 logger.info("📊 Handling EXECUTE_SUBGRAPH (coordinator)")
                 await handle_coordinator_subgraph(data, writer)
 
+            elif msg_type == 0x04:  # CACHE_QUERY (NEW - Phase 1)
+                logger.debug("📊 Handling CACHE_QUERY")
+                await handle_cache_query(data, writer)
+
+            elif msg_type == 0x05:  # REGISTER_MODEL (NEW - Week 2/3)
+                logger.info(f"📊 Handling REGISTER_MODEL (received {len(data)} bytes)")
+                try:
+                    await handle_register_model(data, writer)
+                    logger.info("✅ REGISTER_MODEL handler completed")
+                except Exception as e:
+                    import traceback
+                    logger.error(f"❌ REGISTER_MODEL handler failed: {e}")
+                    logger.error(f"Traceback:\n{traceback.format_exc()}")
+                    # Re-raise to be caught by outer exception handler
+                    raise
+
+            elif msg_type == 0x06:  # EXECUTE_MODEL (NEW - Week 2/3)
+                logger.info("📊 Handling EXECUTE_MODEL")
+                await handle_execute_model(data, writer)
+
             else:
                 logger.warning(f"Unknown message type: {msg_type}")
-                await _send_message(writer, 0x05, b"Unknown message type")
+                await _send_message(writer, 0xFF, b"Unknown message type")
 
     except asyncio.IncompleteReadError:
-        logger.info(f"Client {client_addr} disconnected")
+        logger.info(f"Client {client_addr} disconnected (incomplete read)")
     except Exception as e:
-        logger.error(f"Error handling connection: {e}")
+        import traceback
+        logger.error(f"❌ Error handling connection from {client_addr}: {e}")
+        logger.error(f"Full traceback:\n{traceback.format_exc()}")
+        # Try to send error response before closing
+        try:
+            error_msg = f"Server error: {str(e)}".encode('utf-8')
+            await _send_message(writer, 0xFF, error_msg)
+        except:
+            pass  # Connection might already be closed
     finally:
-        writer.close()
-        await writer.wait_closed()
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except:
+            pass
         logger.info(f"Connection from {client_addr} closed")
 
 

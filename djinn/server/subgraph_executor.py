@@ -170,6 +170,128 @@ class SubgraphExecutor:
             logger.info(f"🚀 Executing {total_ops} operations in topological order")
             logger.info(f"   Available input tensor IDs: {list(context.tensors.keys())}")
             
+            # ✅ PROFILING: Measure GPU execution time
+            try:
+                from .profiling_context import get_profiler, record_phase
+                profiler = get_profiler()
+                if profiler and profiler.enabled:
+                    with record_phase('gpu_execution', metadata={
+                        'operation_count': total_ops,
+                        'input_count': len(input_data)
+                    }):
+                        # Progress tracking for large subgraphs
+                        progress_interval = max(1, total_ops // 20)  # Log every 5%
+                        
+                        for op_idx, op_spec in enumerate(subgraph_request['operations']):
+                            self.stats['operations_executed'] += 1
+                            
+                            # Log progress for large subgraphs
+                            if op_idx % progress_interval == 0 or op_idx == total_ops - 1:
+                                logger.info(f"   Progress: {op_idx+1}/{total_ops} operations ({100*(op_idx+1)/total_ops:.1f}%)")
+                            
+                            # Debug: Log operation details (only for first few and last few)
+                            if op_idx < 5 or op_idx >= total_ops - 5:
+                                op_id = op_spec.get('op_id', 'unknown')
+                                op_name = op_spec.get('operation', 'unknown')
+                                input_ids = op_spec.get('inputs', [])
+                                logger.debug(
+                                    f"  Operation {op_idx+1}/{total_ops}: {op_name} "
+                                    f"(op_id={op_id}, inputs={input_ids})"
+                                )
+
+                            result = self._execute_operation(op_spec, context, subgraph_request)
+                            
+                            # ✅ FIX: Handle operations that return non-tensor values (bool, int, etc.)
+                            # Some operations like _has_compatible_shallow_copy_type return bool
+                            # We need to handle these gracefully instead of assuming all ops return tensors
+                            if isinstance(result, torch.Tensor):
+                                context.tensors[op_spec['op_id']] = result
+                                if op_idx < 5 or op_idx >= total_ops - 5:
+                                    logger.debug(
+                                        "      op[%s] result device=%s shape=%s",
+                                        op_spec['op_id'],
+                                        result.device,
+                                        tuple(result.shape) if hasattr(result, 'shape') else "n/a",
+                                    )
+                            else:
+                                # Non-tensor result (bool, int, etc.) - store as-is but log warning
+                                # These operations shouldn't typically be in subgraphs, but handle gracefully
+                                logger.warning(
+                                    f"⚠️  Operation {op_spec.get('operation', 'unknown')} returned non-tensor: {type(result).__name__} = {result}"
+                                )
+                                context.tensors[op_spec['op_id']] = result
+                                if op_idx < 5 or op_idx >= total_ops - 5:
+                                    logger.debug(
+                                        "      op[%s] result type=%s value=%s",
+                                        op_spec['op_id'],
+                                        type(result).__name__,
+                                        result,
+                                    )
+
+                            # Check memory usage
+                            if torch.cuda.is_available():
+                                memory_mb = torch.cuda.memory_allocated(self.gpu_id) / 1024 / 1024
+                                self.stats['memory_peak_mb'] = max(self.stats['memory_peak_mb'], memory_mb)
+                                logger.debug(f"GPU memory: {memory_mb:.1f}MB")
+                else:
+                    # No profiling - execute normally
+                    # Progress tracking for large subgraphs
+                    progress_interval = max(1, total_ops // 20)  # Log every 5%
+                    
+                    for op_idx, op_spec in enumerate(subgraph_request['operations']):
+                        self.stats['operations_executed'] += 1
+                        
+                        # Log progress for large subgraphs
+                        if op_idx % progress_interval == 0 or op_idx == total_ops - 1:
+                            logger.info(f"   Progress: {op_idx+1}/{total_ops} operations ({100*(op_idx+1)/total_ops:.1f}%)")
+                        
+                        # Debug: Log operation details (only for first few and last few)
+                        if op_idx < 5 or op_idx >= total_ops - 5:
+                            op_id = op_spec.get('op_id', 'unknown')
+                            op_name = op_spec.get('operation', 'unknown')
+                            input_ids = op_spec.get('inputs', [])
+                            logger.debug(
+                                f"  Operation {op_idx+1}/{total_ops}: {op_name} "
+                                f"(op_id={op_id}, inputs={input_ids})"
+                            )
+
+                        result = self._execute_operation(op_spec, context, subgraph_request)
+                        
+                        # ✅ FIX: Handle operations that return non-tensor values (bool, int, etc.)
+                        # Some operations like _has_compatible_shallow_copy_type return bool
+                        # We need to handle these gracefully instead of assuming all ops return tensors
+                        if isinstance(result, torch.Tensor):
+                            context.tensors[op_spec['op_id']] = result
+                            if op_idx < 5 or op_idx >= total_ops - 5:
+                                logger.debug(
+                                    "      op[%s] result device=%s shape=%s",
+                                    op_spec['op_id'],
+                                    result.device,
+                                    tuple(result.shape) if hasattr(result, 'shape') else "n/a",
+                                )
+                        else:
+                            # Non-tensor result (bool, int, etc.) - store as-is but log warning
+                            # These operations shouldn't typically be in subgraphs, but handle gracefully
+                            logger.warning(
+                                f"⚠️  Operation {op_spec.get('operation', 'unknown')} returned non-tensor: {type(result).__name__} = {result}"
+                            )
+                            context.tensors[op_spec['op_id']] = result
+                            if op_idx < 5 or op_idx >= total_ops - 5:
+                                logger.debug(
+                                    "      op[%s] result type=%s value=%s",
+                                    op_spec['op_id'],
+                                    type(result).__name__,
+                                    result,
+                                )
+
+                        # Check memory usage
+                        if torch.cuda.is_available():
+                            memory_mb = torch.cuda.memory_allocated(self.gpu_id) / 1024 / 1024
+                            self.stats['memory_peak_mb'] = max(self.stats['memory_peak_mb'], memory_mb)
+                            logger.debug(f"GPU memory: {memory_mb:.1f}MB")
+            except ImportError:
+                # Fallback if profiling not available
+                pass
             # Progress tracking for large subgraphs
             progress_interval = max(1, total_ops // 20)  # Log every 5%
             

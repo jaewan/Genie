@@ -610,7 +610,8 @@ class DjinnCoordinator:
                                       target: str,
                                       timeout: float = 300,  # Increased default timeout for large subgraphs
                                       graph_id: Optional[str] = None,
-                                      enable_differential: bool = True) -> torch.Tensor:
+                                      enable_differential: bool = True,
+                                      model: Optional[torch.nn.Module] = None) -> torch.Tensor:
         """
         Execute subgraph remotely (O(1) network transfer).
 
@@ -622,6 +623,9 @@ class DjinnCoordinator:
             input_data: Dict of tensor_id -> input tensor for external inputs
             target: Server address ('hostname:port')
             timeout: Max wait time in seconds
+            graph_id: Optional graph identifier for differential updates
+            enable_differential: Whether to enable differential protocol
+            model: Optional model instance (for model cache integration)
 
         Returns:
             Result tensor (on CPU)
@@ -632,10 +636,142 @@ class DjinnCoordinator:
         import pickle
         import time
 
+        # ✅ NEW: Try model cache first if model is provided
+        if model is not None:
+            try:
+                from .enhanced_model_manager import EnhancedModelManager
+                from .model_tracker import get_model_tracker
+                
+                manager = EnhancedModelManager(coordinator=self)
+                tracker = get_model_tracker()
+                
+                # Compute fingerprint
+                from .model_fingerprint import ModelFingerprint
+                fingerprint = ModelFingerprint.compute(model)
+                
+                # Track model if not already tracked
+                if not tracker.is_registered(fingerprint):
+                    tracker.track_model(model, fingerprint)
+                
+                # Try model cache execution
+                if manager.use_model_cache:
+                    try:
+                        # Convert input_data to dict format expected by execute_model
+                        # Assume first input is the main input
+                        inputs_dict = {}
+                        if len(input_data) == 1:
+                            # Single input - use 'x' as key
+                            inputs_dict['x'] = list(input_data.values())[0]
+                        else:
+                            # Multiple inputs - use tensor_id as key
+                            inputs_dict = {k: v for k, v in input_data.items()}
+                        
+                        logger.info(f"🎯 Attempting model cache execution for {fingerprint}")
+                        result = await manager.execute_model(model, inputs_dict)
+                        logger.info(f"✅ Model cache execution successful: {result.shape}")
+                        return result
+                    except Exception as e:
+                        logger.debug(f"Model cache execution failed: {e}, falling back to graph execution")
+                        # Fall through to graph execution
+            except Exception as e:
+                logger.debug(f"Model cache integration error: {e}, using graph execution")
+                # Fall through to graph execution
+        
+        # ✅ NEW: Also try to detect model from input tensors (automatic detection)
+        try:
+            from .model_tracker import get_model_tracker
+            tracker = get_model_tracker()
+            
+            # Check if any input tensor belongs to a registered model
+            detected_fingerprint = None
+            for tensor_id_str, tensor in input_data.items():
+                if isinstance(tensor, torch.Tensor):
+                    fingerprint = tracker.get_model_fingerprint(tensor)
+                    if fingerprint and tracker.is_registered(fingerprint):
+                        detected_fingerprint = fingerprint
+                        logger.debug(f"🎯 Auto-detected registered model {fingerprint} from input tensor")
+                        break
+            
+            # If we detected a model but don't have the instance, we can't use model cache
+            # (we need the model instance to call execute_model)
+            # This is a limitation - we'd need to store model instances in the tracker
+            # For now, we'll just log and use graph execution
+            if detected_fingerprint:
+                logger.debug(f"⚠️  Detected model {detected_fingerprint} but no model instance available, using graph execution")
+        except Exception as e:
+            logger.debug(f"Auto model detection failed: {e}")
+            # Fall through to graph execution
+
         logger.info(f"🚀 Subgraph execution: {len(subgraph.get('operations', []))} ops, "
                    f"{len(input_data)} inputs → {target}")
 
         start_time = time.perf_counter()
+
+        # ✅ PHASE 1: Cache query optimization (NEW)
+        # Convert tensor IDs to stable identifiers and query cache
+        from .cache_query import get_cache_query_client
+        from .model_registry import get_model_registry
+        
+        cache_client = get_cache_query_client()
+        registry = get_model_registry()
+        
+        # Map tensors to stable identifiers
+        tensor_identifiers = {}  # tensor_id_str → identifier
+        identifier_to_tensor_id = {}  # identifier → tensor_id_str (for server mapping)
+        
+        for tensor_id_str, tensor in input_data.items():
+            if isinstance(tensor, torch.Tensor):
+                identity = registry.get_identity(tensor)
+                tensor_identifiers[tensor_id_str] = identity.identifier
+                identifier_to_tensor_id[identity.identifier] = tensor_id_str
+        
+        # Query cache for which identifiers are cached
+        query_start = time.perf_counter()
+        cache_query_result = await cache_client.query_cached_identifiers(
+            target,
+            set(tensor_identifiers.values()),
+            use_local_cache=True
+        )
+        query_time = (time.perf_counter() - query_start) * 1000
+        
+        logger.info(
+            f"📊 Cache query: {len(cache_query_result.cached_identifiers)}/{len(tensor_identifiers)} cached "
+            f"({cache_query_result.cache_hit_rate:.1f}% hit rate, {query_time:.1f}ms)"
+        )
+        
+        # Filter tensors: only send uncached ones
+        # Also filter out meta tensors (they have no data and can't be sent)
+        tensors_to_send = {}
+        meta_tensors_filtered = 0
+        for tensor_id_str, identifier in tensor_identifiers.items():
+            if identifier in cache_query_result.missing_identifiers:
+                tensor = input_data[tensor_id_str]
+                # ✅ FIX: Filter meta tensors before sending (defense in depth)
+                if isinstance(tensor, torch.Tensor) and tensor.device.type == 'meta':
+                    logger.warning(
+                        f"⚠️  Filtering meta tensor[{tensor_id_str}] before sending to server. "
+                        f"Meta tensors have no data and cannot be transferred. "
+                        f"This should have been filtered earlier in subgraph building."
+                    )
+                    meta_tensors_filtered += 1
+                    continue
+                tensors_to_send[tensor_id_str] = tensor
+        
+        if meta_tensors_filtered > 0:
+            logger.warning(
+                f"⚠️  Filtered {meta_tensors_filtered} meta tensor(s) from input_data. "
+                f"This may cause execution errors if these tensors are actually needed."
+            )
+        
+        # Calculate transfer savings
+        total_size = sum(t.element_size() * t.numel() for t in input_data.values())
+        transfer_size = sum(t.element_size() * t.numel() for t in tensors_to_send.values())
+        savings = 100 * (1 - transfer_size / total_size) if total_size > 0 else 0
+        
+        logger.info(
+            f"💾 Transfer optimization: {len(tensors_to_send)}/{len(input_data)} tensors to send "
+            f"({transfer_size / 1e6:.1f}MB / {total_size / 1e6:.1f}MB, {savings:.1f}% savings)"
+        )
 
         try:
             # ✅ Week 3: Use DifferentialGraphProtocol for iterative workloads
@@ -673,23 +809,88 @@ class DjinnCoordinator:
                 timeout=5.0
             )
 
-            # Prepare message
-            message = {
-                'type': 0x03,  # EXECUTE_SUBGRAPH (from tcp_server.py)
-                'subgraph_data': message_data,  # Use processed graph data
-                'input_data': {
-                    k: pickle.dumps(v) for k, v in input_data.items()
-                },
-                'timeout': timeout
+            # Prepare message with cached identifiers and mapping
+            # Map cached identifiers to their original tensor_id_str for server resolution
+            cached_identifier_map = {
+                identifier: identifier_to_tensor_id[identifier]
+                for identifier in cache_query_result.cached_identifiers
+                if identifier in identifier_to_tensor_id
             }
-
-            # Send subgraph request with proper protocol
-            print(f"CLIENT: Sending message with keys: {list(message.keys())}")
-            print(f"CLIENT: subgraph_data keys: {list(message.get('subgraph_data', {}).keys())}")
-            subgraph = message.get('subgraph_data', {}).get('subgraph', {})
-            print(f"CLIENT: subgraph keys: {list(subgraph.keys()) if isinstance(subgraph, dict) else type(subgraph)}")
-
-            data = pickle.dumps(message)
+            
+            # Map uncached tensors to their identifiers (so server can cache them)
+            uncached_identifier_map = {
+                tensor_id_str: tensor_identifiers[tensor_id_str]
+                for tensor_id_str in tensors_to_send.keys()
+                if tensor_id_str in tensor_identifiers
+            }
+            
+            # ✅ PHASE 2: Negotiate protocol version and serialize
+            try:
+                from djinn.server.fast_serialization import (
+                    FastSerializer,
+                    get_protocol_negotiator,
+                    SerializationVersion
+                )
+                
+                negotiator = get_protocol_negotiator()
+                version = await negotiator.negotiate_version(target)
+                
+                # Serialize with negotiated version
+                if version == SerializationVersion.V2_BINARY:
+                    logger.debug("Using fast binary serialization (V2)")
+                    # Extract subgraph from message_data
+                    subgraph_dict = message_data.get('subgraph', {}) if isinstance(message_data, dict) else message_data
+                    
+                    try:
+                        # Serialize with FastSerializer
+                        data = FastSerializer.serialize_subgraph(
+                            subgraph=subgraph_dict,
+                            input_data=tensors_to_send,
+                            version=version,
+                            graph_id=graph_id,
+                            cached_identifiers=list(cache_query_result.cached_identifiers),
+                            cached_identifier_map=cached_identifier_map,
+                            uncached_identifier_map=uncached_identifier_map,
+                        )
+                        # Message type for V2_BINARY format
+                        message_type = (0x03).to_bytes(1, 'big')  # EXECUTE_SUBGRAPH coordinator
+                    except (TypeError, ValueError, AttributeError) as e:
+                        # FastSerializer failed (e.g., non-serializable objects), fall back to pickle
+                        logger.warning(f"FastSerializer failed ({type(e).__name__}: {str(e)[:100]}), falling back to pickle")
+                        version = SerializationVersion.V1_PICKLE  # Force V1 for fallback
+                        raise  # Re-raise to trigger V1_PICKLE path below
+                else:
+                    # Fallback to pickle (V1, compatibility mode)
+                    logger.debug("Using pickle serialization (V1, compatibility mode)")
+                    message = {
+                        'type': 0x03,  # EXECUTE_SUBGRAPH (from tcp_server.py)
+                        'subgraph_data': message_data,  # Use processed graph data
+                        'input_data': {
+                            k: pickle.dumps(v) for k, v in tensors_to_send.items()  # Only uncached tensors
+                        },
+                        'cached_identifiers': list(cache_query_result.cached_identifiers),
+                        'cached_identifier_map': cached_identifier_map,
+                        'uncached_identifier_map': uncached_identifier_map,
+                        'timeout': timeout
+                    }
+                    data = pickle.dumps(message)
+                    message_type = (0x03).to_bytes(1, 'big')  # EXECUTE_SUBGRAPH coordinator
+            except (ImportError, TypeError, ValueError, AttributeError):
+                # Fallback if fast_serialization not available or failed
+                logger.warning("FastSerializer unavailable or failed, using pickle")
+                message = {
+                    'type': 0x03,
+                    'subgraph_data': message_data,
+                    'input_data': {
+                        k: pickle.dumps(v) for k, v in tensors_to_send.items()
+                    },
+                    'cached_identifiers': list(cache_query_result.cached_identifiers),
+                    'cached_identifier_map': cached_identifier_map,
+                    'uncached_identifier_map': uncached_identifier_map,
+                    'timeout': timeout
+                }
+                data = pickle.dumps(message)
+                message_type = (0x03).to_bytes(1, 'big')  # EXECUTE_SUBGRAPH coordinator
             data_size = len(data)
             # Check if message is too large
             # TODO: Implement proper model weight caching via tensor registry to avoid sending weights every time
@@ -709,10 +910,31 @@ class DjinnCoordinator:
             # Protocol: message_type (1 byte) + length (8 bytes) + data
             # Updated to 8 bytes to support large messages > 4GB
             message_type = (0x03).to_bytes(1, 'big')  # EXECUTE_SUBGRAPH coordinator
-            writer.write(message_type)
-            writer.write(size_bytes)
-            writer.write(data)
-            await writer.drain()
+            
+            # ✅ PROFILING: Measure network transfer time (client→server)
+            try:
+                from djinn.server.profiling_context import get_profiler, record_phase
+                profiler = get_profiler()
+                if profiler and profiler.enabled:
+                    network_start = time.perf_counter()
+                    writer.write(message_type)
+                    writer.write(size_bytes)
+                    writer.write(data)
+                    await writer.drain()
+                    network_duration_ms = (time.perf_counter() - network_start) * 1000
+                    profiler.record_phase('network_c2s', network_duration_ms, 
+                                        metadata={'data_size_bytes': data_size})
+                else:
+                    writer.write(message_type)
+                    writer.write(size_bytes)
+                    writer.write(data)
+                    await writer.drain()
+            except ImportError:
+                # Fallback if profiling not available
+                writer.write(message_type)
+                writer.write(size_bytes)
+                writer.write(data)
+                await writer.drain()
 
             # Receive result - read message type first (with timeout)
             try:
@@ -784,10 +1006,30 @@ class DjinnCoordinator:
                 if remaining_timeout <= 0:
                     raise RuntimeError(f"Timeout exceeded while reading tensor data (size: {tensor_size} bytes)")
                 
-                result_data = await asyncio.wait_for(
-                    reader.readexactly(tensor_size),
-                    timeout=remaining_timeout
-                )
+                # ✅ PROFILING: Measure network transfer time (server→client)
+                try:
+                    from djinn.server.profiling_context import get_profiler
+                    profiler = get_profiler()
+                    if profiler and profiler.enabled:
+                        network_start = time.perf_counter()
+                        result_data = await asyncio.wait_for(
+                            reader.readexactly(tensor_size),
+                            timeout=remaining_timeout
+                        )
+                        network_duration_ms = (time.perf_counter() - network_start) * 1000
+                        profiler.record_phase('network_s2c', network_duration_ms,
+                                            metadata={'data_size_bytes': tensor_size})
+                    else:
+                        result_data = await asyncio.wait_for(
+                            reader.readexactly(tensor_size),
+                            timeout=remaining_timeout
+                        )
+                except ImportError:
+                    # Fallback if profiling not available
+                    result_data = await asyncio.wait_for(
+                        reader.readexactly(tensor_size),
+                        timeout=remaining_timeout
+                    )
                 
                 # Result is tensor bytes - deserialize with optimized method
                 try:
@@ -826,7 +1068,10 @@ class DjinnCoordinator:
             await writer.wait_closed()
 
             execution_time = time.perf_counter() - start_time
-            logger.info(f"✅ Subgraph execution complete: {response.shape if hasattr(response, 'shape') else 'unknown'} in {execution_time:.3f}s")
+            logger.info(
+                f"✅ Subgraph execution complete: {response.shape if hasattr(response, 'shape') else 'unknown'} in {execution_time:.3f}s "
+                f"(cache query: {query_time:.1f}ms, transfer savings: {savings:.1f}%)"
+            )
 
             return response
 

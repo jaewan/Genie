@@ -58,18 +58,42 @@ class SubgraphCache:
         # Compute DAG hash
         dag_hash = self._compute_dag_hash(target_tensor)
 
+        # ✅ PROFILING: Measure graph cache lookup time
+        import time
+        try:
+            from .profiling_context import get_profiler, record_phase
+            profiler = get_profiler()
+            if profiler and profiler.enabled:
+                with record_phase('graph_cache_lookup', metadata={'dag_hash': dag_hash[:8]}):
         # Check cache
-        with self.lock:
-            if dag_hash in self.cache:
-                cached = self.cache[dag_hash]
-                cached.access_count += 1
-                self.stats['hits'] += 1
-                logger.debug(f"Subgraph cache HIT: {cached.operation_count} ops")
-                return cached.subgraph
+                    with self.lock:
+                        if dag_hash in self.cache:
+                            cached = self.cache[dag_hash]
+                            cached.access_count += 1
+                            self.stats['hits'] += 1
+                            logger.debug(f"Subgraph cache HIT: {cached.operation_count} ops")
+                            return cached.subgraph
+            else:
+                # No profiling - check cache normally
+                with self.lock:
+                    if dag_hash in self.cache:
+                        cached = self.cache[dag_hash]
+                        cached.access_count += 1
+                        self.stats['hits'] += 1
+                        logger.debug(f"Subgraph cache HIT: {cached.operation_count} ops")
+                        return cached.subgraph
+        except ImportError:
+            # Fallback if profiling not available
+            with self.lock:
+                if dag_hash in self.cache:
+                    cached = self.cache[dag_hash]
+                    cached.access_count += 1
+                    self.stats['hits'] += 1
+                    logger.debug(f"Subgraph cache HIT: {cached.operation_count} ops")
+                    return cached.subgraph
 
         # Cache miss - build subgraph
         self.stats['misses'] += 1
-        import time
         start = time.perf_counter()
 
         subgraph = builder.build_remote_subgraph(target_tensor, defer_metadata=True)
