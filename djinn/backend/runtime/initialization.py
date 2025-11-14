@@ -298,12 +298,54 @@ async def _genie_init_async_impl(
             logger.info(f"[5/6] Connecting to remote server at {server_address}...")
             try:
                 from ...core.coordinator import DjinnCoordinator, CoordinatorConfig
+                import socket  # Import at module level for port finding
 
+                # Get network config to use configured ports or find free ones
+                from ...config import get_config
+                network_config = get_config().network
+                
+                # Try to use configured ports, or find free ports if defaults are in use
+                def find_free_port():
+                    """Find an available port."""
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(1)
+                    try:
+                        sock.bind(('', 0))
+                        port = sock.getsockname()[1]
+                        sock.close()
+                        return port
+                    except Exception:
+                        sock.close()
+                        return None
+                
+                # Use configured control port, or find a free one
+                control_port = network_config.control_port
+                if control_port == 5555:  # Default - might conflict
+                    # Try to find a free port in a higher range
+                    for test_port in range(5560, 5600):
+                        try:
+                            test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                            test_sock.settimeout(0.1)
+                            test_sock.bind(('', test_port))
+                            test_sock.close()
+                            control_port = test_port
+                            break
+                        except OSError:
+                            continue
+                    else:
+                        # Fallback: let OS assign port
+                        control_port = find_free_port() or 0
+                
+                data_port = network_config.data_port
+                if data_port == 5556:  # Default - might conflict
+                    # Use a port offset from control port
+                    data_port = control_port + 1 if control_port != 0 else find_free_port() or 0
+                
                 coordinator_config = CoordinatorConfig(
                     node_id='djinn-client',
                     tcp_fallback=True,
-                    control_port=5558,  # Use different control port than server
-                    data_port=5557,     # Use different data port than server
+                    control_port=control_port,  # Use free port or configured port
+                    data_port=data_port,        # Use free port or configured port
                 )
 
                 coordinator = DjinnCoordinator(coordinator_config)

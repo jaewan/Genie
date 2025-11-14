@@ -608,7 +608,7 @@ class DjinnCoordinator:
                                       subgraph: Dict[str, Any],
                                       input_data: Dict[str, torch.Tensor],
                                       target: str,
-                                      timeout: float = 30,
+                                      timeout: float = 300,  # Increased default timeout for large subgraphs
                                       graph_id: Optional[str] = None,
                                       enable_differential: bool = True) -> torch.Tensor:
         """
@@ -690,24 +690,105 @@ class DjinnCoordinator:
             print(f"CLIENT: subgraph keys: {list(subgraph.keys()) if isinstance(subgraph, dict) else type(subgraph)}")
 
             data = pickle.dumps(message)
-            size_bytes = len(data).to_bytes(4, 'big')
+            data_size = len(data)
+            # Check if message is too large
+            # TODO: Implement proper model weight caching via tensor registry to avoid sending weights every time
+            # For now, we use 8-byte size field to accommodate large models (GPT2-XL has ~5.8GB of weights)
+            MAX_MESSAGE_SIZE = 16 * (1024**3)  # 16GB limit (8-byte size field supports up to 2^64)
+            if data_size > MAX_MESSAGE_SIZE:
+                raise RuntimeError(
+                    f"Message too large: {data_size / (1024**3):.2f}GB "
+                    f"(max {MAX_MESSAGE_SIZE / (1024**3):.2f}GB). "
+                    f"Input tensors: {len(input_data)}, "
+                    f"Subgraph operations: {len(subgraph.get('operations', []))}. "
+                    f"Consider using model weight caching to reduce message size."
+                )
+            # Use 8-byte size field to support messages > 4GB
+            size_bytes = data_size.to_bytes(8, 'big')
 
-            # Protocol: message_type (1 byte) + length (4 bytes) + data
+            # Protocol: message_type (1 byte) + length (8 bytes) + data
+            # Updated to 8 bytes to support large messages > 4GB
             message_type = (0x03).to_bytes(1, 'big')  # EXECUTE_SUBGRAPH coordinator
             writer.write(message_type)
             writer.write(size_bytes)
             writer.write(data)
             await writer.drain()
 
-            # Receive result - read message type first
-            msg_type_bytes = await reader.readexactly(1)
-            msg_type = msg_type_bytes[0]
-
-            size_bytes = await reader.readexactly(4)
-            size = int.from_bytes(size_bytes, 'big')
-            result_data = await reader.readexactly(size)
+            # Receive result - read message type first (with timeout)
+            try:
+                msg_type_bytes = await asyncio.wait_for(
+                    reader.readexactly(1),
+                    timeout=timeout
+                )
+                msg_type = msg_type_bytes[0]
+            except asyncio.TimeoutError:
+                writer.close()
+                await writer.wait_closed()
+                raise RuntimeError(
+                    f"Timeout waiting for server response after {timeout}s. "
+                    f"Server may be processing a large subgraph ({len(subgraph.get('operations', []))} operations, "
+                    f"{len(input_data)} inputs). Consider increasing timeout or reducing subgraph size."
+                )
 
             if msg_type == 0x04:  # RESULT
+                # ✅ PROFILING: Extract profiling data from response
+                # Format: [profiling_size (4)] [profiling_json] [tensor_size (4)] [tensor_bytes]
+                # Wrap all reads in timeout to prevent hanging
+                remaining_timeout = timeout - (time.perf_counter() - start_time)
+                if remaining_timeout <= 0:
+                    raise RuntimeError(f"Timeout exceeded while reading response headers")
+                
+                profiling_size_bytes = await asyncio.wait_for(
+                    reader.readexactly(4),
+                    timeout=remaining_timeout
+                )
+                profiling_size = int.from_bytes(profiling_size_bytes, 'big')
+                profiling_json_bytes = await asyncio.wait_for(
+                    reader.readexactly(profiling_size) if profiling_size > 0 else asyncio.sleep(0),
+                    timeout=remaining_timeout
+                ) if profiling_size > 0 else b'{}'
+                
+                # Parse profiling data
+                server_profiling_data = {}
+                if profiling_size > 0:
+                    try:
+                        server_profiling_data = json.loads(profiling_json_bytes.decode('utf-8'))
+                        logger.debug(f"📊 Received server-side profiling data: {server_profiling_data}")
+                    except Exception as e:
+                        logger.debug(f"Could not parse profiling data: {e}")
+                
+                # Store profiling data for later retrieval
+                # Attach to response or store in a global context
+                try:
+                    from djinn.server.profiling_context import get_profiler
+                    profiler = get_profiler()
+                    if profiler and server_profiling_data:
+                        # Merge server-side profiling data into client profiler
+                        for phase_name, duration_ms in server_profiling_data.items():
+                            profiler.record_phase(f"server_{phase_name}", duration_ms)
+                except Exception as e:
+                    logger.debug(f"Could not merge server profiling data: {e}")
+                
+                # Read tensor data (this may be large, so allow more time)
+                remaining_timeout = timeout - (time.perf_counter() - start_time)
+                if remaining_timeout <= 0:
+                    raise RuntimeError(f"Timeout exceeded while reading tensor size")
+                
+                tensor_size_bytes = await asyncio.wait_for(
+                    reader.readexactly(4),
+                    timeout=remaining_timeout
+                )
+                tensor_size = int.from_bytes(tensor_size_bytes, 'big')
+                
+                remaining_timeout = timeout - (time.perf_counter() - start_time)
+                if remaining_timeout <= 0:
+                    raise RuntimeError(f"Timeout exceeded while reading tensor data (size: {tensor_size} bytes)")
+                
+                result_data = await asyncio.wait_for(
+                    reader.readexactly(tensor_size),
+                    timeout=remaining_timeout
+                )
+                
                 # Result is tensor bytes - deserialize with optimized method
                 try:
                     try:
@@ -722,9 +803,22 @@ class DjinnCoordinator:
                     result_buffer = io.BytesIO(result_data)
                     response = torch.load(result_buffer)
             elif msg_type == 0x05:  # ERROR
-                # Error is string bytes
-                response = result_data.decode()
-                raise RuntimeError(f"Server error: {response}")
+                # Error is string bytes - read size first (with timeout)
+                remaining_timeout = timeout - (time.perf_counter() - start_time)
+                if remaining_timeout <= 0:
+                    raise RuntimeError(f"Timeout exceeded while reading error message")
+                
+                size_bytes = await asyncio.wait_for(
+                    reader.readexactly(4),
+                    timeout=remaining_timeout
+                )
+                size = int.from_bytes(size_bytes, 'big')
+                error_data = await asyncio.wait_for(
+                    reader.readexactly(size),
+                    timeout=remaining_timeout
+                )
+                error_message = error_data.decode()
+                raise RuntimeError(f"Server error: {error_message}")
             else:
                 raise RuntimeError(f"Unknown message type: {msg_type}")
 

@@ -107,7 +107,8 @@ class OperationRegistry:
             'aten::view': lambda inputs, kwargs: inputs[0].view(*inputs[1:] if len(inputs) > 1 else kwargs.get('shape', inputs[0].shape)),
             'aten::flatten': lambda inputs, kwargs: inputs[0].flatten(**kwargs),
             'aten::squeeze': lambda inputs, kwargs: inputs[0].squeeze(**kwargs),
-            'aten::unsqueeze': lambda inputs, kwargs: inputs[0].unsqueeze(**kwargs),
+            # ✅ FIX: unsqueeze takes dim as positional argument (inputs[1]), not kwargs
+            'aten::unsqueeze': lambda inputs, kwargs: inputs[0].unsqueeze(*inputs[1:], **kwargs) if len(inputs) > 1 else inputs[0].unsqueeze(**kwargs),
             'aten::split': lambda inputs, kwargs: torch.split(*inputs, **kwargs),
             'aten::chunk': lambda inputs, kwargs: torch.chunk(*inputs, **kwargs),
             'aten::cat': lambda inputs, kwargs: torch.cat(inputs, **kwargs),
@@ -122,7 +123,17 @@ class OperationRegistry:
 
             # Linear layer operations
             'aten::linear': lambda inputs, kwargs: torch.nn.functional.linear(*inputs, **kwargs),
-            'aten::embedding': lambda inputs, kwargs: F.embedding(inputs[1].long(), inputs[0], **kwargs),
+            # ✅ CRITICAL FIX: aten::embedding expects (weight, indices, ...) NOT (indices, weight, ...)
+            # PyTorch's aten::embedding signature: embedding(weight, indices, padding_idx=-1, scale_grad_by_freq=False, sparse=False)
+            # This is different from F.embedding which expects (indices, weight, ...)
+            # ✅ FIX: Filter kwargs to only include supported arguments
+            'aten::embedding': lambda inputs, kwargs: torch.ops.aten.embedding(
+                inputs[1], 
+                inputs[0].long(), 
+                padding_idx=kwargs.get('padding_idx', -1),
+                scale_grad_by_freq=kwargs.get('scale_grad_by_freq', False),
+                sparse=kwargs.get('sparse', False)
+            ),
 
             # Device operations (should not appear in subgraphs, but handle gracefully)
             'aten::cpu': lambda inputs, kwargs: inputs[0].cpu(),
@@ -171,13 +182,13 @@ class OperationRegistry:
 
         self._registry.update(aliases)
 
-    def execute(self, operation: str, inputs: List[torch.Tensor], kwargs: Optional[Dict] = None) -> torch.Tensor:
+    def execute(self, operation: str, inputs: List[Any], kwargs: Optional[Dict] = None) -> torch.Tensor:
         """
         Execute an operation with the given inputs.
 
         Args:
             operation: Operation name (e.g., 'aten::relu', 'aten::matmul')
-            inputs: List of input tensors
+            inputs: List of inputs (can include tensors, scalars, etc.)
             kwargs: Optional keyword arguments for the operation
 
         Returns:
@@ -189,11 +200,45 @@ class OperationRegistry:
         if kwargs is None:
             kwargs = {}
 
+        # ✅ SENIOR ENGINEER FIX: Validate and log dtypes before execution
+        tensor_inputs = [inp for inp in inputs if isinstance(inp, torch.Tensor)]
+        if tensor_inputs:
+            input_dtypes = [inp.dtype for inp in tensor_inputs]
+            input_shapes = [tuple(inp.shape) for inp in tensor_inputs]
+            logger.debug(f"OperationRegistry.execute({operation}): input dtypes={input_dtypes}, shapes={input_shapes}")
+            
+            # ✅ CRITICAL: Check for dtype mismatches in operations that require matching dtypes
+            if len(tensor_inputs) > 1 and operation in ['aten::matmul', 'aten::mm', 'aten::bmm', 'aten::addmm']:
+                dtypes = {inp.dtype for inp in tensor_inputs}
+                if len(dtypes) > 1:
+                    logger.warning(
+                        f"⚠️  DTYPE MISMATCH in {operation}: inputs have different dtypes {dtypes}. "
+                        f"This will cause a runtime error. Coercing to first dtype."
+                    )
+                    # Coerce all inputs to first tensor's dtype
+                    target_dtype = tensor_inputs[0].dtype
+                    for i, inp in enumerate(inputs):
+                        if isinstance(inp, torch.Tensor) and inp.dtype != target_dtype:
+                            inputs[i] = inp.to(dtype=target_dtype)
+                    logger.debug(f"✅ After coercion: {[inp.dtype for inp in inputs if isinstance(inp, torch.Tensor)]}")
+
         # Check registry first
         op_func = self._registry.get(operation)
         if op_func:
             try:
-                return op_func(inputs, kwargs)
+                result = op_func(inputs, kwargs)
+                # Log result dtype for debugging
+                if isinstance(result, torch.Tensor):
+                    logger.debug(f"OperationRegistry.execute({operation}): result dtype={result.dtype}, shape={tuple(result.shape)}")
+                return result
+            except RuntimeError as e:
+                error_msg = str(e)
+                if "expected m1 and m2 to have the same dtype" in error_msg or "dtype" in error_msg.lower():
+                    logger.error(f"❌ DTYPE ERROR in OperationRegistry for {operation}:")
+                    logger.error(f"   Error: {error_msg}")
+                    logger.error(f"   Input dtypes: {[inp.dtype if isinstance(inp, torch.Tensor) else type(inp).__name__ for inp in inputs]}")
+                    logger.error(f"   Input shapes: {[tuple(inp.shape) if isinstance(inp, torch.Tensor) else 'N/A' for inp in inputs]}")
+                raise
             except Exception as e:
                 logger.error(f"Registry execution failed for {operation}: {e}")
                 raise
@@ -201,7 +246,7 @@ class OperationRegistry:
         # Fallback to dynamic dispatch
         return self._execute_dynamic(operation, inputs, kwargs)
 
-    def _execute_dynamic(self, operation: str, inputs: List[torch.Tensor], kwargs: Dict) -> torch.Tensor:
+    def _execute_dynamic(self, operation: str, inputs: List[Any], kwargs: Dict) -> torch.Tensor:
         """Fallback: dynamic operation dispatch using torch namespaces."""
         # Normalize operation name
         op_name = operation.replace('aten::', '')

@@ -93,26 +93,52 @@ class RemoteAcceleratorSupport:
                     lazy_buffers = {}
 
                     for name, param in self.named_parameters():
+                        # ✅ ELEGANT FIX: Explicitly preserve dtype during conversion
+                        # This ensures model parameters maintain their dtype (e.g., float16 for GPT2-XL)
                         lazy_params[name] = LazyTensor.tensor(
                             param.detach(),
+                            dtype=param.dtype,  # Explicitly preserve dtype
                             device=param.device  # Preserve original device
                         )
 
                     for name, buffer in self.named_buffers():
+                        # ✅ ELEGANT FIX: Explicitly preserve dtype for buffers too
                         lazy_buffers[name] = LazyTensor.tensor(
                             buffer.detach(),
+                            dtype=buffer.dtype,  # Explicitly preserve dtype
                             device=buffer.device  # Preserve original device
                         )
 
                     # Replace parameters and buffers
                     for name, lazy_param in lazy_params.items():
-                        # Get the parameter object and replace its data
+                        # ✅ FIX: Create new Parameter with LazyTensor data
+                        # PyTorch's Parameter.set_data() doesn't accept LazyTensor directly
+                        # So we need to create a new Parameter object
                         param = dict(self.named_parameters())[name]
-                        param.data = lazy_param
+                        new_param = nn.Parameter(lazy_param, requires_grad=param.requires_grad)
+                        # Use setattr to replace the parameter in the module
+                        parts = name.split('.')
+                        if len(parts) == 1:
+                            setattr(self, name, new_param)
+                        else:
+                            # Navigate to the parent module
+                            parent = self
+                            for part in parts[:-1]:
+                                parent = getattr(parent, part)
+                            setattr(parent, parts[-1], new_param)
 
                     for name, lazy_buffer in lazy_buffers.items():
+                        # ✅ FIX: Buffers can be set directly, but let's be safe
                         buffer = dict(self.named_buffers())[name]
-                        buffer.data = lazy_buffer
+                        parts = name.split('.')
+                        if len(parts) == 1:
+                            setattr(self, name, lazy_buffers[name])
+                        else:
+                            # Navigate to the parent module
+                            parent = self
+                            for part in parts[:-1]:
+                                parent = getattr(parent, part)
+                            setattr(parent, parts[-1], lazy_buffers[name])
 
                     # Track conversion
                     param_count = len(lazy_params)

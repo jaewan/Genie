@@ -164,6 +164,8 @@ class OptimizationExecutor:
         stats = OptimizationStats()
         total_start = time.time()
         
+        logger.info(f"🎯 OptimizationExecutor.execute: {len(subgraph_request.get('operations', []))} operations, {len(input_data)} inputs, timeout={timeout}s")
+        
         try:
             # Step 1: Check tensor registry for cached model weights
             if self.registry and model_id:
@@ -320,15 +322,14 @@ class OptimizationExecutor:
             return result, stats
         
         except Exception as e:
-            logger.error(f"Error in optimized execution: {e}", exc_info=True)
+            import traceback
+            error_msg = f"{type(e).__name__}: {str(e)}"
+            logger.error(f"Error in optimized execution: {error_msg}", exc_info=True)
+            logger.error(f"Full traceback:\n{traceback.format_exc()}")
             self.monitor.record_error(type(e).__name__)
-            # Fall back to unoptimized execution
-            result = self.executor.execute(
-                subgraph_request=subgraph_request,
-                input_data=input_data,
-                timeout=timeout
-            )
-            return result, stats
+            # Re-raise with proper formatting instead of falling back
+            # This ensures the error is properly propagated
+            raise RuntimeError(f"Optimized execution failed: {error_msg}") from e
 
     async def _check_registry(
         self,

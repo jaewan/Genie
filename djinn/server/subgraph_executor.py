@@ -99,10 +99,20 @@ class SubgraphExecutor:
             )
 
             # Step 1: Move inputs to GPU
+            logger.info(f"📥 Received {len(input_data)} input tensors")
+            logger.info(f"   Input data keys: {list(input_data.keys())}")
+            logger.info(f"   Subgraph input_tensors keys: {list(subgraph_request.get('input_tensors', {}).keys())}")
             logger.debug(f"Moving {len(input_data)} inputs to GPU {self.gpu_id}")
             move_start = time.time()
+            
+            # ✅ CRITICAL FIX: Build a mapping from input tensor IDs to ensure all references work
+            # Input tensors can be referenced by their tensor_id (for external inputs)
+            # or by op_id (if they're also operation outputs in the subgraph)
+            input_tensor_ids = set()
             for tensor_id_str, tensor_data in input_data.items():
                 tensor_id = int(tensor_id_str)
+                input_tensor_ids.add(tensor_id)
+                
                 logger.info(
                     "      loading input tensor[%s]: shape=%s dtype=%s src_device=%s",
                     tensor_id,
@@ -110,6 +120,21 @@ class SubgraphExecutor:
                     tensor_data.dtype,
                     tensor_data.device,
                 )
+                
+                # ✅ FINAL DEFENSE: Meta tensors should have been filtered on client side
+                # If we see one here, it means the client-side filters failed
+                if tensor_data.device.type == 'meta':
+                    logger.error(
+                        f"❌ CRITICAL: Input tensor[{tensor_id}] is on meta device - this should have been filtered on client! "
+                        f"This indicates a bug in client-side subgraph building or materialization. "
+                        f"Shape: {tensor_data.shape}, dtype: {tensor_data.dtype}. "
+                        f"Cannot copy meta tensors to GPU (they have no data)."
+                    )
+                    raise NotImplementedError(
+                        f"Cannot copy tensor[{tensor_id}] from meta device to {self.device}: meta tensors have no data. "
+                        f"This is a client-side bug - meta tensors should be filtered before sending to server."
+                    )
+                
                 copy_start = time.time()
                 moved_tensor = tensor_data.to(self.device, non_blocking=True)
                 copy_ms = (time.time() - copy_start) * 1000
@@ -120,24 +145,79 @@ class SubgraphExecutor:
                     copy_ms,
                 )
                 context.tensors[tensor_id] = moved_tensor
+            
+            # ✅ CRITICAL FIX: Pre-scan operations to identify which op_ids correspond to input tensors
+            # This ensures that if an input tensor is also referenced as an operation output,
+            # both references point to the same tensor
+            for op_spec in subgraph_request['operations']:
+                op_id = op_spec.get('op_id')
+                # If this operation's output ID matches an input tensor ID, it means the input
+                # is being used directly (shouldn't happen, but handle gracefully)
+                if op_id in input_tensor_ids:
+                    logger.warning(
+                        f"⚠️  Operation {op_spec.get('operation', 'unknown')} has op_id={op_id} "
+                        f"that matches an input tensor ID. This may indicate a serialization issue."
+                    )
+            
+            logger.info(f"✅ Loaded {len(context.tensors)} tensors into context: {list(context.tensors.keys())}")
             if self.device.type == "cuda":
                 torch.cuda.synchronize(device=self.device)
             move_ms = (time.time() - move_start) * 1000
             logger.info("   Input transfer time: %.2f ms", move_ms)
 
             # Step 2: Execute operations in topological order
-            logger.debug(f"Executing {len(subgraph_request['operations'])} operations")
-            for op_spec in subgraph_request['operations']:
+            total_ops = len(subgraph_request['operations'])
+            logger.info(f"🚀 Executing {total_ops} operations in topological order")
+            logger.info(f"   Available input tensor IDs: {list(context.tensors.keys())}")
+            
+            # Progress tracking for large subgraphs
+            progress_interval = max(1, total_ops // 20)  # Log every 5%
+            
+            for op_idx, op_spec in enumerate(subgraph_request['operations']):
                 self.stats['operations_executed'] += 1
+                
+                # Log progress for large subgraphs
+                if op_idx % progress_interval == 0 or op_idx == total_ops - 1:
+                    logger.info(f"   Progress: {op_idx+1}/{total_ops} operations ({100*(op_idx+1)/total_ops:.1f}%)")
+                
+                # Debug: Log operation details (only for first few and last few)
+                if op_idx < 5 or op_idx >= total_ops - 5:
+                    op_id = op_spec.get('op_id', 'unknown')
+                    op_name = op_spec.get('operation', 'unknown')
+                    input_ids = op_spec.get('inputs', [])
+                    logger.debug(
+                        f"  Operation {op_idx+1}/{total_ops}: {op_name} "
+                        f"(op_id={op_id}, inputs={input_ids})"
+                    )
 
-                result = self._execute_operation(op_spec, context)
-                context.tensors[op_spec['op_id']] = result
-                logger.debug(
-                    "      op[%s] result device=%s shape=%s",
-                    op_spec['op_id'],
-                    result.device,
-                    tuple(result.shape) if hasattr(result, 'shape') else "n/a",
-                )
+                result = self._execute_operation(op_spec, context, subgraph_request)
+                
+                # ✅ FIX: Handle operations that return non-tensor values (bool, int, etc.)
+                # Some operations like _has_compatible_shallow_copy_type return bool
+                # We need to handle these gracefully instead of assuming all ops return tensors
+                if isinstance(result, torch.Tensor):
+                    context.tensors[op_spec['op_id']] = result
+                    if op_idx < 5 or op_idx >= total_ops - 5:
+                        logger.debug(
+                            "      op[%s] result device=%s shape=%s",
+                            op_spec['op_id'],
+                            result.device,
+                            tuple(result.shape) if hasattr(result, 'shape') else "n/a",
+                        )
+                else:
+                    # Non-tensor result (bool, int, etc.) - store as-is but log warning
+                    # These operations shouldn't typically be in subgraphs, but handle gracefully
+                    logger.warning(
+                        f"⚠️  Operation {op_spec.get('operation', 'unknown')} returned non-tensor: {type(result).__name__} = {result}"
+                    )
+                    context.tensors[op_spec['op_id']] = result
+                    if op_idx < 5 or op_idx >= total_ops - 5:
+                        logger.debug(
+                            "      op[%s] result type=%s value=%s",
+                            op_spec['op_id'],
+                            type(result).__name__,
+                            result,
+                        )
 
                 # Check memory usage
                 if torch.cuda.is_available():
@@ -148,6 +228,14 @@ class SubgraphExecutor:
             # Step 3: Transfer ONLY final output to CPU
             output_id = subgraph_request['output_id']
             final_result = context.tensors[output_id]
+
+            # ✅ FIX: Ensure final result is a tensor (not bool/int/etc.)
+            if not isinstance(final_result, torch.Tensor):
+                raise RuntimeError(
+                    f"Final subgraph output is not a tensor: got {type(final_result).__name__} = {final_result}. "
+                    f"This indicates an operation that returns non-tensor values is being used as the final output. "
+                    f"Output ID: {output_id}, Operation: {subgraph_request.get('operations', [])[-1] if subgraph_request.get('operations') else 'unknown'}"
+                )
 
             logger.debug(f"Transferring final result: {final_result.shape} to CPU")
             logger.info(
@@ -178,13 +266,15 @@ class SubgraphExecutor:
             logger.error(traceback.format_exc())
             raise
         except Exception as e:
-            error_msg = f"Subgraph execution failed: {e}"
+            # traceback is already imported at module level
+            error_msg = f"Subgraph execution failed: {type(e).__name__}: {str(e)}"
             logger.error(error_msg)
             logger.error(traceback.format_exc())
 
             self.stats['errors'].append({
                 'timestamp': time.time(),
                 'error': str(e),
+                'error_type': type(e).__name__,
                 'operations_count': len(subgraph_request.get('operations', [])),
                 'traceback': traceback.format_exc()
             })
@@ -240,7 +330,8 @@ class SubgraphExecutor:
 
     def _execute_operation(self,
                           op_spec: Dict[str, Any],
-                          context: ExecutionContext) -> torch.Tensor:
+                          context: ExecutionContext,
+                          subgraph_request: Optional[Dict[str, Any]] = None) -> torch.Tensor:
         """
         Execute single operation on GPU.
 
@@ -251,30 +342,196 @@ class SubgraphExecutor:
         Returns:
             Result tensor (on GPU)
         """
-        operation = op_spec['operation']
-        input_ids = op_spec['inputs']
-        kwargs = op_spec.get('kwargs', {}).copy()
-        kwargs.pop('_stacklevel', None)
+        try:
+            operation = op_spec.get('operation', 'unknown')
+            # Ensure operation is a string
+            if not isinstance(operation, str):
+                operation = str(operation)
+            
+            input_ids = op_spec.get('inputs', [])
+            kwargs = op_spec.get('kwargs', {}).copy()
+            kwargs.pop('_stacklevel', None)
 
-        inputs = []
-        for identifier in input_ids:
-            if isinstance(identifier, dict) and 'type' in identifier:
-                inputs.append(self._decode_literal(identifier))
+            inputs = []
+            for idx, identifier in enumerate(input_ids):
+                if isinstance(identifier, dict) and 'type' in identifier:
+                    decoded = self._decode_literal(identifier)
+                    inputs.append(decoded)
+                    logger.debug(f"   Decoded literal input[{idx}]: {type(decoded).__name__} = {decoded}")
+                else:
+                    # ✅ CRITICAL FIX: Enhanced input resolution with better error messages
+                    if identifier not in context.tensors:
+                        # Enhanced error message with debugging info
+                        available_ids = list(context.tensors.keys())
+                        logger.error(
+                            f"❌ Tensor ID {identifier} not found in context for operation {operation} "
+                            f"(input index {idx}, op_id={op_spec.get('op_id', 'unknown')})"
+                        )
+                        logger.error(f"   Available tensor IDs: {available_ids[:50]}...")  # Show first 50
+                        logger.error(f"   Operation inputs: {input_ids}")
+                        
+                        # Check if identifier matches any op_id from subgraph (if available)
+                        if subgraph_request:
+                            executed_op_ids = [op.get('op_id') for op in subgraph_request.get('operations', [])]
+                            if identifier in executed_op_ids:
+                                logger.error(
+                                    f"   ⚠️  ID {identifier} matches an operation ID but result not stored. "
+                                    f"This indicates a bug in operation execution or result storage."
+                                )
+                            else:
+                                logger.error(
+                                    f"   ⚠️  ID {identifier} does not match any operation ID. "
+                                    f"This may indicate a serialization/deserialization mismatch."
+                                )
+                        
+                        raise KeyError(
+                            f"Input tensor ID {identifier} not found in context for operation {operation}. "
+                            f"Available IDs: {available_ids[:20]}..., Operation inputs: {input_ids}, "
+                            f"Op ID: {op_spec.get('op_id', 'unknown')}"
+                        )
+                    
+                    tensor = context.tensors[identifier]
+                    # ✅ CRITICAL FIX: Validate tensor is actually a tensor (not None or wrong type)
+                    if not isinstance(tensor, torch.Tensor):
+                        logger.error(
+                            f"❌ CRITICAL: Input ID {identifier} resolved to non-tensor: {type(tensor).__name__} = {tensor}"
+                        )
+                        raise TypeError(
+                            f"Input ID {identifier} for operation {operation} resolved to {type(tensor).__name__}, "
+                            f"expected torch.Tensor"
+                        )
+                    inputs.append(tensor)
+            
+            # ✅ SENIOR ENGINEER FIX: Comprehensive dtype logging and coercion
+            # Log input dtypes BEFORE coercion for debugging
+            tensor_inputs = [inp for inp in inputs if isinstance(inp, torch.Tensor)]
+            if tensor_inputs:
+                input_dtypes = [inp.dtype for inp in tensor_inputs]
+                input_shapes = [tuple(inp.shape) for inp in tensor_inputs]
+                logger.info(
+                    f"🔧 Executing {operation} with {len(inputs)} inputs "
+                    f"(dtypes: {input_dtypes}, shapes: {input_shapes})"
+                )
             else:
-                inputs.append(context.tensors[identifier])
+                logger.info(f"🔧 Executing {operation} with {len(inputs)} inputs: {[type(x).__name__ for x in inputs]}")
+            
+            if operation == 'aten::unsqueeze':
+                logger.info(f"   ⚠️  UNSQUEEZE DEBUG: inputs={inputs}, kwargs={kwargs}, input_ids={input_ids}")
 
-        result = self.operation_registry.execute(operation, inputs, kwargs)
+            # ✅ CRITICAL FIX: Coerce input dtypes to ensure consistency before execution
+            # This is critical for operations that require matching dtypes (e.g., matmul, attention)
+            # For float16 models like GPT2-XL, all inputs should be float16
+            # ✅ IMPROVED: Prioritize float16 if any input is float16 (matches frontend logic)
+            if len(tensor_inputs) > 1:
+                # Collect all floating-point dtypes
+                floating_dtypes = [inp.dtype for inp in tensor_inputs if inp.dtype.is_floating_point]
+                if floating_dtypes:
+                    # ✅ CRITICAL: Prioritize float16 if any input is float16
+                    # This ensures float16 models maintain float16 precision
+                    if torch.float16 in floating_dtypes:
+                        target_dtype = torch.float16
+                    else:
+                        # Otherwise, use the first tensor's dtype
+                        target_dtype = tensor_inputs[0].dtype
+                    
+                    # Only coerce if we have dtype mismatches
+                    coerced = False
+                    for i, inp in enumerate(inputs):
+                        if isinstance(inp, torch.Tensor) and inp.dtype.is_floating_point and inp.dtype != target_dtype:
+                            logger.warning(
+                                f"⚠️  DTYPE MISMATCH: Coercing input {i} dtype from {inp.dtype} to {target_dtype} "
+                                f"for operation {operation} (shape: {tuple(inp.shape)})"
+                            )
+                            inputs[i] = inp.to(dtype=target_dtype)
+                            coerced = True
+                    if coerced:
+                        # Update context tensors if we modified them
+                        for idx, identifier in enumerate(input_ids):
+                            if idx < len(inputs) and isinstance(inputs[idx], torch.Tensor):
+                                if identifier in context.tensors:
+                                    context.tensors[identifier] = inputs[idx]
+                        # Log final dtypes after coercion
+                        final_dtypes = [inp.dtype for inp in inputs if isinstance(inp, torch.Tensor)]
+                        logger.info(f"✅ After dtype coercion: {final_dtypes}")
 
-        result_index = op_spec.get('result_index')
-        if result_index is not None and isinstance(result, (tuple, list)):
+            # ✅ SENIOR ENGINEER FIX: Execute with comprehensive error handling
             try:
-                result = result[result_index]
-            except IndexError as exc:
-                raise RuntimeError(
-                    f"Result index {result_index} out of range for operation {operation}"
-                ) from exc
+                result = self.operation_registry.execute(operation, inputs, kwargs)
+            except RuntimeError as e:
+                # ✅ CRITICAL: Catch dtype mismatch errors and provide detailed diagnostics
+                error_msg = str(e)
+                if "expected m1 and m2 to have the same dtype" in error_msg or "dtype" in error_msg.lower():
+                    logger.error(f"❌ DTYPE MISMATCH ERROR in {operation}:")
+                    logger.error(f"   Error: {error_msg}")
+                    logger.error(f"   Input dtypes: {[inp.dtype if isinstance(inp, torch.Tensor) else type(inp).__name__ for inp in inputs]}")
+                    logger.error(f"   Input shapes: {[tuple(inp.shape) if isinstance(inp, torch.Tensor) else 'N/A' for inp in inputs]}")
+                    logger.error(f"   Operation: {operation}")
+                    logger.error(f"   Op ID: {op_spec.get('op_id', 'unknown')}")
+                    # Re-raise with more context
+                    raise RuntimeError(
+                        f"Dtype mismatch in {operation}: {error_msg}\n"
+                        f"Input dtypes: {[inp.dtype if isinstance(inp, torch.Tensor) else type(inp).__name__ for inp in inputs]}\n"
+                        f"Input shapes: {[tuple(inp.shape) if isinstance(inp, torch.Tensor) else 'N/A' for inp in inputs]}"
+                    ) from e
+                raise  # Re-raise other RuntimeErrors as-is
 
-        return result  # Result stays on GPU!
+            result_index = op_spec.get('result_index')
+            if result_index is not None and isinstance(result, (tuple, list)):
+                try:
+                    result = result[result_index]
+                except IndexError as exc:
+                    raise RuntimeError(
+                        f"Result index {result_index} out of range for operation {operation}"
+                    ) from exc
+
+            # ✅ CRITICAL FIX: For operations that might create float32 when inputs are float16,
+            # check if all inputs are the same dtype and preserve it
+            # This is critical for float16 models like GPT2-XL
+            # ✅ IMPROVED: Only coerce if all inputs are float16 (don't coerce if mixed dtypes)
+            if isinstance(result, torch.Tensor):
+                # Check if all tensor inputs have the same dtype
+                tensor_inputs = [inp for inp in inputs if isinstance(inp, torch.Tensor)]
+                if tensor_inputs:
+                    input_dtypes = {inp.dtype for inp in tensor_inputs}
+                    # If all inputs are the same dtype (especially float16), preserve it
+                    if len(input_dtypes) == 1:
+                        common_dtype = tensor_inputs[0].dtype
+                        # Only coerce if result dtype differs and both are floating point
+                        # ✅ CRITICAL: Only coerce float32->float16 if ALL inputs are float16
+                        # Some operations (like softmax, layer_norm) may use float32 internally for stability
+                        # but if all inputs are float16, we should preserve float16 for consistency
+                        if result.dtype != common_dtype and result.dtype.is_floating_point and common_dtype.is_floating_point:
+                            # PyTorch promotion rules: float16 + float32 -> float32 is correct
+                            # But if all inputs are float16, result should also be float16
+                            if common_dtype == torch.float16 and result.dtype == torch.float32:
+                                # ✅ CRITICAL: PyTorch operations like softmax and layer_norm DO return float16
+                                # when given float16 inputs, so we should coerce to match PyTorch behavior
+                                # This ensures correctness with vanilla PyTorch
+                                logger.warning(
+                                    f"⚠️  DTYPE PROMOTION: Coercing {operation} result from {result.dtype} to {common_dtype} "
+                                    f"(all inputs are {common_dtype}, shape: {tuple(result.shape)})"
+                                )
+                                result = result.to(dtype=common_dtype)
+
+            return result  # Result stays on GPU!
+        except Exception as e:
+            operation_name = str(op_spec.get('operation', 'unknown'))
+            # Enhanced error message with input shapes for debugging
+            input_shapes = []
+            for inp in inputs:
+                if hasattr(inp, 'shape'):
+                    input_shapes.append(f"{tuple(inp.shape)}")
+                else:
+                    input_shapes.append(f"{type(inp).__name__}({inp})")
+            
+            error_msg = f"Operation {operation_name} failed: {type(e).__name__}: {str(e)}"
+            logger.error(f"{error_msg}")
+            logger.error(f"   Input shapes: {input_shapes}")
+            logger.error(f"   Input IDs: {input_ids}")
+            logger.error(f"   Operation index: {op_spec.get('_op_idx', 'unknown')}")
+            logger.error(f"   Available tensor IDs in context: {list(context.tensors.keys())}")
+            logger.error("", exc_info=True)
+            raise RuntimeError(error_msg) from e
 
 
 
@@ -322,4 +579,15 @@ class SubgraphExecutor:
                 for v in value
             )
             return slice(start, stop, step)
+        if literal_type == 'device':
+            # Convert device string back to torch.device
+            return torch.device(value)
+        if literal_type == 'unknown':
+            # Handle unknown types that were serialized as strings
+            # Try to convert common types like torch.device
+            value_str = str(value)
+            if value_str in ('cpu', 'cuda', 'meta'):
+                return torch.device(value_str)
+            # Fallback: return as string
+            return value_str
         raise ValueError(f"Unsupported literal spec: {spec}")

@@ -1511,22 +1511,69 @@ class LazyTensor(torch.Tensor):
                     # Materialize all LazyTensor arguments
                     materialized_args = []
                     target_device = None
+                    target_dtype = None  # ✅ FIX: Track target dtype for consistency
+                    all_dtypes = []  # Collect all dtypes to determine best target
 
                     for arg in args:
                         if type(arg).__name__ == 'LazyTensor':
+                            # ✅ CRITICAL FIX: Preserve dtype during materialization
+                            expected_dtype = arg.dtype if hasattr(arg, 'dtype') and arg.dtype is not None else None
                             materialized = arg.materialize()
-                            # If we haven't determined target device yet, use this tensor's device
+                            # If we haven't determined target device/dtype yet, use this tensor's
                             if target_device is None and isinstance(materialized, torch.Tensor):
                                 target_device = materialized.device
+                            if isinstance(materialized, torch.Tensor):
+                                # Collect dtype for later analysis
+                                dtype_to_use = expected_dtype if expected_dtype is not None else materialized.dtype
+                                all_dtypes.append(dtype_to_use)
+                                if target_dtype is None:
+                                    target_dtype = dtype_to_use
+                            # ✅ CRITICAL: Ensure materialized tensor has correct dtype
+                            if expected_dtype is not None and isinstance(materialized, torch.Tensor):
+                                if materialized.dtype != expected_dtype:
+                                    logger.debug(
+                                        f"Coercing materialized tensor dtype from {materialized.dtype} to {expected_dtype} "
+                                        f"for operation {func.__name__ if hasattr(func, '__name__') else 'unknown'}"
+                                    )
+                                    materialized = materialized.to(dtype=expected_dtype)
                             materialized_args.append(materialized)
                         else:
                             materialized_args.append(arg)
+                            # Track dtype from concrete tensors too
+                            if isinstance(arg, torch.Tensor):
+                                all_dtypes.append(arg.dtype)
+                                if target_dtype is None:
+                                    target_dtype = arg.dtype
+
+                    # ✅ CRITICAL FIX: Determine best target dtype (prioritize float16 for model weights)
+                    # If any tensor is float16, use float16 as target (for float16 models)
+                    # Otherwise, use the most common dtype or first dtype
+                    if all_dtypes:
+                        float16_count = sum(1 for d in all_dtypes if d == torch.float16)
+                        if float16_count > 0:
+                            # Prioritize float16 if any tensor is float16 (model weights)
+                            target_dtype = torch.float16
+                            logger.debug(f"Using float16 as target dtype (found {float16_count} float16 tensors)")
+                        else:
+                            # Use first dtype as target
+                            target_dtype = all_dtypes[0]
 
                     # Move all tensors to the same device if needed
                     if target_device is not None:
                         for i, arg in enumerate(materialized_args):
                             if isinstance(arg, torch.Tensor) and arg.device != target_device:
                                 materialized_args[i] = arg.to(target_device)
+                    
+                    # ✅ CRITICAL FIX: Coerce all tensor arguments to same dtype if they're floating point
+                    # This prevents dtype mismatch errors in operations like F.linear
+                    if target_dtype is not None and target_dtype.is_floating_point:
+                        for i, arg in enumerate(materialized_args):
+                            if isinstance(arg, torch.Tensor) and arg.dtype.is_floating_point and arg.dtype != target_dtype:
+                                logger.debug(
+                                    f"Coercing argument {i} dtype from {arg.dtype} to {target_dtype} "
+                                    f"for operation {func.__name__ if hasattr(func, '__name__') else 'unknown'}"
+                                )
+                                materialized_args[i] = arg.to(dtype=target_dtype)
 
                     # Call the function with materialized arguments
                     return func(*materialized_args, **kwargs)
@@ -2199,6 +2246,17 @@ class LazyTensor(torch.Tensor):
 
         Falls back to graph builder if optimization fails.
         """
+        # ✅ CRITICAL FIX: Special handling for LazyTensors created from data (model weights)
+        # These should return the original data with dtype preserved
+        if self.operation == 'aten::tensor' and self.inputs and len(self.inputs) == 1:
+            original_data = self.inputs[0]
+            if isinstance(original_data, torch.Tensor):
+                # Return a copy of the original data with dtype preserved
+                expected_dtype = self.dtype if hasattr(self, 'dtype') and self.dtype is not None else original_data.dtype
+                result = original_data.clone().to(dtype=expected_dtype)
+                logger.debug(f"Materialized data tensor: preserving dtype {expected_dtype} (original: {original_data.dtype})")
+                return result
+        
         try:
             # ✅ Week 3: Use MaterializationOptimizer for optimized local execution
             from ...server.materialization_optimizer import MaterializationOptimizer
@@ -2256,18 +2314,110 @@ class LazyTensor(torch.Tensor):
                        f"{len(subgraph.input_tensors)} inputs")
 
             # Prepare input data (materialize external inputs)
+            # First, discover concrete tensors in operation inputs by scanning operations
+            # But exclude ones that are already outputs of operations in the subgraph
+            operation_output_ids = {id(op) for op in subgraph.operations}
+            concrete_tensors = {}
+            for op in subgraph.operations:
+                for inp in op.inputs:
+                    if isinstance(inp, torch.Tensor) and not isinstance(inp, LazyTensor):
+                        # ✅ FIX: Filter out meta tensors - they have no data and can't be sent to server
+                        # Meta tensors are created during shape inference and shouldn't be in input_data
+                        if inp.device.type == 'meta':
+                            logger.debug(
+                                f"Skipping meta tensor in operation {op.operation} inputs "
+                                f"(shape={inp.shape}, dtype={inp.dtype}). "
+                                f"Meta tensors are for shape inference only."
+                            )
+                            continue
+                        
+                        tensor_id = id(inp)
+                        # Only include if it's not already an operation output in this subgraph
+                        if tensor_id not in operation_output_ids and tensor_id not in concrete_tensors:
+                            concrete_tensors[tensor_id] = inp
+            
+            # Note: We no longer limit concrete tensors here because the subgraph builder
+            # should have identified them as external inputs during build phase.
+            # If we still find many concrete tensors here, it means they weren't properly
+            # identified during building, but we should still include them all to avoid
+            # shape mismatches. The message size check in coordinator.py will catch
+            # truly oversized messages.
+            if len(concrete_tensors) > 100:
+                logger.warning(
+                    f"⚠️  Found {len(concrete_tensors)} concrete tensors during materialization. "
+                    f"These should have been identified as external inputs during subgraph building. "
+                    f"Including all of them to avoid shape mismatches."
+                )
+            
+            # Merge concrete tensors into input_tensors
+            merged_input_tensors = dict(subgraph.input_tensors)
+            for tensor_id, tensor in concrete_tensors.items():
+                # ✅ FIX: Filter meta tensors when merging - they shouldn't be in input_tensors at all
+                if isinstance(tensor, torch.Tensor) and tensor.device.type == 'meta':
+                    logger.debug(
+                        f"Skipping meta tensor[{tensor_id}] when merging concrete tensors "
+                        f"(shape={tensor.shape}, dtype={tensor.dtype}). "
+                        f"Meta tensors are for shape inference only."
+                    )
+                    continue
+                
+                if tensor_id not in merged_input_tensors:
+                    merged_input_tensors[tensor_id] = tensor
+            
+            logger.info(f"📦 Prepared {len(merged_input_tensors)} input tensors "
+                       f"({len(subgraph.input_tensors)} from builder, "
+                       f"{len(concrete_tensors)} discovered concrete tensors)")
+            
+            # Prepare input data (materialize external inputs)
             input_data = {}
-            for tensor_id, tensor in subgraph.input_tensors.items():
+            for tensor_id, tensor in merged_input_tensors.items():
                 if isinstance(tensor, LazyTensor):
+                    # ✅ SENIOR ENGINEER FIX: Preserve dtype during materialization
+                    expected_dtype = tensor.dtype if hasattr(tensor, 'dtype') else None
+                    
                     # Materialize factory operations locally
                     if self._is_factory_operation(tensor):
                         materialized = self._materialize_factory_op(tensor)
+                        # ✅ CRITICAL: Ensure materialized tensor has correct dtype
+                        if expected_dtype is not None and isinstance(materialized, torch.Tensor):
+                            if materialized.dtype != expected_dtype:
+                                logger.warning(
+                                    f"⚠️  Factory op dtype mismatch: LazyTensor={expected_dtype}, "
+                                    f"materialized={materialized.dtype}, coercing to {expected_dtype}"
+                                )
+                                materialized = materialized.to(dtype=expected_dtype)
                         input_data[str(tensor_id)] = materialized
                     else:
                         # This shouldn't happen if builder works correctly
                         logger.warning(f"Non-factory external input: {tensor.operation}")
-                        input_data[str(tensor_id)] = tensor._materialize_local()
+                        materialized = tensor._materialize_local()
+                        # ✅ CRITICAL: Ensure materialized tensor has correct dtype
+                        if expected_dtype is not None and isinstance(materialized, torch.Tensor):
+                            if materialized.dtype != expected_dtype:
+                                logger.warning(
+                                    f"⚠️  Local materialization dtype mismatch: LazyTensor={expected_dtype}, "
+                                    f"materialized={materialized.dtype}, coercing to {expected_dtype}"
+                                )
+                                materialized = materialized.to(dtype=expected_dtype)
+                        input_data[str(tensor_id)] = materialized
+                elif isinstance(tensor, torch.Tensor):
+                    # ✅ FIX: Final defense - meta tensors should have been filtered earlier
+                    # If we see one here, it means the filter in subgraph_builder or concrete_tensor discovery failed
+                    if tensor.device.type == 'meta':
+                        logger.error(
+                            f"❌ CRITICAL: Input tensor[{tensor_id}] is on meta device - this should have been filtered earlier! "
+                            f"This indicates a bug in subgraph building or concrete tensor discovery. "
+                            f"Shape: {tensor.shape}, dtype: {tensor.dtype}. "
+                            f"Skipping this tensor (operation may fail if it's actually needed)."
+                        )
+                        # Don't add meta tensors - skip them
+                        # If the operation actually needs this tensor, it will fail with a clear error
+                        continue
+                    else:
+                        # Concrete tensor - add directly to input_data
+                        input_data[str(tensor_id)] = tensor
                 else:
+                    # Fallback for other types
                     input_data[str(tensor_id)] = tensor
 
             # Send entire subgraph for execution
@@ -2280,7 +2430,7 @@ class LazyTensor(torch.Tensor):
                     subgraph=subgraph.serialize(),
                     input_data=input_data,
                     target=state.server_address,
-                    timeout=30,
+                    timeout=300,  # Increased timeout for large subgraphs (1738 ops)
                     graph_id=graph_id,  # Enable differential protocol
                     enable_differential=True
                 )
@@ -2311,7 +2461,8 @@ class LazyTensor(torch.Tensor):
         """Check if tensor represents a factory operation (creates data from scratch)."""
         factory_ops = {
             'aten::randn', 'aten::zeros', 'aten::ones', 'aten::empty',
-            'aten::tensor', 'aten::as_tensor', 'aten::from_numpy'
+            'aten::tensor', 'aten::as_tensor', 'aten::from_numpy',
+            'aten::arange', 'aten::linspace', 'aten::logspace', 'aten::eye', 'aten::full'
         }
         return tensor.operation in factory_ops
 
@@ -2325,35 +2476,51 @@ class LazyTensor(torch.Tensor):
         try:
             # Execute the factory operation locally
             op_name = tensor.operation.split('::')[1]
+            
+            # ✅ FIX: Ensure factory operations create tensors on CPU, not meta
+            # Meta tensors are only for shape inference and cannot be sent to server
+            kwargs = dict(tensor.kwargs)
+            if 'device' in kwargs:
+                device = kwargs['device']
+                if device == 'meta' or (isinstance(device, torch.device) and device.type == 'meta'):
+                    # Override meta device to CPU for factory operations
+                    kwargs['device'] = 'cpu'
+                    logger.debug(f"Overriding meta device to CPU for factory operation {tensor.operation}")
+            
+            # ✅ FIX: Preserve dtype from LazyTensor metadata
+            # This is critical for float16 models like GPT2-XL
+            if 'dtype' not in kwargs and hasattr(tensor, 'dtype') and tensor.dtype is not None:
+                kwargs['dtype'] = tensor.dtype
+                logger.debug(f"Preserving dtype {tensor.dtype} for factory operation {tensor.operation}")
 
             # Use torch functions directly instead of torch.ops.aten
             if op_name == 'randn':
                 # torch.randn(size, ...)
-                result = torch.randn(*tensor.inputs, **tensor.kwargs)
+                result = torch.randn(*tensor.inputs, **kwargs)
             elif op_name == 'zeros':
                 # torch.zeros(size, ...)
-                result = torch.zeros(*tensor.inputs, **tensor.kwargs)
+                result = torch.zeros(*tensor.inputs, **kwargs)
             elif op_name == 'ones':
                 # torch.ones(size, ...)
-                result = torch.ones(*tensor.inputs, **tensor.kwargs)
+                result = torch.ones(*tensor.inputs, **kwargs)
             elif op_name == 'empty':
                 # torch.empty(size, ...)
-                result = torch.empty(*tensor.inputs, **tensor.kwargs)
+                result = torch.empty(*tensor.inputs, **kwargs)
             elif op_name == 'full':
                 # torch.full(size, fill_value, ...)
-                result = torch.full(*tensor.inputs, **tensor.kwargs)
+                result = torch.full(*tensor.inputs, **kwargs)
             elif op_name == 'tensor':
                 # torch.tensor(data, ...)
-                result = torch.tensor(*tensor.inputs, **tensor.kwargs)
+                result = torch.tensor(*tensor.inputs, **kwargs)
             elif op_name == 'as_tensor':
                 # torch.as_tensor(data, ...)
-                result = torch.as_tensor(*tensor.inputs, **tensor.kwargs)
+                result = torch.as_tensor(*tensor.inputs, **kwargs)
             elif op_name == 'from_numpy':
                 # torch.from_numpy(data, ...)
-                result = torch.from_numpy(*tensor.inputs, **tensor.kwargs)
+                result = torch.from_numpy(*tensor.inputs, **kwargs)
             elif op_name == 'eye':
                 # torch.eye(n, ...)
-                result = torch.eye(*tensor.inputs, **tensor.kwargs)
+                result = torch.eye(*tensor.inputs, **kwargs)
             elif op_name == 'arange':
                 # torch.arange(start, end, ...)
                 # ✅ FIX: Extract scalar values from tensor arguments
@@ -2365,17 +2532,17 @@ class LazyTensor(torch.Tensor):
                         arange_args.append(inp.item())
                     else:
                         arange_args.append(inp)
-                result = torch.arange(*arange_args, **tensor.kwargs)
+                result = torch.arange(*arange_args, **kwargs)
             elif op_name == 'linspace':
                 # torch.linspace(start, end, ...)
-                result = torch.linspace(*tensor.inputs, **tensor.kwargs)
+                result = torch.linspace(*tensor.inputs, **kwargs)
             elif op_name == 'logspace':
                 # torch.logspace(start, end, ...)
-                result = torch.logspace(*tensor.inputs, **tensor.kwargs)
+                result = torch.logspace(*tensor.inputs, **kwargs)
             else:
                 # Fallback to torch.ops.aten
                 op_func = getattr(torch.ops.aten, op_name)
-                result = op_func(*tensor.inputs, **tensor.kwargs)
+                result = op_func(*tensor.inputs, **kwargs)
 
             logger.debug(f"Materialized factory op {tensor.operation} locally")
             return result

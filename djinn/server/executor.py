@@ -179,12 +179,29 @@ class SimpleExecutor:
 
 		Recursively materializes LazyTensor -> concrete Tensor.
 		Non-tensor values pass through unchanged.
+		
+		✅ ELEGANT FIX: Preserves dtype through materialization boundary.
+		This ensures all operations receive tensors with consistent dtypes,
+		fixing dtype mismatch errors without patching individual operations.
 		"""
 		from ..frontend.core.lazy_tensor import LazyTensor
 
 		if isinstance(value, LazyTensor):
 			# Recursively materialize all LazyTensor arguments
-			return self.execute_subgraph(value)
+			materialized = self.execute_subgraph(value)
+			
+			# ✅ ELEGANT FIX: Ensure dtype matches LazyTensor's dtype
+			# This preserves dtype through the materialization boundary.
+			# LazyTensor's dtype is the "source of truth" set during creation.
+			if isinstance(materialized, torch.Tensor) and materialized.dtype != value.dtype:
+				logger.debug(
+					f"Dtype mismatch after materialization: "
+					f"LazyTensor={value.dtype}, materialized={materialized.dtype}. "
+					f"Coercing to {value.dtype}"
+				)
+				materialized = materialized.to(dtype=value.dtype)
+			
+			return materialized
 		elif isinstance(value, (list, tuple)):
 			# Recursively process collection arguments
 			materialized = [self._ensure_concrete(v) for v in value]
@@ -603,14 +620,16 @@ class SimpleExecutor:
 	def _execute_operation(self, operation, inputs) -> torch.Tensor:
 		"""Execute a single operation with given inputs."""
 		try:
+			op_name = str(operation.operation) if hasattr(operation, 'operation') else str(operation)
 			op_func = self.operation_handlers.get(operation.operation)
 			if op_func:
 				return op_func(operation, inputs, operation.kwargs)
 			else:
 				return self._execute_fallback_eager(operation.operation, inputs, operation.kwargs)
 		except Exception as e:
-			logger.error(f"Failed to execute operation {operation.operation}: {e}")
-			raise MaterializationError(f"Execution failed for {operation.operation}") from e
+			op_name = str(operation.operation) if hasattr(operation, 'operation') else str(operation)
+			logger.error(f"Failed to execute operation {op_name}: {type(e).__name__}: {e}")
+			raise MaterializationError(f"Execution failed for {op_name}: {type(e).__name__}: {str(e)}") from e
 
 	def _execute_recursive(self, target_lazy_tensor) -> torch.Tensor:
 		"""Recursive execution path (original implementation)."""
@@ -695,9 +714,35 @@ class SimpleExecutor:
 					resolved_inputs = []
 					for arg in lt.inputs:
 						if isinstance(arg, _LT):
-							resolved_inputs.append(_compute_lazy(arg, depth + 1, visiting))  # ← Pass visiting set
+							materialized = _compute_lazy(arg, depth + 1, visiting)  # ← Pass visiting set
+							# ✅ ELEGANT FIX: Preserve dtype through materialization
+							# Ensure materialized tensor matches LazyTensor's dtype
+							if isinstance(materialized, torch.Tensor) and materialized.dtype != arg.dtype:
+								logger.debug(
+									f"Dtype mismatch in _compute_lazy: "
+									f"LazyTensor={arg.dtype}, materialized={materialized.dtype}. "
+									f"Coercing to {arg.dtype}"
+								)
+								materialized = materialized.to(dtype=arg.dtype)
+							resolved_inputs.append(materialized)
 						else:
 							resolved_inputs.append(arg)
+
+					# ✅ ELEGANT FIX: Ensure all tensor inputs have consistent dtype
+					# For operations that require matching dtypes (e.g., scaled_dot_product_attention),
+					# coerce all tensor inputs to match the first tensor's dtype
+					tensor_inputs = [inp for inp in resolved_inputs if isinstance(inp, torch.Tensor)]
+					if len(tensor_inputs) > 1:
+						# Use the first tensor's dtype as the target (ensures consistency)
+						# This is critical for operations like scaled_dot_product_attention
+						target_dtype = tensor_inputs[0].dtype
+						for i, inp in enumerate(resolved_inputs):
+							if isinstance(inp, torch.Tensor) and inp.dtype != target_dtype:
+								logger.debug(
+									f"Coercing input {i} dtype from {inp.dtype} to {target_dtype} "
+									f"for operation {lt.operation} (ensuring input consistency)"
+								)
+								resolved_inputs[i] = inp.to(dtype=target_dtype)
 
 					# Execute the operation using the resolved inputs
 					try:
@@ -706,12 +751,26 @@ class SimpleExecutor:
 						if op_func:
 							result = op_func(lt, resolved_inputs, lt.kwargs)
 							logger.debug(f"[Depth {depth}] {lt.operation} result shape: {result.shape if hasattr(result, 'shape') else 'N/A'}")
+							# ✅ ELEGANT FIX: Ensure result dtype matches LazyTensor's expected dtype
+							if isinstance(result, torch.Tensor) and lt.dtype is not None and result.dtype != lt.dtype:
+								logger.debug(
+									f"Result dtype mismatch: operation={lt.operation}, "
+									f"expected={lt.dtype}, got={result.dtype}. Coercing to {lt.dtype}"
+								)
+								result = result.to(dtype=lt.dtype)
 							# Cache the result
 							_compute_cache[lt_id] = result
 							return result
 						else:
 							# Fallback for unhandled operations using executor's fallback mechanism
 							result = self._execute_fallback_eager(lt.operation, resolved_inputs, lt.kwargs)
+							# ✅ ELEGANT FIX: Ensure result dtype matches LazyTensor's expected dtype
+							if isinstance(result, torch.Tensor) and lt.dtype is not None and result.dtype != lt.dtype:
+								logger.debug(
+									f"Fallback result dtype mismatch: operation={lt.operation}, "
+									f"expected={lt.dtype}, got={result.dtype}. Coercing to {lt.dtype}"
+								)
+								result = result.to(dtype=lt.dtype)
 							# Cache the result
 							_compute_cache[lt_id] = result
 							return result

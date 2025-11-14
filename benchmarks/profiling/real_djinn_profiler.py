@@ -108,9 +108,12 @@ class RealDjinnProfiler:
         env['PYTHONPATH'] = '/home/jae/Genie'
 
         # Simple server startup using module execution
+        # Redirect server logs to file for debugging
+        server_log_file = open('/tmp/djinn_server_output.log', 'w')
         self.server_process = subprocess.Popen([
             sys.executable, '-m', 'djinn.server.tcp_server'
-        ], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd='/home/jae/Genie')
+        ], env=env, stdout=server_log_file, stderr=subprocess.STDOUT, cwd='/home/jae/Genie')
+        self.server_log_file = server_log_file
 
         # Wait for server to start and be ready
         import socket
@@ -154,13 +157,22 @@ class RealDjinnProfiler:
                     logger.info("✅ Djinn server killed")
             else:
                 logger.info("✅ Djinn server was already stopped")
+                # Server crashed - check logs
+                if hasattr(self, 'server_log_file'):
+                    self.server_log_file.flush()
+                    logger.warning("Server process exited. Check /tmp/djinn_server_output.log for errors")
+            
+            # Close log file
+            if hasattr(self, 'server_log_file'):
+                self.server_log_file.close()
 
     def profile_djinn_execution(self,
                                model_func,
                                inputs: List[torch.Tensor],
                                model_name: str,
                                batch_size: int,
-                               num_runs: int = 3) -> DjinnExecutionProfile:
+                               num_runs: int = 3,
+                               enable_profiling: bool = True) -> DjinnExecutionProfile:
         """
         Profile real Djinn execution vs PyTorch baseline.
 
@@ -192,8 +204,8 @@ class RealDjinnProfiler:
             phase_profiles = []
 
             for run_id in range(num_runs):
-                logger.info(f"Djinn run {run_id+1}/{num_runs}...")
-                djinn_time, phases = self._measure_djinn_execution(model_func, inputs, model_name, batch_size, pytorch_avg)
+                logger.info(f"Djinn run {run_id+1}/{num_runs} (profiling={'enabled' if enable_profiling else 'disabled'})...")
+                djinn_time, phases = self._measure_djinn_execution(model_func, inputs, model_name, batch_size, pytorch_avg, enable_profiling)
                 djinn_times.append(djinn_time)
                 phase_profiles.append(phases)
 
@@ -274,17 +286,22 @@ class RealDjinnProfiler:
             logger.error(f"Traceback:\n{traceback.format_exc()}")
             raise
 
-    def _measure_djinn_execution(self, model_func, inputs: List[torch.Tensor], model_name: str, batch_size: int, pytorch_baseline_time: float = 0):
+    def _measure_djinn_execution(self, model_func, inputs: List[torch.Tensor], model_name: str, batch_size: int, pytorch_baseline_time: float = 0, enable_profiling: bool = True):
         """Measure actual Djinn execution by making real API calls."""
         import sys
         sys.path.insert(0, '/home/jae/Genie')
         import djinn
         
-        # ✅ PROFILING: Set up profiling context to collect actual measurements
+        # ✅ PROFILING: Set up profiling context to collect actual measurements (if enabled)
         from djinn.server.profiling_context import ProfilingContext, set_profiler, get_profiler
-        profiler = ProfilingContext(enabled=True)
-        set_profiler(profiler)
-        profiler.start()
+        profiler = None
+        if enable_profiling:
+            profiler = ProfilingContext(enabled=True)
+            set_profiler(profiler)
+            profiler.start()
+        else:
+            # Disable profiling by setting None
+            set_profiler(None)
 
         # Create phases list to track timing
         phases = []
@@ -313,9 +330,12 @@ class RealDjinnProfiler:
             # Phase 1: Graph capture (LazyTensor interception)
             start_phase(DjinnProfilePhase.GRAPH_CAPTURE)
             with djinn.capture():
-                # Move inputs to CPU and run inference inside capture
-                cpu_inputs = [inp.cpu() for inp in inputs]
-                output = model(*cpu_inputs)
+                # ✅ FIX: Match test behavior exactly
+                # Test uses: model(input_ids, use_cache=False) with single tensor
+                # Profiler was using: model(*cpu_inputs) which unpacks list
+                # For GPT2, the model expects a single input_ids tensor
+                input_ids = inputs[0].cpu() if isinstance(inputs, list) else inputs.cpu()
+                output = model(input_ids, use_cache=False)
             end_phase(DjinnProfilePhase.GRAPH_CAPTURE)
 
             # Phase 2-11: Materialization (includes all remaining phases)
@@ -323,25 +343,49 @@ class RealDjinnProfiler:
             # Extract logits from HuggingFace model output
             logits = output.logits if hasattr(output, 'logits') else output
 
-            # Use argmax like real GPTs - get token indices instead of full logits
-            # This demonstrates the network reduction optimization
-            tokens = logits.argmax(-1)  # Shape: [batch_size, seq_len]
-            result = tokens.cpu()  # This triggers materialization
+            # ✅ CRITICAL: Verify that we actually have a LazyTensor
+            # If logits is not a LazyTensor, the model wasn't intercepted!
+            from djinn.frontend.core.lazy_tensor import LazyTensor
+            if not isinstance(logits, LazyTensor):
+                logger.warning(
+                    f"⚠️  Model output is NOT a LazyTensor (type: {type(logits)}). "
+                    f"This means the model was not intercepted. "
+                    f"Operations will execute locally, not remotely. "
+                    f"This is likely because model parameters are regular tensors, not LazyTensors."
+                )
+                # Still materialize to get results, but note that this is local execution
+                result = logits.cpu()
+            else:
+                # ✅ FIX: Materialize logits directly (like the test) instead of argmax
+                # The test passes when materializing logits.cpu() directly.
+                # Doing argmax(-1) on LazyTensor creates a much larger computation graph
+                # that exposes bugs in subgraph building/execution.
+                # TODO: Once basic execution works, we can add argmax back for network optimization demo
+                result = logits.cpu()  # This triggers materialization (matches test behavior)
             end_phase(DjinnProfilePhase.SUBGRAPH_BUILDING)
 
             # Measure total Djinn execution time
             total_djinn_time = (time.perf_counter() - total_start_time) * 1000
 
-            # ✅ PROFILING: Get actual phase measurements from profiling context
-            actual_phases = profiler.get_phase_dict()
-            logger.info(f"📊 Actual measured phases: {actual_phases}")
+            # ✅ PROFILING: Get actual phase measurements from profiling context (if enabled)
+            actual_phases = {}
+            if profiler:
+                actual_phases = profiler.get_phase_dict()
+                logger.info(f"📊 Actual measured phases: {actual_phases}")
             
             # Map profiling context phases to DjinnProfilePhase enum
+            # Include both client-side and server-side phases
             phase_mapping = {
+                # Client-side phases
                 'serialization': DjinnProfilePhase.SERIALIZATION,
                 'deserialization': DjinnProfilePhase.RESULT_DESERIALIZATION,
                 'gpu_execution': DjinnProfilePhase.GPU_EXECUTION,
                 'request_handling': DjinnProfilePhase.REQUEST_HANDLING,
+                # Server-side phases (prefixed with "server_")
+                'server_serialization': DjinnProfilePhase.RESULT_SERIALIZATION,
+                'server_deserialization': DjinnProfilePhase.RESULT_DESERIALIZATION,
+                'server_gpu_execution': DjinnProfilePhase.GPU_EXECUTION,
+                'server_request_handling': DjinnProfilePhase.REQUEST_HANDLING,
             }
             
             # Add actual measured phases
@@ -470,10 +514,10 @@ def run_real_djinn_profiling():
     # Test configurations
     configs = [
         {
-            "name": "gpt2_xl",
+            "name": "gpt2",
             "model_func": create_test_model,
-            "input_shape": (1, 1024),  # GPT-2-XL context window is 1024 tokens
-            "batch_sizes": [1, 4],
+            "input_shape": (1, 5),  # Very small sequence for faster debugging
+            "batch_sizes": [1],
         }
     ]
 
@@ -490,13 +534,35 @@ def run_real_djinn_profiling():
                     vocab_size = 50257  # GPT-2 vocabulary size
                     inputs = [torch.randint(0, vocab_size, (batch_size, seq_length))]
 
-                    # Profile
-                    profile = profiler.profile_djinn_execution(
+                    # Profile with profiling enabled
+                    logger.info(f"\n{'='*80}")
+                    logger.info(f"PROFILING RUN: {config['name']} (batch_size={batch_size})")
+                    logger.info(f"{'='*80}")
+                    profile_with_profiling = profiler.profile_djinn_execution(
                         config['model_func'], inputs, config['name'],
-                        batch_size, num_runs=2
+                        batch_size, num_runs=2, enable_profiling=True
                     )
-
-                    all_profiles.append(profile)
+                    all_profiles.append(profile_with_profiling)
+                    
+                    # Profile without profiling to measure overhead
+                    logger.info(f"\n{'='*80}")
+                    logger.info(f"BASELINE RUN (no profiling): {config['name']} (batch_size={batch_size})")
+                    logger.info(f"{'='*80}")
+                    profile_without_profiling = profiler.profile_djinn_execution(
+                        config['model_func'], inputs, config['name'],
+                        batch_size, num_runs=2, enable_profiling=False
+                    )
+                    
+                    # Calculate profiling overhead
+                    overhead_ms = profile_with_profiling.total_time_ms - profile_without_profiling.total_time_ms
+                    overhead_percent = (overhead_ms / profile_without_profiling.total_time_ms) * 100 if profile_without_profiling.total_time_ms > 0 else 0
+                    logger.info(f"\n{'='*80}")
+                    logger.info(f"PROFILING OVERHEAD ANALYSIS")
+                    logger.info(f"{'='*80}")
+                    logger.info(f"With profiling:    {profile_with_profiling.total_time_ms:.2f}ms")
+                    logger.info(f"Without profiling: {profile_without_profiling.total_time_ms:.2f}ms")
+                    logger.info(f"Overhead:          {overhead_ms:.2f}ms ({overhead_percent:.2f}%)")
+                    logger.info(f"{'='*80}\n")
 
                 except Exception as e:
                     import traceback

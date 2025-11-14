@@ -258,27 +258,63 @@ class RemoteSubgraph:
                 'output_id': int
             }
         """
+        # Track concrete tensors found during serialization
+        # These need to be added to input_tensors and materialized on the client side
+        concrete_tensors = {}
+        
+        def encode_input(inp, op_name='unknown'):
+            """Encode an input value for serialization."""
+            if isinstance(inp, LazyTensor):
+                return id(inp)
+            elif isinstance(inp, (int, float, bool)):
+                return {'type': 'scalar', 'value': inp}
+            elif inp is None:
+                return {'type': 'none', 'value': None}
+            elif isinstance(inp, tuple):
+                return {'type': 'tuple', 'value': [encode_input(v, op_name) for v in inp]}
+            elif isinstance(inp, list):
+                return {'type': 'list', 'value': [encode_input(v, op_name) for v in inp]}
+            elif isinstance(inp, torch.Tensor):
+                # Concrete tensor - add to input_tensors and reference by ID
+                tensor_id = id(inp)
+                if tensor_id not in concrete_tensors:
+                    concrete_tensors[tensor_id] = inp
+                return tensor_id  # Reference by ID, will be resolved on client side
+            elif isinstance(inp, torch.dtype):
+                return {'type': 'dtype', 'value': str(inp)}
+            elif isinstance(inp, slice):
+                return {'type': 'slice', 'value': [inp.start, inp.stop, inp.step]}
+            else:
+                # Fallback: try to serialize as string
+                logger.warning(f"Unknown input type {type(inp)} for operation {op_name}, serializing as string")
+                return {'type': 'unknown', 'value': str(inp)}
+        
+        # Build operations with encoded inputs
+        serialized_operations = []
+        for op in self.operations:
+            serialized_operations.append({
+                'op_id': id(op),
+                'operation': op.operation,
+                'inputs': [encode_input(inp, op.operation) for inp in op.inputs],
+                'kwargs': op.kwargs,
+                'shape': list(op.shape) if op.shape else None,
+                'dtype': str(op.dtype) if op.dtype else None
+            })
+        
+        # Merge concrete tensors found during serialization into input_tensors
+        merged_input_tensors = dict(self.input_tensors)
+        for tensor_id, tensor in concrete_tensors.items():
+            if tensor_id not in merged_input_tensors:
+                merged_input_tensors[tensor_id] = tensor
+        
         return {
-            'operations': [
-                {
-                    'op_id': id(op),
-                    'operation': op.operation,
-                    'inputs': [
-                        id(inp) for inp in op.inputs
-                        if isinstance(inp, LazyTensor)
-                    ],
-                    'kwargs': op.kwargs,
-                    'shape': list(op.shape) if op.shape else None,
-                    'dtype': str(op.dtype) if op.dtype else None
-                }
-                for op in self.operations
-            ],
+            'operations': serialized_operations,
             'input_tensors': {
                 str(tensor_id): {
-                    'shape': list(tensor.shape),
-                    'dtype': str(tensor.dtype)
+                    'shape': list(tensor.shape) if hasattr(tensor, 'shape') else [],
+                    'dtype': str(tensor.dtype) if hasattr(tensor, 'dtype') else 'float32'
                 }
-                for tensor_id, tensor in self.input_tensors.items()
+                for tensor_id, tensor in merged_input_tensors.items()
             },
             'output_id': id(self.output_tensor)
         }
@@ -331,6 +367,7 @@ class SubgraphBuilder:
         operations = []
         visited = set()
         input_tensors = {}
+        concrete_tensors = {}  # Track concrete tensors (model weights) found during traversal
 
         # ✅ CRITICAL: Don't access shape/metadata during traversal to avoid triggering computation
         # Iterative post-order traversal to avoid recursion limit (fixes GPT-2 XL)
@@ -363,16 +400,33 @@ class SubgraphBuilder:
                 stack.append((tensor, True))  # Revisit after children
                 
                 # Push children (reverse order for correct topological sort)
+                # ✅ NEW: Also check for concrete tensors (model weights) in inputs
                 for inp in reversed(tensor.inputs):
                     if isinstance(inp, LazyTensor) and id(inp) not in visited:
                         stack.append((inp, False))
+                    elif isinstance(inp, torch.Tensor) and not isinstance(inp, LazyTensor):
+                        # ✅ FIX: Filter out meta tensors - they have no data and can't be sent to server
+                        # Meta tensors are created during shape inference and shouldn't be in input_tensors
+                        if inp.device.type == 'meta':
+                            logger.debug(
+                                f"Skipping meta tensor in operation inputs (shape={inp.shape}, dtype={inp.dtype}). "
+                                f"Meta tensors are for shape inference only and cannot be sent to server."
+                            )
+                            continue
+                        
+                        # Concrete tensor (model weight) - add as external input
+                        inp_id = id(inp)
+                        if inp_id not in concrete_tensors:
+                            concrete_tensors[inp_id] = inp
+                            input_tensors[inp_id] = inp
             else:
                 # Second visit - children processed, add to operations
                 visited.add(tensor_id)
                 operations.append(tensor)
 
         logger.info(f"Built subgraph: {len(operations)} operations, "
-                   f"{len(input_tensors)} external inputs")
+                   f"{len(input_tensors)} external inputs "
+                   f"({len(concrete_tensors)} concrete tensors identified)")
 
         return RemoteSubgraph(
             operations=operations,  # Already in topological order

@@ -14,6 +14,7 @@ import logging
 import io
 import os
 import pickle
+import time
 from typing import Dict, Any, Optional, Tuple
 from datetime import datetime
 
@@ -133,15 +134,24 @@ async def handle_coordinator_subgraph(request_data: bytes, writer) -> None:
             logger.info(f"🧪 SERVER: Coordinator message keys: {list(message.keys())}")
             logger.info(f"🧪 SERVER: Message subgraph_data keys: {list(message.get('subgraph_data', {}).keys()) if isinstance(message.get('subgraph_data'), dict) else 'N/A'}")
         except Exception as e:
-            logger.error(f"Failed to unpickle coordinator message: {e}")
-            error_response = f"Failed to parse message: {e}".encode()
+            error_msg = f"{type(e).__name__}: {str(e)}"
+            logger.error(f"Failed to unpickle coordinator message: {error_msg}")
+            error_response = f"Failed to parse message: {error_msg}".encode('utf-8')
             await _send_message(writer, 0x05, error_response)
             return
 
         # Extract data from coordinator message
         subgraph_data = message.get('subgraph_data', {})
-        input_data_pickled = subgraph_data.get('input_data', {})
+        # ✅ FIX: input_data is at the top level of the message, not nested in subgraph_data
+        input_data_pickled = message.get('input_data', {})
+        if not input_data_pickled:
+            # Fallback: check if it's nested in subgraph_data (old format)
+            input_data_pickled = subgraph_data.get('input_data', {})
         timeout = message.get('timeout', 30)
+        
+        logger.info(f"🔍 Message keys: {list(message.keys())}")
+        logger.info(f"🔍 input_data_pickled keys: {list(input_data_pickled.keys())}")
+        logger.info(f"🔍 subgraph_data keys: {list(subgraph_data.keys()) if isinstance(subgraph_data, dict) else type(subgraph_data)}")
 
         # Handle differential graph protocol
         if isinstance(subgraph_data, dict) and subgraph_data.get('type') == 'delta':
@@ -161,8 +171,9 @@ async def handle_coordinator_subgraph(request_data: bytes, writer) -> None:
                 else:
                     input_data[key] = pickled_tensor
         except Exception as e:
-            logger.error(f"Failed to deserialize input data: {e}")
-            error_response = f"Failed to deserialize inputs: {e}".encode()
+            error_msg = f"{type(e).__name__}: {str(e)}"
+            logger.error(f"Failed to deserialize input data: {error_msg}")
+            error_response = f"Failed to deserialize inputs: {error_msg}".encode('utf-8')
             await _send_message(writer, 0x05, error_response)
             return
 
@@ -174,12 +185,31 @@ async def handle_coordinator_subgraph(request_data: bytes, writer) -> None:
             logger.info(f"🔍 Subgraph operations: {len(subgraph.get('operations', [])) if isinstance(subgraph, dict) else 'N/A'}")
 
             if OPTIMIZATION_EXECUTOR:
-                result, stats = await OPTIMIZATION_EXECUTOR.execute(
-                    subgraph_request=subgraph,
-                    input_data=input_data,
-                    timeout=timeout
-                )
-                logger.debug(f"Optimization stats: {stats}")
+                logger.info(f"🚀 Starting subgraph execution: {len(subgraph.get('operations', []))} operations, {len(input_data)} inputs")
+                execution_start = time.time()
+                try:
+                    # Try to infer model_id from subgraph (for weight caching)
+                    # For GPT2, we can detect it from the structure
+                    model_id = None
+                    if len(input_data) > 500:  # Likely a large model with many weights
+                        # Try to infer from operation patterns or use a default
+                        model_id = "gpt2"  # Default for now
+                    
+                    result, stats = await OPTIMIZATION_EXECUTOR.execute(
+                        subgraph_request=subgraph,
+                        input_data=input_data,
+                        model_id=model_id,  # Enable weight caching
+                        timeout=timeout
+                    )
+                    execution_time = time.time() - execution_start
+                    logger.info(f"✅ Subgraph execution completed in {execution_time:.2f}s")
+                    logger.debug(f"Optimization stats: {stats}")
+                except Exception as e:
+                    execution_time = time.time() - execution_start
+                    logger.error(f"❌ Subgraph execution failed after {execution_time:.2f}s: {type(e).__name__}: {str(e)}")
+                    import traceback
+                    logger.error(f"Traceback:\n{traceback.format_exc()}")
+                    raise
 
                 # Ensure result is materialized
                 if hasattr(result, 'materialize'):
@@ -197,8 +227,11 @@ async def handle_coordinator_subgraph(request_data: bytes, writer) -> None:
                 return
 
         except Exception as e:
-            logger.error(f"Subgraph execution failed: {e}")
-            error_response = f"Execution failed: {e}".encode()
+            import traceback
+            error_msg = f"{type(e).__name__}: {str(e)}"
+            logger.error(f"Subgraph execution failed: {error_msg}")
+            logger.debug(f"Traceback:\n{traceback.format_exc()}")
+            error_response = error_msg.encode('utf-8')
             await _send_message(writer, 0x05, error_response)
             return
 
@@ -211,22 +244,36 @@ async def handle_coordinator_subgraph(request_data: bytes, writer) -> None:
                 torch.save(result, result_buffer)
                 result_bytes = result_buffer.getvalue()
 
-            # Send result with proper message format (RESULT = 0x04)
-            await _send_message(writer, 0x04, result_bytes)
+            # ✅ FIX: Send result in format expected by coordinator client
+            # Format: [type (1)] [profiling_size (4)] [profiling_json] [tensor_size (4)] [tensor_bytes]
+            # Coordinator expects profiling metadata even if empty (for protocol consistency)
+            profiling_data = {}  # Empty profiling data for coordinator path
+            profiling_json = json.dumps(profiling_data).encode('utf-8')
+            profiling_size = len(profiling_json)
+            
+            # Send result with profiling metadata (type=0x04: RESULT)
+            # Message format: [type (1)] [profiling_size (4)] [profiling_json] [tensor_size (4)] [tensor_bytes]
+            message = struct.pack('>BI', 0x04, profiling_size) + profiling_json + struct.pack('>I', len(result_bytes)) + result_bytes
+            writer.write(message)
+            await writer.drain()
 
             STATS['requests_success'] += 1
             logger.info(f"✅ Coordinator subgraph execution complete: {result.shape}")
 
         except Exception as e:
-            logger.error(f"Failed to serialize result: {e}")
-            error_response = f"Failed to serialize result: {e}".encode()
+            error_msg = f"{type(e).__name__}: {str(e)}"
+            logger.error(f"Failed to serialize result: {error_msg}")
+            error_response = f"Failed to serialize result: {error_msg}".encode('utf-8')
             await _send_message(writer, 0x05, error_response)
 
     except Exception as e:
-        logger.error(f"Error in coordinator subgraph handler: {e}")
+        import traceback
+        error_msg = f"{type(e).__name__}: {str(e)}"
+        logger.error(f"Error in coordinator subgraph handler: {error_msg}")
+        logger.debug(f"Traceback:\n{traceback.format_exc()}")
         STATS['requests_failed'] += 1
         try:
-            error_response = f"Internal error: {e}".encode()
+            error_response = f"Internal error: {error_msg}".encode('utf-8')
             await _send_message(writer, 0x05, error_response)
         except:
             pass  # Connection might be closed
@@ -235,6 +282,12 @@ async def handle_coordinator_subgraph(request_data: bytes, writer) -> None:
 async def handle_execute_subgraph(request_data: bytes, writer) -> None:
     """Handle subgraph execution request."""
     global STATS
+    
+    # ✅ PROFILING: Set up server-side profiling context
+    from .profiling_context import ProfilingContext, set_profiler
+    server_profiler = ProfilingContext(enabled=True)
+    server_profiler.start()
+    set_profiler(server_profiler)
     
     # ✅ PROFILING: Record request handling time
     from .profiling_context import record_phase
@@ -257,8 +310,9 @@ async def handle_execute_subgraph(request_data: bytes, writer) -> None:
                 else:
                     raise ValueError("Could not parse request metadata")
             except (json.JSONDecodeError, KeyError) as e:
-                logger.error(f"Failed to parse request: {e}")
-                error_response = str(e).encode()
+                error_msg = f"{type(e).__name__}: {str(e)}"
+                logger.error(f"Failed to parse request: {error_msg}")
+                error_response = error_msg.encode('utf-8')
                 await _send_message(writer, 0x05, error_response)  # ERROR
                 return
 
@@ -269,8 +323,9 @@ async def handle_execute_subgraph(request_data: bytes, writer) -> None:
             try:
                 input_data = deserialize_tensor(tensors_data)
             except Exception as e:
-                logger.error(f"Failed to deserialize tensors: {e}")
-                error_response = str(e).encode()
+                error_msg = f"{type(e).__name__}: {str(e)}"
+                logger.error(f"Failed to deserialize tensors: {error_msg}")
+                error_response = error_msg.encode('utf-8')
                 await _send_message(writer, 0x05, error_response)
                 return
 
@@ -280,8 +335,11 @@ async def handle_execute_subgraph(request_data: bytes, writer) -> None:
             try:
                 result = OPTIMIZATION_EXECUTOR.executor.execute(subgraph_request, input_data)
             except Exception as e:
-                logger.error(f"❌ Subgraph execution failed: {e}")
-                error_response = str(e).encode()
+                import traceback
+                error_msg = f"{type(e).__name__}: {str(e)}"
+                logger.error(f"❌ Subgraph execution failed: {error_msg}")
+                logger.debug(f"Traceback:\n{traceback.format_exc()}")
+                error_response = error_msg.encode('utf-8')
                 await _send_message(writer, 0x05, error_response)
                 return
 
@@ -296,22 +354,51 @@ async def handle_execute_subgraph(request_data: bytes, writer) -> None:
                     torch.save(result, result_buffer)
                     result_bytes = result_buffer.getvalue()
             except Exception as e:
-                logger.error(f"Failed to serialize result: {e}")
-                error_response = str(e).encode()
+                error_msg = f"{type(e).__name__}: {str(e)}"
+                logger.error(f"Failed to serialize result: {error_msg}")
+                error_response = error_msg.encode('utf-8')
                 await _send_message(writer, 0x05, error_response)
                 return
 
-        # Send result (type=0x04: RESULT)
-        await _send_message(writer, 0x04, result_bytes)
+            # ✅ PROFILING: Collect server-side profiling data before sending response
+            profiling_data = {}
+            try:
+                from .profiling_context import get_profiler
+                current_profiler = get_profiler()
+                if current_profiler:
+                    profiling_data = current_profiler.get_phase_dict()
+                    logger.debug(f"📊 Server-side profiling data: {profiling_data}")
+            except Exception as e:
+                logger.debug(f"Could not collect profiling data: {e}")
+            
+            # ✅ PROFILING: Include profiling data in response
+            # Format: [message_type (1 byte)] [profiling_json_size (4 bytes)] [profiling_json] [tensor_size (4 bytes)] [tensor_bytes]
+            # This allows client to extract profiling data before deserializing tensor
+            profiling_json = json.dumps(profiling_data).encode('utf-8')
+            profiling_size = len(profiling_json)
+            
+            # Send result with profiling metadata (type=0x04: RESULT)
+            # Message format: [type (1)] [profiling_size (4)] [profiling_json] [tensor_size (4)] [tensor_bytes]
+            message = struct.pack('>BI', 0x04, profiling_size) + profiling_json + struct.pack('>I', len(result_bytes)) + result_bytes
+            writer.write(message)
+            await writer.drain()
 
-        STATS['requests_success'] += 1
-        logger.info(f"✅ Subgraph execution complete: {result.shape}")
+            STATS['requests_success'] += 1
+            logger.info(f"✅ Subgraph execution complete: {result.shape}")
+            
+            # Clean up profiling context
+            set_profiler(None)
 
-    except Exception as e:
-        logger.error(f"❌ Error handling subgraph: {e}")
-        STATS['requests_failed'] += 1
-        error_response = str(e).encode()
-        await _send_message(writer, 0x05, error_response)
+        except Exception as e:
+            import traceback
+            error_msg = f"{type(e).__name__}: {str(e)}"
+            logger.error(f"❌ Error handling subgraph: {error_msg}")
+            logger.debug(f"Traceback:\n{traceback.format_exc()}")
+            STATS['requests_failed'] += 1
+            error_response = error_msg.encode('utf-8')
+            await _send_message(writer, 0x05, error_response)
+            # Clean up profiling context on error too
+            set_profiler(None)
 
 
 async def handle_execute_operation(request_data: bytes, writer) -> None:
@@ -358,9 +445,12 @@ async def handle_execute_operation(request_data: bytes, writer) -> None:
         logger.info(f"✅ Operation execution complete")
 
     except Exception as e:
-        logger.error(f"❌ Error handling operation: {e}")
+        import traceback
+        error_msg = f"{type(e).__name__}: {str(e)}"
+        logger.error(f"❌ Error handling operation: {error_msg}")
+        logger.debug(f"Traceback:\n{traceback.format_exc()}")
         STATS['requests_failed'] += 1
-        error_response = str(e).encode()
+        error_response = error_msg.encode('utf-8')
         await _send_message(writer, 0x05, error_response)
 
 
@@ -372,14 +462,27 @@ async def _send_message(writer, message_type: int, data: bytes) -> None:
 
 
 async def _recv_message(reader, timeout: float = 300.0) -> Tuple[int, bytes]:
-    """Receive length-prefixed message."""
+    """Receive length-prefixed message.
+    
+    Protocol: [message_type (1 byte)] [size (8 bytes)] [data]
+    Updated to support large messages > 4GB (for model weights).
+    """
     try:
-        header = await asyncio.wait_for(
-            reader.readexactly(5),
+        # Read message type (1 byte)
+        msg_type_bytes = await asyncio.wait_for(
+            reader.readexactly(1),
             timeout=timeout
         )
-        msg_type, length = struct.unpack('>BI', header)
+        msg_type = msg_type_bytes[0]
         
+        # Read size (8 bytes for large messages)
+        size_bytes = await asyncio.wait_for(
+            reader.readexactly(8),
+            timeout=timeout
+        )
+        length = int.from_bytes(size_bytes, 'big')
+        
+        # Read data
         data = await asyncio.wait_for(
             reader.readexactly(length),
             timeout=timeout

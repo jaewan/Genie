@@ -144,6 +144,9 @@ class UniversalDispatcher:
             
             # ✅ FIX: Type conversion via .to() method
             'to': self._handle_to,
+            
+            # ✅ FIX: from_numpy - factory function not in torch.ops.aten
+            'from_numpy': self._handle_from_numpy,
         }
     
     def _preprocess_cat(self, inputs: List[Any], kwargs: Dict[str, Any]) -> tuple:
@@ -767,7 +770,47 @@ class UniversalDispatcher:
             return torch_op(*materialized_inputs, **kwargs)
         
         raise NotImplementedError(f"Cannot find operation {op_name}")
-
+    
+    def _handle_from_numpy(self, inputs: List[Any], kwargs: Dict[str, Any]) -> torch.Tensor:
+        """
+        Handle torch.from_numpy operation.
+        
+        from_numpy is a factory function that creates a tensor from a numpy array.
+        It's not in torch.ops.aten, so we need to handle it specially.
+        """
+        import numpy as np
+        
+        if not inputs:
+            raise ValueError("from_numpy requires at least one input (numpy array)")
+        
+        # First input should be a numpy array
+        numpy_array = inputs[0]
+        if not isinstance(numpy_array, np.ndarray):
+            # If it's already a tensor, return it
+            if isinstance(numpy_array, torch.Tensor):
+                return numpy_array
+            raise ValueError(f"from_numpy expects numpy.ndarray, got {type(numpy_array)}")
+        
+        # Get dtype and device from kwargs
+        dtype = kwargs.get('dtype', None)
+        device = kwargs.get('device', None)
+        
+        # ✅ FIX: Use torch.from_numpy directly with interception disabled
+        # This works on both client and server side
+        from .interception_control import disable_interception, InterceptionContext
+        with disable_interception(InterceptionContext.MATERIALIZATION):
+            result = torch.from_numpy(numpy_array)
+        
+        # Apply dtype conversion if requested
+        if dtype is not None and result.dtype != dtype:
+            result = result.to(dtype=dtype)
+        
+        # Apply device conversion if requested
+        if device is not None:
+            result = result.to(device=device)
+        
+        return result
+    
     def dispatch(self, operation: str, inputs: List[Any], kwargs: Dict[str, Any]) -> torch.Tensor:
         """
         Universal dispatch - handles 99% of operations automatically.
