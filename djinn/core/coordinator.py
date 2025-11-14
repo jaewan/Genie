@@ -11,6 +11,7 @@ Design principles:
 import threading
 import logging
 import time
+import json
 from dataclasses import dataclass
 from typing import Optional, Dict, Callable, Any, List
 import asyncio
@@ -126,9 +127,9 @@ class DjinnCoordinator:
         self.memory_manager = None
         self.active_transfers = {}
 
-        # ✅ ADD: Result management
-        self._result_queues: Dict[str, asyncio.Queue] = {}
-        self._result_handlers: Dict[str, Any] = {}
+        # ✅ ADD: Result management (refactored to separate module)
+        from .coordinator_result import ResultManager
+        self._result_manager = ResultManager()
 
         # ✅ ADD: Scheduler integration (CRITICAL for semantic awareness)
         self.scheduler = Scheduler()
@@ -138,15 +139,10 @@ class DjinnCoordinator:
         perf_config = self._central_config.get_performance_config()
         self.enable_profiling = perf_config.enable_profiling
 
+        # Profiling is handled via ProfilingContext (djinn/server/profiling_context.py)
+        # No need for separate profiler instance here
         if self.enable_profiling:
-            try:
-                from djinn.profiling import DjinnProfiler
-            except ImportError:
-                from ...profiling import DjinnProfiler
-            self.profiler = DjinnProfiler()
-            logger.info("✓ Profiling enabled")
-        else:
-            self.profiler = None
+            logger.info("✓ Profiling enabled (via ProfilingContext)")
 
         # ✅ Register as global instance
         set_coordinator(self)
@@ -223,7 +219,7 @@ class DjinnCoordinator:
             is_server_coordinator = (hasattr(self.config, 'is_server') and self.config.is_server)
             if not is_server_coordinator:
                 # ✅ FIX: Register callback BEFORE initialize() to avoid race condition
-                self.transports['tcp']._result_callback = self._handle_result_received
+                self.transports['tcp']._result_callback = self._result_manager.handle_result_received
                 logger.info("✓ Result callback registered")
 
                 # Client coordinators need to initialize TCP to receive results from servers
@@ -266,7 +262,11 @@ class DjinnCoordinator:
         transfer_id = str(uuid.uuid4())
         
         # Extract/enrich semantic metadata
-        metadata = self._extract_metadata(tensor, semantic_metadata)
+        from .coordinator_transport import MetadataExtractor, TransportSelector
+        metadata_extractor = MetadataExtractor(self.scheduler)
+        transport_selector = TransportSelector(self.transports)
+        
+        metadata = metadata_extractor.extract_metadata(tensor, semantic_metadata)
         
         print(f"\n=== Transfer {transfer_id} ===")
         print(f"  Tensor: {tensor.shape} {tensor.dtype} on {tensor.device}")
@@ -274,7 +274,7 @@ class DjinnCoordinator:
         print(f"  Size: {metadata['size_bytes'] / 1024**2:.2f} MB")
         
         # Select best transport
-        transport = self._select_transport(tensor, metadata)
+        transport = transport_selector.select_transport(tensor, metadata)
         print(f"  Transport: {transport.name}")
         
         # Register GPU memory (if needed)
@@ -315,7 +315,9 @@ class DjinnCoordinator:
         print(f"\n=== Receiving {transfer_id} ===")
 
         # Select transport
-        transport = self._select_transport_for_metadata(metadata)
+        from .coordinator_transport import TransportSelector
+        transport_selector = TransportSelector(self.transports)
+        transport = transport_selector.select_transport_for_metadata(metadata)
         print(f"  Transport: {transport.name}")
 
         # Receive data
@@ -384,7 +386,9 @@ class DjinnCoordinator:
 
         # Wait for result (in practice, this would be handled by callbacks)
         print("  Waiting for result...")
-
+        
+        # Create result queue for receiving the result
+        result_queue = self._create_result_queue(result_id)
         result = await asyncio.wait_for(
             result_queue.get(),
             timeout=self._central_config.performance.operation_timeout
@@ -514,95 +518,80 @@ class DjinnCoordinator:
         if timeout is None:
             timeout = self._central_config.performance.operation_timeout
 
-        # ✅ NEW: Wrap with profiler if enabled
-        if self.profiler:
-            with self.profiler.profile_operation(operation, {
-                'target': target,
-                'input_shapes': [list(t.shape) for t in inputs],
-                'input_dtypes': [str(t.dtype) for t in inputs],
-                'num_inputs': len(inputs),
-                'timeout': timeout
-            }) as measurement:
+        # Profiling is handled via ProfilingContext (djinn/server/profiling_context.py)
+        # No need for separate profiler instance here
+        
+        # Generate IDs
+        transfer_id = str(uuid.uuid4())
+        result_id = f"{transfer_id}_result"
 
-                # Generate IDs
-                transfer_id = str(uuid.uuid4())
-                result_id = f"{transfer_id}_result"
+        logger.info(f"🚀 Remote execution: {operation} with {len(inputs)} inputs → {target}")
 
-                logger.info(f"🚀 Remote execution: {operation} with {len(inputs)} inputs → {target}")
+        # Time scheduler decision
+        t0 = time.perf_counter()
+        primary_tensor = inputs[0]
+        # ✅ FIX: Use the transport's actual listening port, not the config default
+        client_port = self.transports['tcp'].data_port if 'tcp' in self.transports else self._central_config.network.data_port
+        logger.debug(f"Using client port for operation: {client_port}")
+        operation_metadata = create_operation_metadata(
+            operation=operation,
+            result_id=result_id,
+            inputs=inputs,
+            client_port=client_port  # ✅ Actual listening port
+        )
+        metadata = self._extract_metadata(primary_tensor, operation_metadata.to_dict())
 
-                # Time scheduler decision
-                t0 = time.perf_counter()
-                primary_tensor = inputs[0]
-                # ✅ FIX: Use the transport's actual listening port, not the config default
-                client_port = self.transports['tcp'].data_port if 'tcp' in self.transports else self._central_config.network.data_port
-                logger.debug(f"Using client port for operation: {client_port}")
-                operation_metadata = create_operation_metadata(
-                    operation=operation,
-                    result_id=result_id,
-                    inputs=inputs,
-                    client_port=client_port  # ✅ Actual listening port
-                )
-                metadata = self._extract_metadata(primary_tensor, operation_metadata.to_dict())
-                measurement['timings']['scheduler_time'] = time.perf_counter() - t0
+        # ✅ Register target server with scheduler (if not already known)
+        if hasattr(self.scheduler, 'register_server'):
+            self.scheduler.register_server(target)
 
-                # ✅ Register target server with scheduler (if not already known)
-                if hasattr(self.scheduler, 'register_server'):
-                    self.scheduler.register_server(target)
+        # ✅ Consult scheduler (THIS IS THE KEY CHANGE)
+        scheduling_decision = self.scheduler.schedule(
+            operation=operation,
+            inputs=inputs,
+            metadata=metadata
+        )
 
-                # ✅ Consult scheduler (THIS IS THE KEY CHANGE)
-                scheduling_decision = self.scheduler.schedule(
-                    operation=operation,
-                    inputs=inputs,
-                    metadata=metadata
-                )
+        # ✅ Use scheduler's device choice
+        scheduled_target = scheduling_decision['device']
+        logger.info(f"Scheduler placed {operation} on {scheduled_target} "
+                   f"(requested: {target}, explanation: {scheduling_decision['explanation']})")
 
-                # ✅ Use scheduler's device choice
-                scheduled_target = scheduling_decision['device']
-                logger.info(f"Scheduler placed {operation} on {scheduled_target} "
-                           f"(requested: {target}, explanation: {scheduling_decision['explanation']})")
+        # Step 6: Select transport
+        from .coordinator_transport import TransportSelector
+        transport_selector = TransportSelector(self.transports)
+        transport = transport_selector.select_transport(primary_tensor, metadata)
 
-                # Step 6: Select transport
-                transport = self._select_transport(primary_tensor, metadata)
+        # Step 7: Send multiple tensors using SCHEDULER'S TARGET
+        logger.debug(f"  Sending {len(inputs)} tensors to {scheduled_target}")
 
-                # Step 7: Send multiple tensors using SCHEDULER'S TARGET
-                logger.debug(f"  Sending {len(inputs)} tensors to {scheduled_target}")
+        # Time network transfer
+        t0 = time.perf_counter()
+        success = await transport.send_multi_tensor(
+            inputs, scheduled_target, transfer_id, metadata
+        )
 
-                # Time network transfer
-                t0 = time.perf_counter()
-                success = await transport.send_multi_tensor(
-                    inputs, scheduled_target, transfer_id, metadata
-                )
-                measurement['timings']['network_send'] = time.perf_counter() - t0
+        if not success:
+            raise RuntimeError(f"Failed to send tensors for {operation}")
 
-                if not success:
-                    raise RuntimeError(f"Failed to send tensors for {operation}")
+        # Step 8: Wait for result (with timeout)
+        logger.debug(f"  Waiting for result (timeout={timeout}s)...")
 
-                # Step 8: Wait for result (with timeout)
-                logger.debug(f"  Waiting for result (timeout={timeout}s)...")
+        # Time result waiting
+        t0 = time.perf_counter()
+        result_queue = self._result_manager.create_result_queue(result_id)
+        result = await asyncio.wait_for(
+            result_queue.get(),
+            timeout=timeout
+        )
 
-                # Time result waiting
-                t0 = time.perf_counter()
-                result_queue = self._create_result_queue(result_id)
-                result = await asyncio.wait_for(
-                    result_queue.get(),
-                    timeout=timeout
-                )
-                measurement['timings']['wait_result'] = time.perf_counter() - t0
+        # Step 9: Check if result is an exception
+        if isinstance(result, Exception):
+            logger.error(f"Remote execution failed: {result}")
+            raise result
 
-                # Step 9: Check if result is an exception
-                if isinstance(result, Exception):
-                    logger.error(f"Remote execution failed: {result}")
-                    raise result
-
-                # Time deserialization (minimal for our protocol)
-                t0 = time.perf_counter()
-                measurement['timings']['deserialize'] = time.perf_counter() - t0
-
-                logger.info(f"✅ Remote execution complete: {result.shape}")
-                return result
-        else:
-            # Normal execution without profiling
-            return await self._execute_internal(operation, inputs, target, timeout)
+        logger.info(f"✅ Remote execution complete: {result.shape}")
+        return result
 
     async def execute_remote_subgraph(self,
                                       subgraph: Dict[str, Any],
@@ -1099,7 +1088,7 @@ class DjinnCoordinator:
         logger.info(f"🚀 Remote execution: {operation} with {len(inputs)} inputs → {target}")
 
         # Step 1: Create result queue BEFORE sending
-        result_queue = self._create_result_queue(result_id)
+        result_queue = self._result_manager.create_result_queue(result_id)
 
         try:
             # Step 2: Prepare metadata (WITHOUT tensor data - tensors sent separately)
@@ -1112,7 +1101,9 @@ class DjinnCoordinator:
                 inputs=inputs,
                 client_port=client_port  # ✅ Actual listening port
             )
-            metadata = self._extract_metadata(primary_tensor, operation_metadata.to_dict())
+            from .coordinator_transport import MetadataExtractor
+            metadata_extractor = MetadataExtractor(self.scheduler)
+            metadata = metadata_extractor.extract_metadata(primary_tensor, operation_metadata.to_dict())
             logger.debug(f"Sending operation metadata: {metadata}")
             logger.debug(f"Client port in metadata: {metadata.get('client_port')}")
 
@@ -1133,7 +1124,9 @@ class DjinnCoordinator:
                        f"(requested: {target}, explanation: {scheduling_decision['explanation']})")
 
             # Step 6: Select transport
-            transport = self._select_transport(primary_tensor, metadata)
+            from .coordinator_transport import TransportSelector
+            transport_selector = TransportSelector(self.transports)
+            transport = transport_selector.select_transport(primary_tensor, metadata)
 
             # Step 7: Send multiple tensors using SCHEDULER'S TARGET
             logger.debug(f"  Sending {len(inputs)} tensors to {scheduled_target}")
@@ -1161,11 +1154,11 @@ class DjinnCoordinator:
 
         except asyncio.TimeoutError:
             # Check if result was received via callback (race condition)
-            if result_id in self._result_queues:
+            if result_id in self._result_manager._result_queues:
                 # Result arrived via callback during timeout handling
                 try:
                     result = await asyncio.wait_for(
-                        self._result_queues[result_id].get(),
+                        self._result_manager._result_queues[result_id].get(),
                         timeout=0.1  # Short timeout to avoid hanging
                     )
                     logger.info(f"✅ Remote execution complete via callback: {result.shape}")
@@ -1178,7 +1171,7 @@ class DjinnCoordinator:
             logger.error(f"  Operation: {operation}")
             logger.error(f"  Target: {scheduled_target}")
             logger.error(f"  Input shapes: {[list(t.shape) for t in inputs]}")
-            logger.error(f"  Queue status: {len(self._result_queues)} active queues")
+            logger.error(f"  Queue status: {self._result_manager.get_active_queue_count()} active queues")
 
             raise RuntimeError(
                 f"Remote execution timeout after {timeout}s. "
@@ -1192,7 +1185,7 @@ class DjinnCoordinator:
             logger.error(f"  Operation: {operation}")
             logger.error(f"  Target: {scheduled_target}")
             logger.error(f"  Input count: {len(inputs)}")
-            logger.error(f"  Queue cleanup: {len(self._result_queues)} queues remain")
+            logger.error(f"  Queue cleanup: {self._result_manager.get_active_queue_count()} queues remain")
 
             # Re-raise with enhanced context
             raise RuntimeError(
@@ -1202,44 +1195,17 @@ class DjinnCoordinator:
             ) from e
         finally:
             # Step 10: Cleanup queue
-            self._result_queues.pop(result_id, None)
+            self._result_manager.cleanup_queue(result_id)
 
+    # Result management methods moved to coordinator_result.py
+    # Kept as aliases for backward compatibility
     def _create_result_queue(self, result_id: str) -> asyncio.Queue:
-        """Create result queue for operation."""
-        result_queue = asyncio.Queue(maxsize=1)
-        self._result_queues[result_id] = result_queue
-        return result_queue
-
+        """Create result queue for operation (delegates to ResultManager)."""
+        return self._result_manager.create_result_queue(result_id)
+    
     async def _handle_result_received(self, result_id: str, result):
-        """
-        Handle result from transport (callback).
-
-        Args:
-            result_id: Result identifier (from metadata)
-            result: torch.Tensor (success) or Exception (failure)
-        """
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.debug(f"  Result received: {result_id}")
-        logger.debug(f"  Available queues: {list(self._result_queues.keys())}")
-
-        if result_id in self._result_queues:
-            queue = self._result_queues[result_id]
-
-            try:
-                # Put result (tensor or exception) in queue (non-blocking)
-                queue.put_nowait(result)
-
-                # Log based on type
-                if isinstance(result, Exception):
-                    logger.debug(f"  Error delivered: {result}")
-                else:
-                    logger.debug(f"  Result delivered: {result.shape}")
-            except asyncio.QueueFull:
-                logger.warning(f"Result queue full for {result_id}")
-        else:
-            logger.warning(f"No queue for result {result_id}")
-            logger.warning(f"Available queue keys: {list(self._result_queues.keys())}")
+        """Handle result from transport (delegates to ResultManager)."""
+        return await self._result_manager.handle_result_received(result_id, result)
 
     async def _handle_operation_request(self, transfer_id: str, tensor_or_tensors, metadata: Dict):
         """
@@ -1284,58 +1250,31 @@ class DjinnCoordinator:
             logger.error(f"Failed to execute operation {operation}: {e}")
             # In practice, would send error response back
 
+    # Transport and metadata methods moved to coordinator_transport.py
+    # Kept as aliases for backward compatibility
     def _select_transport(self, tensor, metadata):
-        """
-        Select best transport based on context.
-        
-        Strategy:
-        1. If GPU tensor + DPDK available → use DPDK (100 Gbps)
-        2. Otherwise → use TCP (10 Gbps, but always works)
-        """
-        # Prefer DPDK for GPU tensors (zero-copy)
-        if tensor.is_cuda and 'dpdk' in self.transports:
-            return self.transports['dpdk']
-        
-        # Otherwise use TCP
-        if 'tcp' not in self.transports:
-            raise RuntimeError("No available transport for CPU tensor")
-        return self.transports['tcp']
-
+        """Select best transport (delegates to TransportSelector)."""
+        from .coordinator_transport import TransportSelector
+        selector = TransportSelector(self.transports)
+        return selector.select_transport(tensor, metadata)
+    
     def _select_transport_for_metadata(self, metadata):
-        """Select transport based on metadata."""
-        # For Phase 1, always use TCP
-        return self.transports['tcp']
+        """Select transport based on metadata (delegates to TransportSelector)."""
+        from .coordinator_transport import TransportSelector
+        selector = TransportSelector(self.transports)
+        return selector.select_transport_for_metadata(metadata)
     
     def _extract_metadata(self, tensor, user_metadata):
-        """Extract semantic metadata from tensor."""
-        metadata = {
-            'dtype': str(tensor.dtype),
-            'shape': list(tensor.shape),
-            'size_bytes': tensor.numel() * tensor.element_size(),
-            'device': str(tensor.device),
-            'is_gpu': tensor.is_cuda,
-        }
-        
-        # Add user-provided semantic metadata
-        if user_metadata:
-            metadata.update(user_metadata)
-        
-        # Infer phase if not provided (from shape heuristics)
-        if 'phase' not in metadata:
-            metadata['phase'] = self._infer_phase(tensor)
-        
-        return metadata
+        """Extract semantic metadata (delegates to MetadataExtractor)."""
+        from .coordinator_transport import MetadataExtractor
+        extractor = MetadataExtractor(self.scheduler)
+        return extractor.extract_metadata(tensor, user_metadata)
     
     def _infer_phase(self, tensor):
-        """Infer execution phase from tensor characteristics."""
-        # Simple heuristic: large batch = prefill, small = decode
-        if len(tensor.shape) >= 2:
-            batch_size = tensor.shape[0]
-            if batch_size >= 32:
-                return "prefill"
-            elif batch_size == 1:
-                return "decode"
-        return "unknown"
+        """Infer execution phase (delegates to MetadataExtractor)."""
+        from .coordinator_transport import MetadataExtractor
+        extractor = MetadataExtractor(self.scheduler)
+        return extractor._infer_phase(tensor)
     
     async def stop(self):
         """Shutdown coordinator."""

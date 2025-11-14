@@ -155,7 +155,7 @@ class EnhancedModelManager:
                 logger.warning(f"Failed to extract config from transformers model: {e}")
         
         # Query cache for existing weights
-        # ✅ TEMP: Skip cache query if it fails (for debugging)
+        # Cache query is optional - if it fails, we'll send all weights (safe fallback)
         weight_identifiers = list(weight_ids.values())
         server_address = self._get_server_address()
         try:
@@ -251,8 +251,13 @@ class EnhancedModelManager:
     async def _execute_via_cache(self, fingerprint: str, inputs: Dict[str, Any]) -> torch.Tensor:
         """Execute via model cache (fast path)."""
         
+        # Enable profiling context
+        from djinn.server.profiling_context import get_profiler, record_phase
+        profiler = get_profiler()
+        
         # Serialize inputs
-        serialized_inputs = self._serialize_inputs(inputs)
+        with record_phase('model_cache_input_serialization'):
+            serialized_inputs = self._serialize_inputs(inputs)
         
         # Create execution request (TINY!)
         execution_request = {
@@ -262,12 +267,23 @@ class EnhancedModelManager:
             'hints': {}  # Can add semantic hints here
         }
         
-        # Send request
-        response = await self._send_request(execution_request)
+        # Send request (includes network transfer)
+        with record_phase('model_cache_network_c2s'):
+            response = await self._send_request(execution_request)
         
         if response.get('status') == 'success':
-            result_data = response['result']
-            return self._deserialize_tensor(result_data)
+            # Merge server-side phases into client profiler
+            server_phases = response.get('server_phases', {})
+            if profiler and server_phases:
+                for phase_name, duration_ms in server_phases.items():
+                    # Prefix server phases to distinguish from client phases
+                    profiler.record_phase(f'server_{phase_name}', duration_ms)
+            
+            # Deserialize result (includes network transfer S→C)
+            with record_phase('model_cache_result_deserialization'):
+                result_data = response['result']
+                result = self._deserialize_tensor(result_data)
+            return result
         else:
             error_msg = response.get('message', 'Unknown error')
             # Check if server requested fallback
@@ -352,6 +368,7 @@ class EnhancedModelManager:
         
         import pickle
         import asyncio
+        from djinn.server.profiling_context import record_phase
         
         server_address = self._get_server_address()
         host, port = server_address.split(':')
@@ -380,25 +397,30 @@ class EnhancedModelManager:
             
             # Serialize request
             logger.debug(f"📦 Serializing request (type={request_type})...")
-            request_bytes = pickle.dumps(request)
-            request_len = len(request_bytes)
+            with record_phase('model_cache_request_serialization'):
+                request_bytes = pickle.dumps(request)
+                request_len = len(request_bytes)
             logger.debug(f"📦 Serialized {request_len} bytes")
             
             # Send message type (1 byte) + length (8 bytes) + data
             logger.debug(f"📤 Sending message: type={msg_type} (0x{msg_type:02x}), length={request_len}")
-            writer.write(bytes([msg_type]))
-            writer.write(request_len.to_bytes(8, 'big'))
-            writer.write(request_bytes)
-            logger.debug("📤 Flushing data...")
-            await writer.drain()
+            with record_phase('model_cache_network_send'):
+                writer.write(bytes([msg_type]))
+                writer.write(request_len.to_bytes(8, 'big'))
+                writer.write(request_bytes)
+                logger.debug("📤 Flushing data...")
+                await writer.drain()
             logger.debug("✅ Data sent successfully")
             
             # Read response (message type + length + data)
-            msg_type_response = await reader.readexactly(1)
-            response_len_bytes = await reader.readexactly(8)
-            response_len = int.from_bytes(response_len_bytes, 'big')
-            response_bytes = await reader.readexactly(response_len)
-            response = pickle.loads(response_bytes)
+            with record_phase('model_cache_network_receive'):
+                msg_type_response = await reader.readexactly(1)
+                response_len_bytes = await reader.readexactly(8)
+                response_len = int.from_bytes(response_len_bytes, 'big')
+                response_bytes = await reader.readexactly(response_len)
+            
+            with record_phase('model_cache_response_deserialization'):
+                response = pickle.loads(response_bytes)
             
             writer.close()
             await writer.wait_closed()

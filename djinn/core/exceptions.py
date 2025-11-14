@@ -130,7 +130,7 @@ class ExecutionException(DjinnException):
 #
 # Djinn has TWO result handling systems (both are valid):
 #
-# 1. RESULT CLASS (Lines 128-174) - Simple, Backward Compatible
+# 1. RESULT CLASS (Lines 158-210) - Simple, Backward Compatible
 #    - Used by: Semantic analysis, pattern matching, optimizer
 #    - Import: from djinn.core.exceptions import Result
 #    - Usage: Result.ok(value), Result.err(error)
@@ -138,8 +138,9 @@ class ExecutionException(DjinnException):
 #    - Example:
 #        def match_patterns(...) -> Result[List[MatchedPattern]]:
 #            return Result.ok(matches)
+#    - Status: DEPRECATED - Use Ok/Err for new code
 #
-# 2. OK/ERR CLASSES (Lines 182-294) - Modern, Rust-inspired
+# 2. OK/ERR CLASSES (Lines 216-334) - Modern, Rust-inspired (PREFERRED)
 #    - Used by: Scheduler, new modules
 #    - Import: from djinn.core.exceptions import Ok, Err
 #    - Usage: Ok(value), Err(error)
@@ -147,8 +148,15 @@ class ExecutionException(DjinnException):
 #    - Example:
 #        def schedule(...) -> ResultType[Plan, SchedulingError]:
 #            return Ok(plan)
+#    - Status: PREFERRED for new code
 #
 # IMPORTANT: Don't mix systems in the same module. Pick one and stick with it.
+#
+# Migration Guide:
+#   - Old: result = Result.ok(value)
+#   - New: result = Ok(value)
+#   - Old: if result.is_ok: value = result.unwrap()
+#   - New: if result.is_ok(): value = result.unwrap()
 #
 # Why both? Historical reasons. Semantic module was built with Result class,
 # scheduler was built with Ok/Err. Both work fine. Future: may unify to Ok/Err.

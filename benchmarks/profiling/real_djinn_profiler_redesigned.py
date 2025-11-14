@@ -46,6 +46,9 @@ class RedesignedProfile:
     execution_time: float = 0.0  # Model execution
     total_time: float = 0.0
     
+    # Phase-level breakdown (ms)
+    phase_breakdown: Dict[str, float] = None  # Phase name -> duration
+    
     # Network stats
     network_sent_mb: float = 0.0
     network_received_mb: float = 0.0
@@ -57,6 +60,10 @@ class RedesignedProfile:
     # Correctness
     output_shape: Optional[tuple] = None
     matches_baseline: bool = False
+    
+    def __post_init__(self):
+        if self.phase_breakdown is None:
+            self.phase_breakdown = {}
 
 
 class RedesignedDjinnProfiler:
@@ -224,18 +231,35 @@ class RedesignedDjinnProfiler:
         
         # Execute model (cached path)
         logger.info("🚀 Executing model via cache...")
+        
+        # Convert inputs to dict - handle GPT-2 models which expect 'input_ids'
+        if isinstance(model, nn.Sequential):
+            inputs_dict = {'x': inputs[0]}
+        else:
+            # For transformers models (GPT-2, etc.), use 'input_ids' key
+            inputs_dict = {'input_ids': inputs[0]}
+        
+        # Warmup: Execute model 3 times to match PyTorch baseline
+        # This ensures CUDA kernels are compiled and model is warmed up
+        logger.debug("Warming up model (3 runs)...")
+        for _ in range(3):
+            await manager.execute_model(model, inputs_dict)
+            # Don't measure these runs
+        
+        # Enable profiling context
+        from djinn.server.profiling_context import ProfilingContext, set_profiler, get_profiler
+        profiler = ProfilingContext(enabled=True)
+        set_profiler(profiler)
+        profiler.start()
+        
         execution_start = time.perf_counter()
         
         try:
-            # Convert inputs to dict - handle GPT-2 models which expect 'input_ids'
-            if isinstance(model, nn.Sequential):
-                inputs_dict = {'x': inputs[0]}
-            else:
-                # For transformers models (GPT-2, etc.), use 'input_ids' key
-                inputs_dict = {'input_ids': inputs[0]}
-            
             result = await manager.execute_model(model, inputs_dict)
             execution_time = (time.perf_counter() - execution_start) * 1000
+            
+            # Extract phase breakdown
+            phase_breakdown = profiler.get_phase_dict()
             
             profile = RedesignedProfile(
                 mode=ExecutionMode.NEW_MODEL_CACHE.value,
@@ -244,12 +268,22 @@ class RedesignedDjinnProfiler:
                 registration_time=registration_time,
                 execution_time=execution_time,
                 total_time=registration_time + execution_time,
+                phase_breakdown=phase_breakdown,
                 model_fingerprint=fingerprint,
                 cache_hit=True,
                 output_shape=tuple(result.shape)
             )
             
             logger.info(f"✅ Model cache execution: {execution_time:.2f}ms")
+            
+            # Log phase breakdown
+            if phase_breakdown:
+                logger.info("📊 Phase Breakdown:")
+                total_phases = sum(phase_breakdown.values())
+                for phase_name, duration_ms in sorted(phase_breakdown.items(), key=lambda x: -x[1]):
+                    percentage = (duration_ms / total_phases * 100) if total_phases > 0 else 0
+                    logger.info(f"  {phase_name}: {duration_ms:.2f}ms ({percentage:.1f}%)")
+            
             return profile
         except Exception as e:
             logger.error(f"❌ Execution failed: {e}")
@@ -361,6 +395,20 @@ class RedesignedDjinnProfiler:
         logger.info(f"  vs PyTorch:            {speedup_vs_pytorch:.1f}x faster, {overhead_vs_pytorch:+.1f}% overhead")
         logger.info(f"  vs Old System:         {speedup_vs_old:.1f}x faster")
         logger.info(f"  Network reduction:     {network_reduction:.1f}%")
+        
+        # Show phase breakdown if available
+        if new_profile.phase_breakdown:
+            logger.info(f"\n📊 Execution Phase Breakdown:")
+            total_phases = sum(new_profile.phase_breakdown.values())
+            for phase_name, duration_ms in sorted(new_profile.phase_breakdown.items(), key=lambda x: -x[1]):
+                percentage = (duration_ms / total_phases * 100) if total_phases > 0 else 0
+                logger.info(f"  {phase_name:40s}: {duration_ms:8.2f}ms ({percentage:5.1f}%)")
+        
+        # Log optimization statistics (phase detection, OOM events)
+        logger.info(f"\n🔍 Optimization Statistics:")
+        logger.info(f"  GPU Execution: {new_profile.execution_time:.2f}ms")
+        logger.info(f"  vs PyTorch Baseline: {pytorch_time:.2f}ms")
+        logger.info(f"  Performance: {((pytorch_time - new_profile.execution_time) / pytorch_time * 100):.1f}% {'faster' if new_profile.execution_time < pytorch_time else 'slower'}")
         
         self.profiles.extend([old_profile, new_profile])
         

@@ -25,12 +25,15 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 
 def get_profiler():
-    """Get the detailed profiler (imports here to avoid circular deps)."""
-    try:
-        from djinn.profiling import get_detailed_profiler
-        return get_detailed_profiler()
-    except ImportError:
-        return None
+    """
+    Get the profiler (imports here to avoid circular deps).
+    
+    NOTE: This is a legacy function kept for backward compatibility.
+    New code should use djinn.server.profiling_context.ProfilingContext directly.
+    """
+    # Legacy profiling code removed - use ProfilingContext instead
+    # This function returns None to avoid breaking existing code
+    return None
 
 
 class GraphBuilder:

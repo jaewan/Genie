@@ -15,18 +15,9 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, List, Optional, Set
 
+from djinn.core.types import ExecutionPhase
+
 logger = logging.getLogger(__name__)
-
-
-class ExecutionPhase(str, Enum):
-    """Execution phases for semantic-aware memory management."""
-    UNKNOWN = "unknown"
-    LLM_PREFILL = "llm_prefill"      # Parallel attention, activation-heavy
-    LLM_DECODE = "llm_decode"        # Sequential, memory-bound, KV-heavy
-    VISION_ENCODING = "vision_encoding"  # Conv-heavy, intermediate features
-    VISION_DECODING = "vision_decoding"  # Feature to output
-    MULTIMODAL_FUSION = "multimodal_fusion"  # Cross-modal alignment
-    TRAINING = "training"
 
 
 class DataResidency(str, Enum):

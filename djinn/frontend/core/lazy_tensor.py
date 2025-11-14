@@ -147,13 +147,9 @@ def _get_shape_inference_profiler_cached():
         if _shape_inference_profiler is not None:
             return _shape_inference_profiler
         
-        try:
-            from djinn.profiling import get_detailed_profiler
-            _shape_inference_profiler = get_detailed_profiler() or False
-        except (ImportError, Exception):
-            _shape_inference_profiler = False
-        
-        return _shape_inference_profiler if _shape_inference_profiler is not False else None
+        # Stale profiling code removed - use ProfilingContext instead
+        # Shape inference profiling not currently implemented
+        return None
 
 # ============================================================================
 # PROTECTION: Timeout and circuit breaker for shape inference (prevent 1s+ operations)

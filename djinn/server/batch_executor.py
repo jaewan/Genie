@@ -48,8 +48,9 @@ class BatchExecutor:
         Returns:
             Final output tensor
         """
-        from djinn.server.detailed_profiler import get_profiler
-        profiler = get_profiler()
+        # Stale profiling code removed - use ProfilingContext instead
+        # from djinn.server.profiling_context import get_profiler
+        profiler = None
 
         # Step 1: Initialize tensor storage
         tensors: Dict[str, Any] = {}
@@ -98,32 +99,15 @@ class BatchExecutor:
             result = self.universal_dispatcher.dispatch(operation, inputs, kwargs)
             op_elapsed_ms = (time.perf_counter() - op_start) * 1000
 
-            # Record operation timing in profiler
-            from djinn.server.detailed_profiler import get_profiler
-            profiler = get_profiler()
-            profiler.record_operation(
-                request_id=request_id,
-                operation=operation,
-                execution_time_ms=op_elapsed_ms,
-                input_shapes=[inp.shape for inp in inputs if hasattr(inp, 'shape')],
-                output_shape=result.shape if hasattr(result, 'shape') else (),
-                execution_phase=op_dict.get('execution_phase', 'batch_local')
-            )
+            # Profiling is handled via ProfilingContext (djinn/server/profiling_context.py)
+            # No need for separate profiler instance here
 
             # Store result
             op_id = op_dict['op_id']
             tensors[str(op_id)] = result
 
-            # Profile
-            op_elapsed_ms = (time.perf_counter() - op_start) * 1000
-            profiler.record_operation(
-                request_id="batch_exec",
-                operation=operation,
-                execution_time_ms=op_elapsed_ms,
-                input_shapes=[inp.shape for inp in inputs if hasattr(inp, 'shape')],
-                output_shape=result.shape if hasattr(result, 'shape') else (),
-                execution_phase=op_dict.get('execution_phase', 'unknown')
-            )
+            # Profiling is handled via ProfilingContext (djinn/server/profiling_context.py)
+            # No need for separate profiler instance here
 
         # Step 4: Return final output
         output_id = str(subgraph_request.get('output_tensor_id'))

@@ -222,22 +222,47 @@ class ResilientModelHandler:
         """
         
         try:
-            # Run synchronous execution in executor
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None,
-                lambda: self.model_cache.execute(
+            from .profiling_context import ProfilingContext, get_profiler, record_phase, set_profiler
+            
+            # Create a new profiler for this request (server-side)
+            server_profiler = ProfilingContext(enabled=True)
+            server_profiler.start()
+            set_profiler(server_profiler)
+            
+            # Measure request handling
+            with record_phase('model_cache_request_handling'):
+                # Execute directly - GPU operations release GIL, so they don't block the event loop
+                # No need for thread pool overhead!
+                # NOTE: For multi-tenancy support later, we may need to reintroduce thread pool
+                # to isolate concurrent requests and prevent one slow request from blocking others.
+                result = self.model_cache.execute(
                     fingerprint=request['fingerprint'],
                     inputs=request['inputs'],
                     hints=request.get('hints', {})
                 )
-            )
+            
+            # Serialize result
+            with record_phase('model_cache_result_serialization'):
+                serialized_result = self._serialize_tensor(result)
+            
+            # Get server-side phases
+            server_phases = server_profiler.get_phase_dict()
+            
+            # Get model cache stats (including phase detection and OOM events)
+            cache_stats = self.model_cache.get_stats()
             
             return {
                 'status': 'success',
-                'result': self._serialize_tensor(result),
+                'result': serialized_result,
                 'execution_path': 'model_cache',
-                'memory_status': self.model_cache.get_memory_status()
+                'memory_status': self.model_cache.get_memory_status(),
+                'server_phases': server_phases,  # Include server-side profiling
+                'cache_stats': {  # Include cache statistics for monitoring
+                    'oom_events': cache_stats.get('oom_events', 0),
+                    'phase_detections': cache_stats.get('phase_detections', {}),
+                    'phase_switches': cache_stats.get('phase_switches', 0),
+                    'evictions': cache_stats.get('evictions', 0),
+                }
             }
         except Exception as e:
             logger.error(f"Model cache execution failed: {e}")
