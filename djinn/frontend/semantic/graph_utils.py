@@ -292,6 +292,11 @@ def unified_graph_to_networkx(graph: Graph) -> nx.DiGraph:
     # Add edges based on input relationships
     for node in graph.nodes():
         for inp in node.inputs:
-            G.add_edge(inp.id, node.id)
+            # Handle both node objects and string IDs
+            if isinstance(inp, str):
+                inp_id = inp
+            else:
+                inp_id = getattr(inp, 'id', id(inp))
+            G.add_edge(inp_id, node.id)
 
     return G

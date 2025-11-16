@@ -19,7 +19,7 @@ import os
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from djinn.server.phase_executor import (
+from djinn.server.optimizations.phase_executor import (
     PhaseAwareExecutor,
     PrefillExecutionStrategy,
     DecodeExecutionStrategy,

@@ -781,6 +781,3 @@ class Scheduler:
             network_manager.register_device(device)
         except ImportError:
             pass  # Network topology manager not available
-
-
-        self.runtime_stats[node_name]['memory'] = memory

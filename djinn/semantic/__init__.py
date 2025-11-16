@@ -31,15 +31,10 @@ from djinn.scheduler.core.cost_estimator import (  # noqa: F401
         CostEstimator,
         GraphCostEstimator,
     )
-from djinn.frontend.semantic.patterns import (  # noqa: F401
-        PatternMatcher,
-        Pattern,
-        get_pattern_registry,
-        AttentionMatcher,
-        ConvolutionMatcher,
-        KVCacheMatcher,
-    )
-from djinn.server.phase_executor import (  # noqa: F401
+from djinn.frontend.semantic.patterns import Pattern  # noqa: F401
+# PatternMatcher, AttentionMatcher, ConvolutionMatcher, KVCacheMatcher removed - unused
+# get_pattern_registry removed - use PatternRegistry from pattern_registry.py instead
+from djinn.server.optimizations.phase_executor import (  # noqa: F401
         PhaseAwareExecutor,
         PrefillExecutionStrategy,
         DecodeExecutionStrategy,
@@ -66,12 +61,9 @@ __all__ = [
     'CostEstimate',
     'CostEstimator',
     'GraphCostEstimator',
-    'PatternMatcher',
-    'Pattern',
-    'get_pattern_registry',
-    'AttentionMatcher',
-    'ConvolutionMatcher',
-    'KVCacheMatcher',
+    'Pattern',  # Internal DTO - will be migrated to MatchedPattern
+    # PatternMatcher, AttentionMatcher, ConvolutionMatcher, KVCacheMatcher removed
+    # get_pattern_registry removed - use PatternRegistry from pattern_registry.py
     'PhaseAwareExecutor',
     'PrefillExecutionStrategy',
     'DecodeExecutionStrategy',

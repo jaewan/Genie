@@ -9,9 +9,10 @@ from typing import Any, Dict, Optional
 import torch
 
 from ..core.exceptions import MaterializationError, NotApplicableError, ExecutionException, NetworkError
-from .batch_compiler import get_batch_compiler, get_batch_compiler_stats
+from .optimizations.batch_compiler import get_batch_compiler, get_batch_compiler_stats
 from ..frontend.core.universal_dispatcher import get_universal_dispatcher
 from ..frontend.core.interception_control import disable_interception, InterceptionContext
+from .type_utils import is_tensor_fast
 
 # Constants
 LAZY_TENSOR_CLASS_NAME = 'LazyTensor'
@@ -494,7 +495,7 @@ class SimpleExecutor:
 
 		Returns None if fragmentation is not applicable, otherwise returns the result.
 		"""
-		from .smart_subgraph_builder import SmartSubgraphBuilder, FragmentationConfig
+		from .optimizations.smart_subgraph_builder import SmartSubgraphBuilder, FragmentationConfig
 		from ..frontend.core.lazy_tensor import LazyTensor as _LT
 
 		# Only apply fragmentation for remote tensors
@@ -765,7 +766,8 @@ class SimpleExecutor:
 							# Fallback for unhandled operations using executor's fallback mechanism
 							result = self._execute_fallback_eager(lt.operation, resolved_inputs, lt.kwargs)
 							# ✅ ELEGANT FIX: Ensure result dtype matches LazyTensor's expected dtype
-							if isinstance(result, torch.Tensor) and lt.dtype is not None and result.dtype != lt.dtype:
+							# Optimization: Use fast type check
+							if (is_tensor_fast(result) or isinstance(result, torch.Tensor)) and lt.dtype is not None and result.dtype != lt.dtype:
 								logger.debug(
 									f"Fallback result dtype mismatch: operation={lt.operation}, "
 									f"expected={lt.dtype}, got={result.dtype}. Coercing to {lt.dtype}"
@@ -844,11 +846,14 @@ class SimpleExecutor:
 			self.stats['ops_executed'][op_name] += 1
 			
 			# Step 1: Materialize all inputs to concrete tensors
+			# Optimization: Use fast type check for hot path
+			from .type_utils import is_tensor_fast
 			concrete_inputs = []
 			lazy_count = 0
 
 			for inp in inputs:
-				if isinstance(inp, torch.Tensor):
+				# Fast type check (optimized for hot path)
+				if is_tensor_fast(inp) or isinstance(inp, torch.Tensor):
 					# Handle LazyTensor materialization
 					if _is_lazy_tensor(inp):
 						lazy_count += 1
@@ -859,7 +864,7 @@ class SimpleExecutor:
 				else:
 					# Try to use pre-materialized value for non-tensor inputs
 					val = getattr(inp, "concrete_value", None)
-					if val is not None and isinstance(val, torch.Tensor):
+					if val is not None and (is_tensor_fast(val) or isinstance(val, torch.Tensor)):
 						concrete_inputs.append(val)
 					else:
 						concrete_inputs.append(inp)
@@ -892,7 +897,7 @@ class SimpleExecutor:
 				# 2. Operation has special requirements (device mapping, etc.)
 				dispatch_error = e
 				if 'diff' in op_name.lower():
-					logger.error(f"🔍 DEBUG diff failed: op_name={op_name}, inputs={[type(i).__name__ + (f' shape={i.shape} dtype={i.dtype} device={i.device}' if isinstance(i, torch.Tensor) else '') for i in concrete_inputs]}, kwargs={cleaned_kwargs}", exc_info=True)
+					logger.error(f"🔍 DEBUG diff failed: op_name={op_name}, inputs={[type(i).__name__ + (f' shape={i.shape} dtype={i.dtype} device={i.device}' if (is_tensor_fast(i) or isinstance(i, torch.Tensor)) else '') for i in concrete_inputs]}, kwargs={cleaned_kwargs}", exc_info=True)
 				logger.debug(f"Universal dispatch failed for {op_name}: {e}")
 				
 			# Step 4: Fall back to manual handlers (only for special cases)
@@ -957,77 +962,10 @@ class SimpleExecutor:
 		"""
 		Clean kwargs for dispatch - handle device mapping and remove invalid kwargs.
 		
-		Only tensor creation operations (randn, zeros, ones) should have device kwarg.
-		Most other operations don't accept it.
+		Delegates to DeviceMapper for device mapping logic.
 		"""
-		kwargs = kwargs.copy() if kwargs else {}
-		
-		creation_ops = {
-			"randn", "rand", "randint",
-			"zeros", "ones", "empty", "full", "empty_strided",
-			"arange", "linspace", "logspace",
-		}
-		base_name = op_name.replace("aten::", "")
-
-		# Handle device mapping for creation ops
-		if base_name in creation_ops:
-			device = kwargs.get("device")
-			if isinstance(device, str) and 'remote_accelerator' in device:
-				device_idx = device.split(':')[-1]
-				try:
-					device_idx_int = int(device_idx)
-					if device_idx_int < torch.cuda.device_count():
-						kwargs["device"] = f'cuda:{device_idx}'
-					else:
-						kwargs["device"] = "cpu"
-				except (ValueError, IndexError):
-					kwargs["device"] = "cpu"
-			elif hasattr(device, 'type') and device.type in ('remote_accelerator', 'privateuseone'):
-				try:
-					if device.index < torch.cuda.device_count():
-						kwargs["device"] = f'cuda:{device.index}'
-					else:
-						kwargs["device"] = "cpu"
-				except (AttributeError, IndexError):
-					kwargs["device"] = "cpu"
-			elif device is None:
-				if torch.cuda.is_available():
-					kwargs["device"] = "cuda:0"
-				else:
-					kwargs["device"] = "cpu"
-			else:
-				kwargs["device"] = "cpu"
-		else:
-			# For non-creation ops, map remote devices but don't pass device kwarg
-			device = kwargs.get("device")
-			if isinstance(device, str) and 'remote_accelerator' in device:
-				device_idx = device.split(':')[-1]
-				try:
-					device_idx_int = int(device_idx)
-					if device_idx_int < torch.cuda.device_count():
-						kwargs["device"] = f'cuda:{device_idx}'
-					else:
-						kwargs.pop("device", None)
-				except (ValueError, IndexError):
-					kwargs.pop("device", None)
-			elif hasattr(device, 'type') and device.type in ('remote_accelerator', 'privateuseone'):
-				try:
-					if device.index < torch.cuda.device_count():
-						kwargs["device"] = f'cuda:{device.index}'
-					else:
-						kwargs.pop("device", None)
-				except (AttributeError, IndexError):
-					kwargs.pop("device", None)
-			elif device is None:
-				kwargs.pop("device", None)
-			else:
-				kwargs.pop("device", None)
-
-		# Special handling for unknown_method
-		if base_name == "unknown_method":
-			logger.debug(f"Encountered unknown_method operation")
-		
-		return kwargs
+		from .device_mapper import DeviceMapper
+		return DeviceMapper.clean_device_kwarg(op_name, kwargs)
 
 	# Operation handlers
 	def _execute_add(self, lazy_tensor, inputs, kwargs) -> torch.Tensor:  # noqa: ANN001
@@ -1056,7 +994,8 @@ class SimpleExecutor:
 		y = self._ensure_concrete(inputs[1])
 		
 		# ✅ PHASE 2: Ensure device consistency
-		if isinstance(x, torch.Tensor) and isinstance(y, torch.Tensor) and x.device != y.device:
+		# Optimization: Use fast type checks
+		if (is_tensor_fast(x) or isinstance(x, torch.Tensor)) and (is_tensor_fast(y) or isinstance(y, torch.Tensor)) and x.device != y.device:
 			logger.debug(f"Moving tensor from {y.device} to {x.device} for add (with alpha)")
 			y = y.to(x.device)
 		
@@ -1372,22 +1311,11 @@ class SimpleExecutor:
 			size = (1,)
 
 		dtype = kwargs.get("dtype", torch.float32)
-		device = kwargs.get("device")
 		requires_grad = kwargs.get("requires_grad", False)
 
-		# Map remote accelerator devices to actual GPU devices
-		if isinstance(device, str) and 'remote_accelerator' in device:
-			# Extract device index (e.g., 'remote_accelerator:0' -> 'cuda:0')
-			device_idx = device.split(':')[-1]
-			device = f'cuda:{device_idx}'
-		elif hasattr(device, 'type') and device.type in ('remote_accelerator', 'privateuseone'):
-			# Handle torch.device objects
-			device = f'cuda:{device.index}'
-		elif device is None:
-			# For capture API (device=None), default to GPU if available
-			device = "cuda:0" if torch.cuda.is_available() else "cpu"
-		else:
-			device = "cpu"
+		# Map device using DeviceMapper
+		from .device_mapper import DeviceMapper
+		device = DeviceMapper.map_remote_to_local(kwargs.get("device"))
 
 		# Disable interception during factory operations to ensure concrete tensors
 		from ..frontend.core.interception_control import disable_interception, InterceptionContext
@@ -1403,20 +1331,11 @@ class SimpleExecutor:
 			size = (1,)
 
 		dtype = kwargs.get("dtype", torch.float32)
-		device = kwargs.get("device")
 		requires_grad = kwargs.get("requires_grad", False)
 
-		# Map remote accelerator devices to actual GPU devices
-		if isinstance(device, str) and 'remote_accelerator' in device:
-			device_idx = device.split(':')[-1]
-			device = f'cuda:{device_idx}'
-		elif hasattr(device, 'type') and device.type in ('remote_accelerator', 'privateuseone'):
-			device = f'cuda:{device.index}'
-		elif device is None:
-			# For capture API (device=None), default to GPU to match native behavior
-			device = "cuda:0"
-		else:
-			device = "cpu"
+		# Map device using DeviceMapper
+		from .device_mapper import DeviceMapper
+		device = DeviceMapper.map_remote_to_local(kwargs.get("device"))
 
 		# Disable interception during factory operations to ensure concrete tensors
 		from ..frontend.core.interception_control import disable_interception, InterceptionContext
@@ -1432,20 +1351,11 @@ class SimpleExecutor:
 			size = (1,)
 
 		dtype = kwargs.get("dtype", torch.float32)
-		device = kwargs.get("device")
 		requires_grad = kwargs.get("requires_grad", False)
 
-		# Map remote accelerator devices to actual GPU devices
-		if isinstance(device, str) and 'remote_accelerator' in device:
-			device_idx = device.split(':')[-1]
-			device = f'cuda:{device_idx}'
-		elif hasattr(device, 'type') and device.type in ('remote_accelerator', 'privateuseone'):
-			device = f'cuda:{device.index}'
-		elif device is None:
-			# For capture API (device=None), default to GPU to match native behavior
-			device = "cuda:0"
-		else:
-			device = "cpu"
+		# Map device using DeviceMapper
+		from .device_mapper import DeviceMapper
+		device = DeviceMapper.map_remote_to_local(kwargs.get("device"))
 
 		# Disable interception during factory operations to ensure concrete tensors
 		from ..frontend.core.interception_control import disable_interception, InterceptionContext

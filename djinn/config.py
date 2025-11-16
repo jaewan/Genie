@@ -12,11 +12,7 @@ from typing import Optional, Dict, Any
 import yaml
 from .core.types import TransportType, ExecutionPhase
 
-# Week 1-2: Import materialization config
-from .frontend.core.materialization_control import (
-    get_config as get_materialization_config_internal,
-    MaterializationConfig
-)
+# Materialization config removed - was empty class with no functionality
 
 
 class LogLevel(Enum):
@@ -253,6 +249,49 @@ class OptimizationConfig:
 
 
 @dataclass
+class FleetConfig:
+    """Fleet coordination configuration."""
+    global_coordinator_address: Optional[str] = None  # "coordinator:8080" or None
+    local_cache_ttl: int = 30  # seconds
+    enable_global_coordinator: bool = True
+    coordinator_timeout: float = 5.0  # seconds
+    redis_url: Optional[str] = None  # Redis URL for model registry
+    
+    @classmethod
+    def from_env(cls) -> 'FleetConfig':
+        """Load fleet config from environment variables."""
+        return cls(
+            global_coordinator_address=os.getenv('DJINN_GLOBAL_COORDINATOR_ADDRESS'),
+            local_cache_ttl=int(os.getenv('DJINN_LOCAL_CACHE_TTL', '30')),
+            enable_global_coordinator=os.getenv('DJINN_ENABLE_GLOBAL_COORDINATOR', 'true').lower() == 'true',
+            coordinator_timeout=float(os.getenv('DJINN_COORDINATOR_TIMEOUT', '5.0')),
+            redis_url=os.getenv('DJINN_REDIS_URL')
+        )
+
+
+@dataclass
+class SecurityConfig:
+    """Security-related configuration."""
+    # Pickle fallback (disabled by default for security)
+    allow_pickle_fallback: bool = False  # Set to True only for legacy client support
+    
+    # Request validation
+    strict_request_id_validation: bool = False  # Strict request ID matching
+    
+    # Protocol version enforcement
+    min_protocol_version: int = 1  # Minimum supported protocol version
+    
+    @classmethod
+    def from_env(cls) -> 'SecurityConfig':
+        """Load security config from environment variables."""
+        return cls(
+            allow_pickle_fallback=os.getenv('GENIE_ALLOW_PICKLE_FALLBACK', 'false').lower() == 'true',
+            strict_request_id_validation=os.getenv('GENIE_STRICT_REQUEST_ID', 'false').lower() == 'true',
+            min_protocol_version=int(os.getenv('GENIE_MIN_PROTOCOL_VERSION', 1))
+        )
+
+
+@dataclass
 class DjinnConfig:
     """Main configuration class for Djinn framework."""
     network: NetworkConfig = field(default_factory=NetworkConfig)
@@ -261,25 +300,15 @@ class DjinnConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     optimization: OptimizationConfig = field(default_factory=OptimizationConfig)
+    security: SecurityConfig = field(default_factory=SecurityConfig)
+    fleet: FleetConfig = field(default_factory=FleetConfig)
 
     # Global settings
     debug_mode: bool = False
     config_file: Optional[str] = None
     
-    @property
-    def materialization(self) -> MaterializationConfig:
-        """
-        Materialization behavior configuration.
-        
-        Week 1-2: Default is eager tuple operations (safe but slow)
-        Week 3-4: Default changes to lazy (performant)
-        
-        Example:
-            >>> import djinn
-            >>> # Experimental: Enable lazy tuples (may be unstable)
-            >>> djinn.config.materialization.eager_tuple_operations = False
-        """
-        return get_materialization_config_internal()
+    # Materialization config removed - was empty class with no functionality
+    # Materialization behavior is now controlled by OperationClassifier
 
     def get_network_config(self) -> NetworkConfig:
         """Get network configuration."""
@@ -324,6 +353,7 @@ class DjinnConfig:
         config.server = ServerConfig.from_env()
         config.logging = LoggingConfig.from_env()
         config.optimization = OptimizationConfig.from_env()
+        config.fleet = FleetConfig.from_env()
 
         # Global environment overrides
         config.debug_mode = os.getenv('GENIE_DEBUG', 'false').lower() == 'true'

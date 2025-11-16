@@ -1,99 +1,44 @@
 """
-Base class for pattern matchers.
+Pattern DTO for backward compatibility.
 
-Pattern matchers identify high-level computational patterns in the computation
-graph and annotate nodes with semantic metadata.
+NOTE: PatternMatcher and PatternRegistry classes have been removed.
+Only Pattern class is kept as an internal DTO for PhaseDetector and AnnotatedGraph.
+This will be migrated to use MatchedPattern in a future refactoring.
 """
 
-from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Optional
+import warnings
 from dataclasses import dataclass
-import logging
+from typing import List, Dict, Any
 
-logger = logging.getLogger(__name__)
+
+# Track if deprecation warning has been shown (once per process)
+_pattern_deprecation_shown = False
 
 
 @dataclass
 class Pattern:
-    """Represents a detected pattern in the computation graph."""
+    """
+    Represents a detected pattern in the computation graph.
+    
+    DEPRECATED: This is an internal DTO used for backward compatibility.
+    New code should use MatchedPattern from workload.py.
+    This class will be removed once PhaseDetector and AnnotatedGraph are migrated.
+    
+    Migration: Use MatchedPattern from djinn.frontend.semantic.workload instead.
+    """
     name: str
-    nodes: List[Any]  # List of GraphNode
+    nodes: List[Any]  # List of GraphNode dicts with 'id' field
     metadata: Dict[str, Any]
-
-
-class PatternMatcher(ABC):
-    """
-    Abstract base class for pattern matchers.
     
-    Subclasses implement specific pattern detection logic.
-    """
-    
-    @property
-    @abstractmethod
-    def pattern_name(self) -> str:
-        """Name of the pattern being detected."""
-        pass
-    
-    @abstractmethod
-    def match(self, graph) -> List[Pattern]:
-        """
-        Detect pattern occurrences in graph.
-        
-        Args:
-            graph: Unified Graph interface (FX or LazyDAG)
-        
-        Returns:
-            List of detected Pattern instances
-        """
-        pass
-    
-    def is_match(self, node) -> bool:
-        """
-        Check if a single node matches this pattern.
-        
-        Override for simple node-level matching.
-        """
-        return False
-
-
-class PatternRegistry:
-    """
-    Registry of all pattern matchers.
-    
-    Manages the lifecycle of pattern matchers and coordinates detection.
-    """
-    
-    def __init__(self):
-        self._matchers: List[PatternMatcher] = []
-        self._patterns_cache = {}
-    
-    def register(self, matcher: PatternMatcher):
-        """Register a new pattern matcher."""
-        self._matchers.append(matcher)
-        logger.debug(f"Registered pattern matcher: {matcher.pattern_name}")
-    
-    def match_all(self, graph) -> Dict[str, List[Pattern]]:
-        """
-        Run all pattern matchers on graph.
-        
-        Returns:
-            Dict mapping pattern name → list of detected patterns
-        """
-        results = {}
-        for matcher in self._matchers:
-            try:
-                patterns = matcher.match(graph)
-                results[matcher.pattern_name] = patterns
-            except Exception as e:
-                logger.warning(f"Pattern matcher {matcher.pattern_name} failed: {e}")
-        
-        return results
-
-
-# Global pattern registry
-_global_pattern_registry = PatternRegistry()
-
-
-def get_pattern_registry() -> PatternRegistry:
-    """Get the global pattern registry."""
-    return _global_pattern_registry
+    def __post_init__(self):
+        """Emit deprecation warning on first instantiation."""
+        global _pattern_deprecation_shown
+        if not _pattern_deprecation_shown:
+            warnings.warn(
+                "Pattern class is deprecated and will be removed in a future version. "
+                "Use MatchedPattern from djinn.frontend.semantic.workload instead. "
+                "See docs/REFACTORING_MIGRATION_GUIDE.md for migration instructions.",
+                DeprecationWarning,
+                stacklevel=3
+            )
+            _pattern_deprecation_shown = True

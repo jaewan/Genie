@@ -17,8 +17,15 @@ from unittest.mock import AsyncMock, Mock
 
 sys.path.insert(0, '/home/jae/Genie')
 
-from djinn.core.batching_coordinator import BatchingCoordinator, BatchedOperation
-from djinn.transport.connection_pool import ConnectionPool
+from djinn.server.optimizations.batching_coordinator import (
+    BatchingCoordinator,
+    BatchedOperation,
+    OperationBatch,
+    get_batching_coordinator,
+    submit_batched_operation
+)
+from djinn.server.transport.connection_pool import ConnectionPool
+from unittest.mock import Mock
 
 
 @pytest.fixture

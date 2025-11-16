@@ -15,8 +15,9 @@ Result: 5MB full graph → 500KB delta update (90% reduction per request)
 import hashlib
 import json
 import logging
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, Tuple, Union
 from dataclasses import dataclass
+from collections import OrderedDict
 
 logger = logging.getLogger(__name__)
 
@@ -49,10 +50,18 @@ class GraphCache:
         Initialize graph cache.
         
         Args:
-            max_cache_entries: Maximum number of cached graphs
+            max_cache_entries: Maximum number of cached graphs (must be >= 1)
+        
+        Raises:
+            ValueError: If max_cache_entries is invalid
         """
+        if max_cache_entries < 1:
+            raise ValueError(
+                f"max_cache_entries must be >= 1, got {max_cache_entries}"
+            )
         self.max_cache_entries = max_cache_entries
-        self.cache: Dict[str, CachedGraph] = {}  # model_id -> CachedGraph
+        # Use OrderedDict for LRU eviction support
+        self.cache: OrderedDict[str, CachedGraph] = OrderedDict()  # model_id -> CachedGraph
         
         # Statistics
         self.stats = {
@@ -76,6 +85,12 @@ class GraphCache:
         
         # Check if model is cached
         if model_id not in self.cache:
+            # Enforce max cache size (LRU eviction)
+            if len(self.cache) >= self.max_cache_entries:
+                # Evict least recently used (first item in OrderedDict)
+                evicted_id, evicted = self.cache.popitem(last=False)
+                logger.debug(f"Evicted LRU graph cache entry: {evicted_id}")
+            
             # First time - cache and return full graph
             self.cache[model_id] = CachedGraph(
                 graph_hash=current_hash,
@@ -83,6 +98,8 @@ class GraphCache:
                 version=1,
                 num_operations=len(graph.get('operations', []))
             )
+            # Move to end (most recently used)
+            self.cache.move_to_end(model_id)
             self.stats['cache_misses'] += 1
             
             logger.info(f"📥 Graph cache MISS for {model_id}: caching full graph "
@@ -101,6 +118,8 @@ class GraphCache:
         # Check if content changed
         if cached.graph_hash == current_hash:
             # Identical graph - no transmission needed!
+            # Move to end (most recently used)
+            self.cache.move_to_end(model_id)
             self.stats['cache_hits'] += 1
             logger.debug(f"✓ Graph cache HIT for {model_id}: identical graph")
             
@@ -134,6 +153,8 @@ class GraphCache:
             version=new_version,
             num_operations=len(graph.get('operations', []))
         )
+        # Move to end (most recently used)
+        self.cache.move_to_end(model_id)
         
         return True, {
             'type': 'delta_update',
@@ -199,29 +220,54 @@ class GraphCache:
     
     @staticmethod
     def _compute_graph_hash(graph: Dict[str, Any]) -> str:
-        """Compute deterministic hash of graph structure."""
-        # Hash only the structure, not metadata that doesn't affect computation
+        """
+        Compute deterministic hash of graph structure (optimized).
+        
+        Uses incremental hashing instead of JSON serialization for better performance.
+        """
+        if not isinstance(graph, dict):
+            raise TypeError(f"Expected dict, got {type(graph)}")
+        
         ops_list = graph.get('operations', [])
-        structure_str = json.dumps(
-            [
-                {
-                    'op': op.get('operation'),
-                    'inputs': op.get('inputs'),
-                    'op_id': op.get('op_id')
-                }
-                for op in ops_list
-            ],
-            sort_keys=True
-        )
-        return hashlib.sha256(structure_str.encode()).hexdigest()[:16]
+        if not ops_list:
+            # Empty graph - return hash of empty structure
+            return hashlib.sha256(b"empty_graph").hexdigest()[:16]
+        
+        # Build hash incrementally (faster than JSON serialization)
+        hasher = hashlib.sha256()
+        # Sort by op_id for deterministic hashing
+        sorted_ops = sorted(ops_list, key=lambda x: x.get('op_id', 0))
+        
+        for op in sorted_ops:
+            op_str = (
+                f"{op.get('operation', '')}:"
+                f"{op.get('op_id', 0)}:"
+                f"{str(sorted(op.get('inputs', [])))}"
+            )
+            hasher.update(op_str.encode('utf-8'))
+        
+        return hasher.hexdigest()[:16]
     
     @staticmethod
     def _estimate_size(graph: Dict[str, Any]) -> int:
-        """Estimate graph size in bytes."""
+        """
+        Estimate graph size in bytes.
+        
+        Args:
+            graph: Graph dictionary
+            
+        Returns:
+            Estimated size in bytes
+        """
+        if not isinstance(graph, dict):
+            logger.warning(f"Invalid graph type for size estimation: {type(graph)}")
+            return 1000  # Conservative default
+        
         try:
             return len(json.dumps(graph).encode('utf-8'))
-        except:
-            # Fallback estimation
+        except (TypeError, ValueError) as e:
+            # Fallback estimation if JSON serialization fails
+            logger.debug(f"JSON serialization failed for size estimation: {e}")
             ops_size = len(graph.get('operations', [])) * 200
             inputs_size = len(graph.get('input_tensors', {})) * 150
             return ops_size + inputs_size + 1000
@@ -239,8 +285,13 @@ class GraphCache:
             inputs = len(delta.get('input_changes', {})) * 150
             return added + removed + modified + inputs + 500
     
-    def get_stats(self) -> Dict[str, Any]:
-        """Get cache statistics."""
+    def get_stats(self) -> Dict[str, Union[int, float, Dict[str, Any]]]:
+        """
+        Get cache statistics.
+        
+        Returns:
+            Dictionary with cache statistics including hit rate, total requests, etc.
+        """
         total_requests = self.stats['cache_hits'] + self.stats['cache_misses']
         hit_rate = (self.stats['cache_hits'] / total_requests * 100 
                    if total_requests > 0 else 0)
@@ -250,6 +301,9 @@ class GraphCache:
             'total_requests': total_requests,
             'hit_rate_percent': hit_rate,
             'cached_graphs': len(self.cache),
+            'max_cache_entries': self.max_cache_entries,
+            'cache_utilization_percent': (len(self.cache) / self.max_cache_entries * 100 
+                                         if self.max_cache_entries > 0 else 0),
             'total_saved_mb': self.stats['total_bytes_saved'] / (1024 * 1024)
         }
     

@@ -20,12 +20,9 @@ Usage:
 """
 
 import logging
-from typing import Dict, Any, Optional, List, Set
+from typing import Dict, Any, List
 from dataclasses import dataclass
-import hashlib
 import json
-
-from ..frontend.core.lazy_tensor import LazyTensor
 
 logger = logging.getLogger(__name__)
 
@@ -71,16 +68,24 @@ class DifferentialGraphProtocol:
         Initialize the differential protocol.
         
         Args:
-            max_cache_entries: Maximum number of cached graphs on server
+            max_cache_entries: Maximum number of cached graphs on server (must be >= 1)
+        
+        Raises:
+            ValueError: If max_cache_entries is invalid
         """
+        if max_cache_entries < 1:
+            raise ValueError(
+                f"max_cache_entries must be >= 1, got {max_cache_entries}"
+            )
         self.max_cache_entries = max_cache_entries
         
-        # Client-side tracking
-        self.client_graphs: Dict[str, Dict[str, Any]] = {}  # graph_id -> graph_data
+        # Client-side tracking (use OrderedDict for LRU support)
+        from collections import OrderedDict
+        self.client_graphs: 'OrderedDict[str, Dict[str, Any]]' = OrderedDict()  # graph_id -> graph_data
         self.client_versions: Dict[str, int] = {}  # graph_id -> version number
         
-        # Server-side cache (mirrored locally for computing diffs)
-        self.server_cache: Dict[str, Dict[str, Any]] = {}
+        # Server-side cache (mirrored locally for computing diffs, use OrderedDict for LRU)
+        self.server_cache: 'OrderedDict[str, Dict[str, Any]]' = OrderedDict()
         self.server_versions: Dict[str, int] = {}
         
         # Statistics
@@ -111,11 +116,24 @@ class DifferentialGraphProtocol:
         
         # First time - send full graph
         if not is_update or graph_id not in self.server_cache:
+            # Enforce max cache size (LRU eviction)
+            if len(self.server_cache) >= self.max_cache_entries:
+                # Evict least recently used
+                evicted_id, _ = self.server_cache.popitem(last=False)
+                # Also remove from client cache and versions
+                self.client_graphs.pop(evicted_id, None)
+                self.client_versions.pop(evicted_id, None)
+                self.server_versions.pop(evicted_id, None)
+                logger.debug(f"Evicted LRU graph from differential protocol: {evicted_id}")
+            
             logger.info(f"✓ First graph for {graph_id}: sending full ({graph_size/1024:.1f}KB)")
             self.client_graphs[graph_id] = graph
             self.client_versions[graph_id] = 1
             self.server_cache[graph_id] = graph
             self.server_versions[graph_id] = 1
+            # Move to end (most recently used)
+            self.client_graphs.move_to_end(graph_id)
+            self.server_cache.move_to_end(graph_id)
             
             self.stats['full_graphs_sent'] += 1
             self.stats['total_full_size_mb'] += graph_size / (1024 * 1024)
@@ -143,6 +161,9 @@ class DifferentialGraphProtocol:
         self.client_versions[graph_id] = delta.version
         self.server_cache[graph_id] = graph
         self.server_versions[graph_id] = delta.version
+        # Move to end (most recently used)
+        self.client_graphs.move_to_end(graph_id)
+        self.server_cache.move_to_end(graph_id)
         
         # Update statistics
         self.stats['delta_updates_sent'] += 1
@@ -226,121 +247,28 @@ class DifferentialGraphProtocol:
     
     @staticmethod
     def _estimate_size(graph: Dict[str, Any]) -> int:
-        """Estimate graph size in bytes."""
+        """
+        Estimate graph size in bytes.
+        
+        Args:
+            graph: Graph dictionary
+            
+        Returns:
+            Estimated size in bytes
+        """
+        if not isinstance(graph, dict):
+            logger.warning(f"Invalid graph type for size estimation: {type(graph)}")
+            return 1000  # Conservative default
+        
         try:
             return len(json.dumps(graph).encode('utf-8'))
-        except:
+        except (TypeError, ValueError) as e:
             # Fallback: estimate based on structure
+            logger.debug(f"JSON serialization failed for size estimation: {e}")
             ops_size = len(graph.get('operations', [])) * 150
             inputs_size = len(graph.get('input_tensors', {})) * 100
             return ops_size + inputs_size + 1000
 
-
-class MegaNodeExpander:
-    """
-    Expands mega-nodes on the server side.
-    
-    When the client sends compacted mega-nodes, the server knows how to
-    execute them as full transformer layers without needing the low-level ops.
-    """
-    
-    def expand(self, mega_node: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """
-        Expand a mega-node into executable operations on the server.
-        
-        Args:
-            mega_node: The mega-node with type and metadata
-            
-        Returns:
-            List of executable operations
-        """
-        node_type = mega_node.get('type')
-        metadata = mega_node.get('metadata', {})
-        
-        if node_type == 'transformer_layer':
-            return self._expand_transformer_layer(mega_node, metadata)
-        elif node_type == 'attention_head':
-            return self._expand_attention_head(mega_node, metadata)
-        elif node_type == 'mlp_block':
-            return self._expand_mlp_block(mega_node, metadata)
-        else:
-            # Unknown type - return as-is
-            return [mega_node]
-    
-    def _expand_transformer_layer(self, node: Dict[str, Any], 
-                                  metadata: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Expand a transformer layer into attention + FFN operations."""
-        layer_id = metadata.get('layer_id', 0)
-        hidden_dim = metadata.get('hidden_dim', 768)
-        num_heads = metadata.get('num_heads', 12)
-        
-        operations = []
-        
-        # Layer norm
-        operations.append({
-            'name': f'layer_norm_{layer_id}_0',
-            'op': 'layer_norm',
-            'inputs': [node['node_id']],
-            'hidden_dim': hidden_dim
-        })
-        
-        # Multi-head attention
-        operations.append({
-            'name': f'attention_{layer_id}',
-            'op': 'scaled_dot_product_attention',
-            'inputs': [f'layer_norm_{layer_id}_0'],
-            'num_heads': num_heads,
-            'hidden_dim': hidden_dim
-        })
-        
-        # Residual connection
-        operations.append({
-            'name': f'residual_{layer_id}',
-            'op': 'add',
-            'inputs': [node['node_id'], f'attention_{layer_id}']
-        })
-        
-        # Layer norm 2
-        operations.append({
-            'name': f'layer_norm_{layer_id}_1',
-            'op': 'layer_norm',
-            'inputs': [f'residual_{layer_id}'],
-            'hidden_dim': hidden_dim
-        })
-        
-        # Feed-forward network
-        operations.append({
-            'name': f'mlp_{layer_id}',
-            'op': 'mlp_block',
-            'inputs': [f'layer_norm_{layer_id}_1'],
-            'hidden_dim': hidden_dim
-        })
-        
-        # Final residual
-        operations.append({
-            'name': f'output_{layer_id}',
-            'op': 'add',
-            'inputs': [f'residual_{layer_id}', f'mlp_{layer_id}']
-        })
-        
-        return operations
-    
-    def _expand_attention_head(self, node: Dict[str, Any],
-                              metadata: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Expand a single attention head computation."""
-        # Simplified - just return a scaled dot product attention op
-        return [{
-            'op': 'scaled_dot_product_attention',
-            'num_heads': metadata.get('num_heads', 1),
-        }]
-    
-    def _expand_mlp_block(self, node: Dict[str, Any],
-                         metadata: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Expand an MLP block (linear → activation → linear)."""
-        hidden_dim = metadata.get('hidden_dim', 768)
-        
-        return [
-            {'op': 'linear', 'out_features': hidden_dim * 4},
-            {'op': 'gelu', 'approximate': True},
-            {'op': 'linear', 'out_features': hidden_dim},
-        ]
+# NOTE: MegaNodeExpander class was removed (2024) - it was unused dead code (~100 lines).
+# If mega-node expansion is needed in the future, it should be implemented in the server
+# execution layer where it would actually be used, not in the differential updates module.

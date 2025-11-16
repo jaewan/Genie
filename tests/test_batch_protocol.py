@@ -15,9 +15,11 @@ import sys
 
 sys.path.insert(0, '/home/jae/Genie')
 
-from djinn.core.batch_protocol import (
+from djinn.server.optimizations.batch_protocol import (
     BatchProtocol,
     BatchProtocolError,
+    BatchProtocolPackError,
+    BatchProtocolUnpackError,
     REQUEST_TYPE_BATCH,
     STATUS_SUCCESS,
     STATUS_ERROR

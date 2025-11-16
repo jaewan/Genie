@@ -31,6 +31,8 @@ class SemanticAnalyzer:
 			pattern_matcher: IPatternMatcher instance for pattern matching.
 						   If None, uses default NetworkXPatternMatcher.
 		"""
+		import warnings
+		
 		# Support both old and new initialization
 		if pattern_matcher is not None:
 			# New approach: Use injected pattern matcher
@@ -38,6 +40,12 @@ class SemanticAnalyzer:
 			self.pattern_registry = None  # Deprecated
 		elif pattern_registry is not None:
 			# Old approach: Wrap pattern_registry in NetworkXPatternMatcher
+			warnings.warn(
+				"pattern_registry parameter is deprecated. Use pattern_matcher instead. "
+				"See docs/REFACTORING_MIGRATION_GUIDE.md for migration instructions.",
+				DeprecationWarning,
+				stacklevel=2
+			)
 			from .pattern_matcher import NetworkXPatternMatcher
 			self.pattern_matcher = NetworkXPatternMatcher(pattern_registry)
 			self.pattern_registry = pattern_registry  # Keep for backward compat

@@ -8,10 +8,16 @@ in enhancement_plan.md.
 
 Phase 6A Enhancement: Context-aware classification for operations with
 context-dependent semantics (e.g., sum with/without dim parameter).
+
+REFACTORING: Consolidated from materialization_control.py to provide
+single source of truth for operation classification.
 """
 
 from enum import Enum
-from typing import Optional, Any, Dict, Tuple
+from typing import Optional, Any, Dict, Tuple, Set
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class OperationClass(Enum):
@@ -50,7 +56,8 @@ class OperationClassifier:
     """
     
     # Operations that MUST materialize (return non-Tensor types)
-    MATERIALIZATION_TRIGGERS = {
+    # Merged from materialization_control.PYTHON_PROTOCOL_OPS
+    MATERIALIZATION_TRIGGERS: Set[str] = {
         # Boolean returns (control flow)
         'all', 'any', '__bool__', '__nonzero__',
         
@@ -69,6 +76,24 @@ class OperationClassifier:
         # Comparison operations that might be used for control flow
         '__lt__', '__le__', '__gt__', '__ge__', '__eq__', '__ne__',
         'equal',
+    }
+    
+    # Python Protocol Operations (subset of MATERIALIZATION_TRIGGERS)
+    # Kept for backward compatibility with materialization_control.py
+    PYTHON_PROTOCOL_OPS: Set[str] = {
+        # Boolean conversion (required by Python if/while)
+        '__bool__',
+        '__nonzero__',  # Python 2 compat
+        
+        # Numeric conversions (required by Python int()/float())
+        '__int__',
+        '__float__',
+        '__index__',     # Required for indexing: list[tensor]
+        
+        # Data extraction (required for scalar access)
+        'item',          # tensor.item() → Python number
+        'tolist',        # tensor.tolist() → Python list
+        'numpy',         # tensor.numpy() → numpy array
     }
     
     # Operations that dramatically reduce data size
@@ -93,17 +118,40 @@ class OperationClassifier:
     }
     
     # Operations that return tuples (need special handling)
-    TUPLE_RETURNING_OPERATIONS = {
+    # Merged from materialization_control.TUPLE_RETURNING_OPS
+    TUPLE_RETURNING_OPERATIONS: Dict[str, Optional[int]] = {
+        # Splitting operations (variable number of outputs)
+        'split': None,      # Variable number of splits
+        'chunk': None,      # Variable number of chunks
+        'unbind': None,     # Variable number of unbind results
+        'hsplit': None,     # Variable number of splits
+        'vsplit': None,     # Variable number of splits
+        'dsplit': None,     # Variable number of splits
+        'tensor_split': None,  # Variable number of splits
+        
+        # Operations returning (values, indices)
         'topk': 2,          # Returns (values, indices)
         'sort': 2,          # Returns (values, indices)
         'kthvalue': 2,      # Returns (values, indices)
-        'mode': 2,          # Returns (values, indices)
         'median': 2,        # Returns (values, indices) sometimes
+        'mode': 2,          # Returns (values, indices)
+        
+        # Matrix decomposition
         'qr': 2,            # Returns (Q, R)
-        'eig': 2,           # Returns (eigenvalues, eigenvectors)
         'svd': 3,           # Returns (U, S, V)
-        'chunk': None,      # Variable number of chunks
-        'split': None,      # Variable number of splits
+        'eig': 2,           # Returns (eigenvalues, eigenvectors)
+        'slogdet': 2,       # Returns (sign, logabsdet)
+    }
+    
+    # Tuple-returning operations as a set (for backward compatibility)
+    # Kept for backward compatibility with materialization_control.py
+    TUPLE_RETURNING_OPS: Set[str] = {
+        # Splitting operations
+        'split', 'chunk', 'unbind', 'hsplit', 'vsplit', 'dsplit', 'tensor_split',
+        # Operations returning (values, indices)
+        'topk', 'sort', 'kthvalue', 'median', 'mode',
+        # Matrix decomposition
+        'qr', 'svd', 'eig', 'slogdet',
     }
     
     # Context-dependent operations: behavior changes based on parameters
@@ -244,4 +292,6 @@ class OperationClassifier:
         if '::' in op_name:
             op_name = op_name.split('::')[-1]
         return cls.TUPLE_RETURNING_OPERATIONS.get(op_name)
+
+
 

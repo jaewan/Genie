@@ -10,7 +10,7 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 
-def trace_lazy_tensor_lineage(tensor: Any, depth: int = 5, prefix: str = "") -> None:
+def trace_lazy_tensor_lineage(tensor: Any, depth: int = 5, prefix: str = "", visited: Optional[set] = None) -> None:
     """
     Trace LazyTensor operation history to understand shape transformations.
     
@@ -18,6 +18,7 @@ def trace_lazy_tensor_lineage(tensor: Any, depth: int = 5, prefix: str = "") -> 
         tensor: LazyTensor to trace
         depth: Maximum depth to trace (default: 5)
         prefix: Prefix for logging (for indentation)
+        visited: Set of visited tensor IDs to avoid cycles (internal use)
     """
     if depth <= 0:
         return

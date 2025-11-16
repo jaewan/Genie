@@ -20,7 +20,8 @@ import logging
 import torch
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Tuple
-from .subgraph_builder import SubgraphBuilder, RemoteSubgraph, LazyTensor
+from ..subgraph_builder import SubgraphBuilder, RemoteSubgraph
+from ...frontend.core.lazy_tensor import LazyTensor
 
 logger = logging.getLogger(__name__)
 

@@ -60,7 +60,7 @@ class ResilientModelHandler:
         
         # Retry configuration
         self.max_retries = 3
-        self.timeout_seconds = 30.0
+        self.timeout_seconds = 300.0  # ✅ FIX: Increased from 30s to 5min for model execution
         
         logger.info(f"ResilientModelHandler initialized (gpu_id={gpu_id})")
     
@@ -214,6 +214,39 @@ class ResilientModelHandler:
                     'message': str(e)
                 }
     
+    async def _init_model(self, request: Dict) -> Dict:
+        """
+        Initialize (warmup) a registered model.
+        
+        Returns:
+            Success or error response
+        """
+        try:
+            fingerprint = request['fingerprint']
+            success = self.model_cache.init_model(fingerprint)
+            
+            if success:
+                return {
+                    'status': 'success',
+                    'fingerprint': fingerprint,
+                    'message': 'Model initialized successfully'
+                }
+            else:
+                return {
+                    'status': 'error',
+                    'error_type': ErrorType.EXECUTION_FAILED.value,
+                    'message': f'Model initialization failed for {fingerprint}'
+                }
+        except Exception as e:
+            logger.error(f"Model initialization failed: {e}")
+            import traceback
+            logger.error(f"Traceback:\n{traceback.format_exc()}")
+            return {
+                'status': 'error',
+                'error_type': ErrorType.EXECUTION_FAILED.value,
+                'message': str(e)
+            }
+    
     async def _execute_model(self, request: Dict) -> Dict:
         """
         Execute using model cache (synchronous operation wrapped in async).
@@ -230,6 +263,10 @@ class ResilientModelHandler:
             set_profiler(server_profiler)
             
             # Measure request handling
+            import time
+            execute_start = time.perf_counter()
+            logger.info(f"🔍 [DIAGNOSTIC] Starting model cache execution (fingerprint: {request['fingerprint'][:16]}...)")
+            
             with record_phase('model_cache_request_handling'):
                 # Execute directly - GPU operations release GIL, so they don't block the event loop
                 # No need for thread pool overhead!
@@ -241,9 +278,16 @@ class ResilientModelHandler:
                     hints=request.get('hints', {})
                 )
             
+            execute_time = (time.perf_counter() - execute_start) * 1000
+            logger.info(f"🔍 [DIAGNOSTIC] Model cache execute() completed: {execute_time:.1f}ms")
+            
             # Serialize result
+            serialize_start = time.perf_counter()
             with record_phase('model_cache_result_serialization'):
                 serialized_result = self._serialize_tensor(result)
+            
+            serialize_time = (time.perf_counter() - serialize_start) * 1000
+            logger.info(f"🔍 [DIAGNOSTIC] Result serialization: {serialize_time:.1f}ms")
             
             # Get server-side phases
             server_phases = server_profiler.get_phase_dict()
@@ -291,58 +335,64 @@ class ResilientModelHandler:
     
     def _request_registration_response(self, fingerprint: str) -> Dict:
         """Response requesting model registration."""
-        return {
-            'status': 'error',
-            'error_type': ErrorType.MODEL_NOT_FOUND.value,
-            'fingerprint': fingerprint,
-            'required_action': 'register_model',
-            'message': f'Model {fingerprint} not found. Please register first.'
-        }
+        from .error_responses import ErrorResponseBuilder
+        return ErrorResponseBuilder.model_not_found(fingerprint, required_action='register_model')
     
     def _timeout_response(self, fingerprint: str) -> Dict:
         """Response for timeout errors."""
-        return {
-            'status': 'error',
-            'error_type': ErrorType.TIMEOUT.value,
-            'fingerprint': fingerprint,
-            'message': f'Request timed out after {self.timeout_seconds} seconds'
-        }
+        from .error_responses import ErrorResponseBuilder
+        return ErrorResponseBuilder.timeout(fingerprint, self.timeout_seconds)
     
     def _circuit_breaker_response(self) -> Dict:
         """Response when circuit breaker is open."""
-        return {
-            'status': 'error',
-            'error_type': 'circuit_breaker_open',
-            'message': 'Service temporarily unavailable due to errors',
-            'retry_after_seconds': 60
-        }
+        from .error_responses import ErrorResponseBuilder
+        return ErrorResponseBuilder.circuit_breaker_open(retry_after_seconds=60)
     
     def _handle_fatal_error(self, e: Exception, request: Dict) -> Dict:
         """Handle fatal errors."""
         logger.error(f"Fatal error handling request: {e}")
         logger.error(traceback.format_exc())
         
-        return {
-            'status': 'error',
-            'error_type': ErrorType.EXECUTION_FAILED.value,
-            'message': str(e),
-            'traceback': traceback.format_exc()
-        }
+        from .error_responses import ErrorResponseBuilder
+        operation = request.get('operation', 'unknown')
+        return ErrorResponseBuilder.execution_failed(
+            operation=operation,
+            reason=str(e),
+            traceback=traceback.format_exc()
+        )
     
     def _error_response(self, message: str, error_type: ErrorType) -> Dict:
         """Generic error response."""
-        return {
-            'status': 'error',
-            'error_type': error_type.value,
-            'message': message
+        from .error_responses import ErrorResponseBuilder, ErrorCode
+        
+        # Map internal ErrorType to ErrorCode
+        error_code_map = {
+            ErrorType.MODEL_NOT_FOUND: ErrorCode.MODEL_NOT_FOUND,
+            ErrorType.EXECUTION_FAILED: ErrorCode.EXECUTION_FAILED,
+            ErrorType.OOM: ErrorCode.OOM,
+            ErrorType.TIMEOUT: ErrorCode.TIMEOUT,
+            ErrorType.SECURITY_ERROR: ErrorCode.SECURITY_ERROR,
         }
+        
+        error_code = error_code_map.get(error_type, ErrorCode.EXECUTION_FAILED)
+        return ErrorResponseBuilder.build(message=message, error_code=error_code)
     
     def _serialize_tensor(self, tensor: torch.Tensor) -> Dict:
-        """Safely serialize tensor."""
+        """
+        Safely serialize tensor using numpy binary format.
+        
+        Consistent with FastSerializer - uses binary format instead of list.
+        """
+        import numpy as np
+        
+        tensor_cpu = tensor.detach().cpu() if hasattr(tensor, 'detach') else tensor.cpu()
+        np_array = tensor_cpu.numpy()
+        
         return {
-            'data': tensor.cpu().numpy().tolist(),
+            'data': np_array.tobytes(),  # Binary numpy format
             'shape': list(tensor.shape),
-            'dtype': str(tensor.dtype)
+            'dtype': str(tensor.dtype),
+            'format': 'numpy_binary',  # Format marker
         }
     
     def reset_circuit_breaker(self):

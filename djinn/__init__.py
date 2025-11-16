@@ -125,7 +125,7 @@ from .frontend.core.capture import capture, get_graph, is_capturing
 from .server.subgraph_builder import SubgraphBuilder, RemoteSubgraph
 
 # Public API - Phase 2 (Smart Fragmentation)
-from .server.smart_subgraph_builder import (
+from .server.optimizations.smart_subgraph_builder import (
     SmartSubgraphBuilder,
     FragmentationConfig,
     SubgraphFragment,
@@ -325,7 +325,7 @@ def execute_model(model, inputs, use_cache=True, use_blocks=True, **kwargs):
             
             if blocks:
                 # Execute blocks instead of full graph
-                from .core.block_compiler import BlockExecutor
+                from .server.block_compiler import BlockExecutor
                 executor = BlockExecutor()
                 
                 # Prepare input dict

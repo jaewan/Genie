@@ -22,7 +22,7 @@ Usage:
 import io
 import torch
 import numpy as np
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 import logging
 
 logger = logging.getLogger(__name__)
@@ -182,6 +182,88 @@ def measure_serialization_overhead(
     logger.info(f"  Speedup:    {speedup:.2f}x")
     
     return torch_avg, numpy_avg, speedup
+
+
+def deserialize_tensor_from_dict(tensor_dict: Dict) -> torch.Tensor:
+    """
+    Deserialize tensor from dictionary format.
+    
+    This is used by model cache and other components that receive tensors
+    in dictionary format (with 'data', 'shape', 'dtype' keys).
+    
+    Args:
+        tensor_dict: Dictionary with 'data', 'shape', 'dtype' keys
+        
+    Returns:
+        Deserialized PyTorch tensor
+        
+    Example:
+        >>> tensor_dict = {
+        ...     'data': [[1.0, 2.0], [3.0, 4.0]],
+        ...     'shape': [2, 2],
+        ...     'dtype': 'float32'
+        ... }
+        >>> tensor = deserialize_tensor_from_dict(tensor_dict)
+    """
+    
+    data = tensor_dict['data']
+    shape = tensor_dict['shape']
+    dtype_str = tensor_dict.get('dtype', 'float32')
+    format_type = tensor_dict.get('format', None)
+    
+    # Handle new numpy binary format (FastSerializer)
+    if format_type == 'numpy_binary' or isinstance(data, bytes):
+        # Binary numpy format - fast path (numpy already imported at top)
+        
+        # ✅ FIX: Handle case where data might be a string (from JSON deserialization)
+        if isinstance(data, str):
+            # Try to decode from base64 (legacy format) or hex
+            try:
+                import base64
+                data = base64.b64decode(data)
+            except Exception:
+                # If base64 fails, try hex
+                try:
+                    data = bytes.fromhex(data)
+                except Exception:
+                    raise ValueError(f"Cannot decode data from string format: {type(data)}")
+        
+        # Ensure data is bytes
+        if not isinstance(data, bytes):
+            raise ValueError(f"Expected bytes for binary format, got {type(data).__name__}")
+        
+        # Handle torch dtype strings (e.g., "torch.float32" -> torch.float32)
+        if dtype_str.startswith('torch.'):
+            dtype_str = dtype_str[6:]  # Remove "torch." prefix
+        
+        # Map dtype string to numpy dtype
+        numpy_dtype_map = {
+            'float32': np.float32,
+            'float16': np.float16,
+            'float64': np.float64,
+            'int64': np.int64,
+            'int32': np.int32,
+            'int16': np.int16,
+            'int8': np.int8,
+            'uint8': np.uint8,
+            'bool': np.bool_,
+        }
+        numpy_dtype = numpy_dtype_map.get(dtype_str, np.float32)
+        
+        # Reconstruct numpy array from bytes
+        np_array = np.frombuffer(data, dtype=numpy_dtype)
+        np_array = np_array.reshape(shape)
+        
+        # Convert to torch tensor (make writable copy to avoid warning)
+        np_array = np_array.copy()  # Make writable
+        tensor = torch.from_numpy(np_array)
+        return tensor
+    
+    # If we get here, data format is not recognized
+    raise ValueError(
+        f"Unsupported tensor data format. Expected 'numpy_binary' format (bytes), "
+        f"got {type(data).__name__}. Legacy base64-pickle and list formats are no longer supported."
+    )
 
 
 def get_serialization_stats(tensor: torch.Tensor) -> dict:

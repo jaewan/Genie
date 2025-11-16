@@ -21,11 +21,11 @@ from dataclasses import dataclass
 
 import torch
 
-from .subgraph_executor import SubgraphExecutor
-from .performance_monitor import PerformanceMonitor
+from ..subgraph_executor import SubgraphExecutor
+from ..performance_monitor import PerformanceMonitor
 from .tensor_registry import SmartTensorRegistry
 from .fusion_compiler import SRGFusionCompiler
-from ..config import get_config
+from ...config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +108,7 @@ class OptimizationExecutor:
             # Get GPU memory info
             if torch.cuda.is_available():
                 gpu_memory_mb = torch.cuda.get_device_properties(self.gpu_id).total_memory / (1024 * 1024)
-                from .semantic_memory_manager import PhaseAwareMemoryManager
+                from ..semantic_memory_manager import PhaseAwareMemoryManager
                 self.memory_manager = PhaseAwareMemoryManager(total_gpu_memory_mb=gpu_memory_mb)
                 logger.info("✓ PhaseAwareMemoryManager initialized")
             else:
@@ -120,7 +120,7 @@ class OptimizationExecutor:
         try:
             if torch.cuda.is_available():
                 gpu_memory_mb = torch.cuda.get_device_properties(self.gpu_id).total_memory / (1024 * 1024)
-                from .memory_pressure_handler import MemoryPressureHandler
+                from ..memory_pressure_handler import MemoryPressureHandler
                 self.pressure_handler = MemoryPressureHandler(
                     total_gpu_memory_mb=gpu_memory_mb,
                     warning_threshold_percent=80.0,

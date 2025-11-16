@@ -14,13 +14,14 @@ import os
 import struct
 import json
 import numpy as np
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 import torch
 
 from ..core.coordinator import DjinnCoordinator, CoordinatorConfig
-from .optimization_executor import OptimizationExecutor
+from .optimizations.optimization_executor import OptimizationExecutor
 from .capability_provider import CapabilityProvider
 from ..core.metadata_types import ResultMetadata, ErrorMetadata, create_result_metadata, create_error_metadata
 
@@ -81,6 +82,16 @@ class DjinnServer:
         self.is_running = False
         self.tcp_server = None  # Server's own TCP server
         self.tcp_transport = None  # TCP transport for sending results
+        self._model_handler = None  # Shared model handler instance
+        
+        from .flow_control import get_flow_controller
+        self.flow_controller = get_flow_controller(
+            max_credits=100,  # Max 100 concurrent requests/data transfers
+            credit_recovery_rate=1.0  # 1 credit per second recovery
+        )
+        
+        # : Server health reporter for fleet coordination
+        self._health_reporter = None
 
     async def start(self) -> bool:
         """Start the Djinn server."""
@@ -95,12 +106,45 @@ class DjinnServer:
             # 2. Start TCP server for listening to incoming operation requests
             logger.info("Starting TCP server for operation requests...")
             import asyncio
+            # Configure socket options for high-performance network transfer
+            async def optimize_connection(reader, writer):
+                """Optimize incoming connection with Phase 3 TCP optimizations."""
+                import socket
+                sock = writer.get_extra_info('socket')
+                if sock:
+                    try:
+                        # 1. Disable Nagle's algorithm (reduce latency)
+                        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                        
+                        # 2. Increase send buffer to 16MB (better TCP window utilization)
+                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 16 * 1024 * 1024)
+                        
+                        # 3. Increase receive buffer to 16MB (better TCP window utilization)
+                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16 * 1024 * 1024)
+                        
+                        # 4. Enable TCP window scaling (Linux-specific)
+                        try:
+                            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_WINDOW_CLAMP, 64 * 1024 * 1024)  # 64MB window
+                        except (AttributeError, OSError):
+                            pass  # Not available on this system
+                        
+                        # Get actual buffer sizes (may be adjusted by OS)
+                        actual_sndbuf = sock.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF)
+                        actual_rcvbuf = sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+                        logger.debug(
+                            f"✅ Server TCP optimized: NODELAY=1, SNDBUF={actual_sndbuf/(1024*1024):.1f}MB, "
+                            f"RCVBUF={actual_rcvbuf/(1024*1024):.1f}MB"
+                        )
+                    except Exception as e:
+                        logger.warning(f"⚠️  Failed to optimize server TCP socket: {e}")
+                await self._handle_connection(reader, writer)
+            
             self.tcp_server = await asyncio.start_server(
-                self._handle_connection,
+                optimize_connection,
                 '0.0.0.0',
                 self.data_port
             )
-            logger.info(f"✓ TCP server listening on port {self.data_port}")
+            logger.info(f"✓ TCP server listening on port {self.data_port} (Phase 3: TCP_NODELAY, 16MB buffers)")
 
             # Set up transport for handling operation requests and sending results
             from .transport.tcp_transport import TCPTransport
@@ -156,6 +200,9 @@ class DjinnServer:
             # Start background tasks
             asyncio.create_task(self._heartbeat_loop())
             asyncio.create_task(self._transfer_handler_loop())
+            
+            # ✅ Phase 3: Start health reporting to global coordinator
+            await self._start_health_reporting()
 
             return True
 
@@ -190,6 +237,10 @@ class DjinnServer:
             if self.result_transport.server:
                 self.result_transport.server.close()
                 await self.result_transport.server.wait_closed()
+        
+        # ✅ Phase 3: Stop health reporting
+        if self._health_reporter:
+            await self._health_reporter.stop()
 
         logger.info("✓ Server stopped")
 
@@ -199,8 +250,43 @@ class DjinnServer:
         logger.info(f"TCP CONNECTION: New connection from {addr}")
 
         try:
-            # Read transfer_id
-            transfer_id_len_bytes = await reader.readexactly(4)
+            # ✅ BUG FIX: Validate message type is reasonable before processing
+            # This catches cases where leftover data from previous message is being read
+            first_byte = await reader.readexactly(1)
+            msg_type = struct.unpack('B', first_byte)[0]
+            
+            # ✅ BUG FIX: Validate message type is reasonable
+            # Message types should be < 0xFF (ERROR = 0xFF is the max)
+            if msg_type > 0xFF:
+                raise ValueError(
+                    f"⚠️  Invalid message type: 0x{msg_type:02x} (max: 0xFF). "
+                    f"Possible protocol mismatch or leftover data from previous message."
+                )
+            
+            # Import protocol constants
+            from .transport.protocol import MessageType
+            
+            # New protocol: message type
+            if MessageType.is_model_cache_protocol(msg_type):
+                logger.info(f"🔍 DEBUG: Detected new protocol message type: 0x{msg_type:02x} from {addr}")
+                if msg_type == MessageType.EXECUTE_MODEL:
+                    logger.info(f"🔍 DEBUG: EXECUTE_MODEL message detected! Routing to handler...")
+                # Store msg_type for finally block to use appropriate delay
+                self._last_msg_type = msg_type
+                try:
+                    await self._handle_message_type_protocol(reader, writer, msg_type, addr)
+                except Exception as proto_error:
+                    logger.error(f"Error in message type protocol handler: {proto_error}")
+                    import traceback
+                    logger.error(f"Traceback:\n{traceback.format_exc()}")
+                    # Don't close connection here - let finally block handle it
+                    raise
+                # Don't return here - let finally block close connection after response is sent
+                return
+            
+            # Old protocol: transfer_id + metadata (backward compatibility)
+            # First byte is part of 4-byte length field, read 3 more bytes
+            transfer_id_len_bytes = first_byte + await reader.readexactly(3)
             transfer_id_len = struct.unpack('>I', transfer_id_len_bytes)[0]
             transfer_id_bytes = await reader.readexactly(transfer_id_len)
             transfer_id = transfer_id_bytes.decode('utf-8')
@@ -215,11 +301,25 @@ class DjinnServer:
             logger.info(f"DIRECT TCP: Source node in metadata: {metadata.get('source_node')}")
 
             # Check if this is multi-tensor or single-tensor message
+            # ✅ FIX: Use explicit message type instead of heuristics
+            from .transport.protocol import MessageType
+            
             peek_data = await reader.readexactly(1)
-            next_byte_val = struct.unpack('B', peek_data)[0]
-
-            # Multi-tensor: next byte is number of tensors
-            is_multi_tensor = 'num_inputs' in metadata and next_byte_val <= 10
+            msg_type_byte = struct.unpack('B', peek_data)[0]
+            
+            # Explicit message type detection (no heuristics)
+            if msg_type_byte == MessageType.SINGLE_TENSOR:
+                is_multi_tensor = False
+            elif msg_type_byte == MessageType.MULTI_TENSOR:
+                is_multi_tensor = True
+            else:
+                # Fallback to heuristic for backward compatibility (legacy clients)
+                logger.warning(
+                    f"Legacy protocol detected (msg_type={msg_type_byte:02x}), "
+                    f"using heuristic detection. Consider upgrading client."
+                )
+                next_byte_val = msg_type_byte
+                is_multi_tensor = 'num_inputs' in metadata and next_byte_val <= 10
 
             if is_multi_tensor:
                 # Multi-tensor protocol
@@ -300,8 +400,916 @@ class DjinnServer:
         except Exception as e:
             logger.error(f"Error handling connection from {addr}: {e}")
         finally:
-            writer.close()
-            await writer.wait_closed()
+            # ✅ IMPROVEMENT: Support keep-alive for message type protocol
+            from .transport.protocol import MessageType
+            
+            # Check if this was a keep-alive request (for chunked transfers or frequent requests)
+            should_keep_alive = False
+            
+            # Determine if we should keep connection alive
+            if hasattr(self, '_last_msg_type'):
+                msg_type = self._last_msg_type
+                # Keep-alive for chunked protocol messages (client will reuse connection)
+                # Also check if request had keep_alive flag
+                if MessageType.is_chunked_protocol(msg_type):
+                    should_keep_alive = True
+                elif hasattr(self, '_last_request') and isinstance(self._last_request, dict):
+                    should_keep_alive = self._last_request.get('_keep_alive', False)
+            
+            if should_keep_alive:
+                # Keep connection open - client will reuse it
+                logger.debug(f"Keeping connection alive for {addr} (keep-alive requested)")
+                # Don't close - connection will be reused
+                # Note: Connection will be closed by client or on timeout
+            else:
+                # Close connection after response (with delay for client to read)
+                try:
+                    # Variable delay based on message type
+                    delay = 5.0 if (hasattr(self, '_last_msg_type') and 
+                                   self._last_msg_type == MessageType.REGISTER_MODEL_FINALIZE) else 2.0
+                    await asyncio.sleep(delay)  # Delay to allow client to read
+                    if not writer.is_closing():
+                        writer.close()
+                        await writer.wait_closed()
+                except Exception:
+                    pass  # Ignore errors during cleanup
+    
+    async def _handle_message_type_protocol(self, reader, writer, msg_type, addr):
+        """Handle new message type protocol (REGISTER_MODEL, EXECUTE_MODEL).
+        
+        Uses secure JSON + binary serialization (no pickle for security).
+        """
+        from djinn.core.secure_serializer import SecureSerializer
+        
+        try:
+            logger.info(f"📥 Handling message type 0x{msg_type:02x} from {addr}")
+            
+            # Read length (8 bytes, big-endian)
+            # Use timeout for large reads to prevent hanging
+            import asyncio
+            try:
+                logger.info(f"Reading message length header (msg_type=0x{msg_type:02x}) from {addr}...")
+                length_bytes = await asyncio.wait_for(
+                    reader.readexactly(8),
+                    timeout=10.0  # 10s timeout for length header
+                )
+                length = int.from_bytes(length_bytes, 'big')
+                
+                # ✅ BUG FIX: Validate message length to catch protocol mismatches
+                MAX_REASONABLE_MESSAGE_SIZE = 10 * 1024 * 1024 * 1024  # 10GB (safety limit)
+                if length > MAX_REASONABLE_MESSAGE_SIZE:
+                    raise ValueError(
+                        f"⚠️  Suspicious message length: {length} bytes ({length / (1024*1024):.1f} MB). "
+                        f"This is likely a protocol mismatch or leftover data from previous message. "
+                        f"Expected reasonable size (< 10GB)."
+                    )
+                if length == 0:
+                    raise ValueError("Invalid message length: 0 bytes (possible protocol mismatch)")
+                
+                # Import protocol constants for validation
+                from .transport.protocol import MessageType
+                
+                # ✅ BUG FIX: Check for suspicious round numbers (like 64MB = 2^26)
+                # These often indicate protocol mismatches or leftover data
+                # Apply to ALL message types, not just registration
+                SUSPICIOUS_SIZES = [
+                    64 * 1024 * 1024,      # 64MB (2^26) - common in errors
+                    128 * 1024 * 1024,     # 128MB (2^27)
+                    256 * 1024 * 1024,     # 256MB (2^28)
+                    512 * 1024 * 1024,     # 512MB (2^29)
+                    1024 * 1024 * 1024,    # 1GB (2^30)
+                ]
+                if length in SUSPICIOUS_SIZES:
+                    # ✅ BUG FIX: Raise error for suspicious round numbers - they indicate protocol mismatch
+                    # This applies to ALL message types, not just registration
+                    raise ValueError(
+                        f"⚠️  Suspicious message length: {length} bytes ({length / (1024*1024):.1f} MB) "
+                        f"is a round number (power of 2) for message type 0x{msg_type:02x}. "
+                        f"This indicates protocol mismatch or leftover data from previous message. "
+                        f"Expected actual message size, not a round number. Check connection state and protocol detection."
+                    )
+                
+                # ✅ BUG FIX: For registration messages, check if length is reasonable
+                # Small models should be < 100MB, large models might be up to 1GB
+                # But 64MB exactly is suspicious (round number)
+                if msg_type == MessageType.REGISTER_MODEL and length > 50 * 1024 * 1024:  # > 50MB
+                    logger.warning(
+                        f"⚠️  Large registration message: {length} bytes ({length / (1024*1024):.1f} MB). "
+                        f"If this is a small model, this might indicate protocol mismatch."
+                    )
+                
+                logger.info(
+                    f"📊 Message length: {length} bytes ({length / (1024*1024):.1f} MB, "
+                    f"msg_type=0x{msg_type:02x}) from {addr}"
+                )
+                
+                # For very large payloads, use chunked reading with timeout
+                MAX_SINGLE_READ = 100 * 1024 * 1024  # 100MB
+                if length > MAX_SINGLE_READ:
+                    # Large payload - read in chunks with timeout
+                    logger.info(
+                        f"📦 Large payload detected ({length / (1024*1024):.1f} MB, msg_type=0x{msg_type:02x}), "
+                        f"reading in chunks from {addr}..."
+                    )
+                    request_bytes = bytearray()
+                    remaining = length
+                    # Use larger chunks for faster reading (50MB instead of 10MB)
+                    # This reduces the number of read operations for large payloads
+                    chunk_size = 50 * 1024 * 1024  # 50MB chunks (increased from 10MB)
+                    
+                    chunk_num = 0
+                    while remaining > 0:
+                        read_size = min(chunk_size, remaining)
+                        chunk_num += 1
+                        logger.info(
+                            f"📖 Reading chunk {chunk_num}: {read_size / (1024*1024):.1f} MB, "
+                            f"{remaining / (1024*1024):.1f} MB remaining..."
+                        )
+                        try:
+                            # Increase timeout for larger chunks (2s per MB, min 30s)
+                            chunk_timeout = max(30.0, (read_size / (1024 * 1024)) * 2)
+                            chunk = await asyncio.wait_for(
+                                reader.readexactly(read_size),
+                                timeout=chunk_timeout
+                            )
+                            request_bytes.extend(chunk)
+                            remaining -= len(chunk)
+                            logger.info(
+                                f"✅ Read chunk {chunk_num}: {len(chunk) / (1024*1024):.1f} MB, "
+                                f"{remaining / (1024*1024):.1f} MB remaining"
+                            )
+                        except asyncio.TimeoutError:
+                            logger.error(
+                                f"⏱️  Timeout reading chunk {chunk_num}: {read_size / (1024*1024):.1f} MB "
+                                f"after 60s from {addr}"
+                            )
+                            raise
+                    
+                    request_bytes = bytes(request_bytes)
+                    logger.info(f"✅ Finished reading large payload: {len(request_bytes)} bytes")
+                else:
+                    # Small payload - read all at once with timeout
+                    logger.info(f"Reading {length} bytes (small payload)...")
+                    timeout = max(30.0, length / (1024 * 1024) * 2)  # 2s per MB, min 30s
+                    logger.debug(f"Using timeout: {timeout:.1f}s")
+                    request_bytes = await asyncio.wait_for(
+                        reader.readexactly(length),
+                        timeout=timeout
+                    )
+                    logger.info(f"✅ Finished reading payload: {len(request_bytes)} bytes")
+                
+                logger.info(f"Deserializing request (msg_type=0x{msg_type:02x})...")
+                try:
+                    # ✅ OPTIMIZATION: Deserialize in thread pool for large payloads (non-blocking)
+                    # For chunks, deserialization can be CPU-intensive (30-40MB of data)
+                    # Import MessageType here to avoid scope issues
+                    from .transport.protocol import MessageType
+                    if msg_type == MessageType.REGISTER_MODEL_CHUNK and len(request_bytes) > 10 * 1024 * 1024:
+                        # Large chunk - deserialize in thread pool
+                        loop = asyncio.get_event_loop()
+                        request = await loop.run_in_executor(
+                            None,  # Use default thread pool
+                            SecureSerializer.deserialize_request,
+                            request_bytes
+                        )
+                    else:
+                        # Small request - deserialize directly (fast)
+                        request = SecureSerializer.deserialize_request(request_bytes)
+                    logger.info(f"✅ Request deserialized successfully (secure format)")
+                    # Store request for keep-alive decision
+                    self._last_request = request
+                except Exception as deserialize_error:
+                    logger.error(f"Failed to deserialize request: {deserialize_error}")
+                    # ✅ IMPROVEMENT: Check if pickle fallback is allowed
+                    allow_pickle_fallback = getattr(self._central_config, 'security', None)
+                    if allow_pickle_fallback and hasattr(allow_pickle_fallback, 'allow_pickle_fallback'):
+                        allow_pickle = allow_pickle_fallback.allow_pickle_fallback
+                    else:
+                        # Default: disable pickle fallback for security
+                        allow_pickle = False
+                    
+                    if allow_pickle:
+                        # Try pickle for backward compatibility (legacy clients) - SECURITY RISK
+                        try:
+                            import pickle
+                            logger.warning("⚠️  Falling back to pickle deserialization (legacy client) - SECURITY RISK")
+                            request = pickle.loads(request_bytes)
+                            logger.info(f"✅ Request deserialized successfully (pickle fallback)")
+                            # Store request for keep-alive decision
+                            self._last_request = request
+                        except Exception as pickle_error:
+                            logger.error(f"Pickle fallback also failed: {pickle_error}")
+                            raise ValueError(f"Failed to deserialize request: {deserialize_error}")
+                    else:
+                        # Pickle fallback disabled - reject legacy clients
+                        logger.error("Legacy protocol (pickle) not supported. Client must upgrade to secure protocol.")
+                        raise ValueError(
+                            f"Failed to deserialize request with secure protocol: {deserialize_error}. "
+                            "Legacy pickle protocol is disabled for security. Please upgrade client."
+                        )
+                
+            except asyncio.TimeoutError:
+                logger.error(f"Timeout reading message from {addr} (type={msg_type:02x})")
+                raise RuntimeError("Request timeout - payload too large or connection too slow")
+            except asyncio.IncompleteReadError as e:
+                # ✅ BUG FIX: Better error message for protocol mismatch detection
+                logger.error(
+                    f"Incomplete read from {addr}: got {e.partial} bytes, expected {e.expected} bytes "
+                    f"({e.expected / (1024*1024):.1f} MB). "
+                    f"Possible causes: protocol mismatch, connection closed, or leftover data."
+                )
+                # Check if this looks like a protocol mismatch
+                if e.expected > 100 * 1024 * 1024:  # > 100MB is suspicious
+                    logger.error(
+                        f"⚠️  Suspicious large expected size ({e.expected} bytes = {e.expected / (1024*1024):.1f} MB) "
+                        f"suggests protocol mismatch. "
+                        f"Check if binary protocol detection is working correctly or if there's leftover data."
+                    )
+                raise RuntimeError(
+                    f"Incomplete read: connection closed during transfer "
+                    f"(got {e.partial} bytes, expected {e.expected} bytes)"
+                )
+            
+            logger.info(f"✅ Received message type 0x{msg_type:02x} from {addr}, length={length} bytes")
+            
+            # Import protocol constants
+            from .transport.protocol import MessageType
+            
+            # Log finalization messages specifically
+            if msg_type == MessageType.REGISTER_MODEL_FINALIZE:
+                logger.info(f"🔍 FINALIZE message detected at TCP level: type=0x{msg_type:02x}, length={length} bytes from {addr}")
+            
+            # Extract request ID for correlation (if present)
+            request_id = request.get('_request_id', 'unknown')
+            if request_id != 'unknown':
+                logger.debug(f"Request ID: {request_id}")
+            
+            # ✅ FIX: Initialize flow control variables
+            # Check flow control AFTER deserialization so we can detect binary protocol
+            client_id = f"{addr[0]}:{addr[1]}"
+            credits_needed = max(1, length // (1024 * 1024))  # 1 credit per MB, min 1
+            credits_acquired = False
+            
+            # ✅ Bypass flow control for chunk transfers and binary protocol (they're already rate-limited by client)
+            # Chunk transfers are expected to be concurrent, and the client's semaphore already
+            # limits concurrency. Server-side flow control would block legitimate parallel transfers.
+            # Binary protocol (single large message) should also bypass flow control to avoid blocking.
+            request_type = request.get('type', '')
+            is_chunk_transfer = request_type in ['REGISTER_MODEL_CHUNK', 'REGISTER_MODEL_CHUNKED']
+            is_binary_protocol = request.get('_binary_protocol', False) or 'weights_binary' in request
+            
+            if not is_chunk_transfer and not is_binary_protocol:
+                # ✅ Acquire flow control credits before processing (skip for chunk transfers)
+                try:
+                    credits_acquired = await self.flow_controller.acquire(
+                        size=credits_needed,
+                        client_id=client_id,
+                        timeout=5.0
+                    )
+                    
+                    if not credits_acquired:
+                        # Server overloaded - send error response
+                        logger.warning(f"Server overloaded, rejecting request from {client_id}")
+                        error_response = {
+                            'status': 'error',
+                            'message': 'Server overloaded, please retry',
+                            '_request_id': request.get('_request_id')
+                        }
+                        response_bytes = SecureSerializer.serialize_response(error_response)
+                        response_len = len(response_bytes)
+                        writer.write(bytes([MessageType.ERROR]))
+                        writer.write(response_len.to_bytes(8, 'big'))
+                        writer.write(response_bytes)
+                        await writer.drain()
+                        return
+                except Exception as flow_error:
+                    logger.error(f"Flow control error: {flow_error}")
+                    # Continue without flow control (graceful degradation)
+                    credits_acquired = False
+            else:
+                # Chunk transfers bypass flow control
+                logger.debug(f"Bypassing flow control for chunk transfer from {client_id}")
+                credits_acquired = True  # Mark as acquired to skip release later
+            
+            # Handle based on message type
+            logger.info(f"Processing message type 0x{msg_type:02x}...")
+            try:
+                if msg_type == MessageType.REGISTER_MODEL:
+                    # ✅ OPTIMIZATION: Check if this is direct binary protocol
+                    if 'weights_binary' in request:
+                        response = await self._handle_register_model_binary(request)
+                    else:
+                        response = await self._handle_register_model(request)
+                elif msg_type == MessageType.EXECUTE_MODEL:
+                    response = await self._handle_execute_model(request)
+                elif msg_type == MessageType.INIT_MODEL:
+                    response = await self._handle_init_model(request)
+                elif msg_type == MessageType.WARMUP_GPU:
+                    response = await self._handle_warmup_gpu(request)
+                elif msg_type == MessageType.REGISTER_MODEL_CHUNKED:
+                    logger.info(f"Handling REGISTER_MODEL_CHUNKED message...")
+                    response = await self._handle_register_model_chunked(request, reader, writer, addr)
+                elif msg_type == MessageType.REGISTER_MODEL_CHUNK:
+                    logger.info(f"📥 Handling REGISTER_MODEL_CHUNK message from {addr}...")
+                    # ✅ OPTIMIZATION: Process chunk asynchronously (fire-and-forget)
+                    # Don't wait for processing, send response immediately
+                    # This allows client to send next chunk without waiting
+                    response_task = asyncio.create_task(self._handle_register_model_chunk(request))
+                    # Send immediate success response (chunk received, processing async)
+                    response = {
+                        'status': 'success',
+                        'message': 'Chunk received (processing async)'
+                    }
+                    logger.info(f"✅ REGISTER_MODEL_CHUNK received (processing async)")
+                elif msg_type == MessageType.REGISTER_MODEL_FINALIZE:
+                    logger.info(f"Handling REGISTER_MODEL_FINALIZE message...")
+                    response = await self._handle_register_model_finalize(request)
+                else:
+                    logger.warning(f"Unknown message type: 0x{msg_type:02x}")
+                    response = {
+                        'status': 'error',
+                        'message': f'Unknown message type: {msg_type:02x}'
+                    }
+            finally:
+                # ✅ Always release flow control credits
+                if credits_acquired:
+                    try:
+                        await self.flow_controller.release(credits_needed, client_id=client_id)
+                    except Exception as release_error:
+                        logger.error(f"Error releasing flow control credits: {release_error}")
+            
+            # ✅ OPTIMIZATION: Skip response for fire-and-forget requests
+            if request.get('_fire_and_forget', False):
+                logger.debug(f"Skipping response for fire-and-forget request (chunk_id={request.get('chunk_id', 'unknown')})")
+                return  # Client closed connection, no response needed
+            
+            logger.info(f"Sending response (status={response.get('status', 'unknown')})...")
+            # Add request ID to response for correlation
+            if '_request_id' in request:
+                response['_request_id'] = request['_request_id']
+            
+            # Send response (message type + length + secure serialized data)
+            try:
+                response_bytes = SecureSerializer.serialize_response(response)
+                response_len = len(response_bytes)
+                
+                logger.info(f"📤 Writing response: type=0x{msg_type:02x}, length={response_len} bytes ({response_len / (1024*1024):.2f} MB)")
+                
+                # ✅ DIAGNOSTIC: Log response size breakdown
+                if msg_type == MessageType.EXECUTE_MODEL and 'result' in response:
+                    result = response.get('result', {})
+                    if isinstance(result, dict) and 'data' in result:
+                        result_size = len(result.get('data', b''))
+                        logger.info(f"🔍 [DIAGNOSTIC] Result tensor size: {result_size} bytes ({result_size / (1024*1024):.2f} MB)")
+                
+                # ✅ PHASE 3: Optimize write calls - combine writes for large responses
+                # For large responses (> 1MB), use single write() to reduce syscalls
+                if response_len > 1024 * 1024:  # > 1MB: combine writes
+                    logger.debug(f"Writing large response ({response_len / (1024*1024):.1f} MB) - combining writes...")
+                    combined = bytearray()
+                    combined.extend(bytes([msg_type]))
+                    combined.extend(response_len.to_bytes(8, 'big'))
+                    combined.extend(response_bytes)
+                    writer.write(bytes(combined))
+                else:
+                    # Small response: separate writes are fine
+                    writer.write(bytes([msg_type]))  # Echo message type
+                    writer.write(response_len.to_bytes(8, 'big'))
+                    writer.write(response_bytes)
+                logger.debug("Flushing response...")
+                await writer.drain()
+                logger.info(f"✅ Response flushed successfully ({response_len} bytes)")
+                
+                # For finalize, give extra time for client to read
+                if msg_type == MessageType.REGISTER_MODEL_FINALIZE:
+                    await asyncio.sleep(0.1)  # Small delay to ensure response is fully sent
+                logger.info(f"✅ Response sent successfully")
+            except (ConnectionResetError, BrokenPipeError, OSError) as conn_error:
+                # ✅ Handle connection loss gracefully (expected for fire-and-forget)
+                # Only log as debug, not error, since this is expected behavior
+                logger.debug(f"Connection closed by client (expected for fire-and-forget): {conn_error}")
+            except Exception as send_error:
+                logger.error(f"Failed to send response: {send_error}")
+                # Don't re-raise - connection might be closed, but we tried
+                raise
+            
+        except Exception as e:
+            logger.error(f"Error handling message type {msg_type:02x} from {addr}: {e}")
+            import traceback
+            logger.error(f"Traceback:\n{traceback.format_exc()}")
+            # Send error response
+            try:
+                error_response = {
+                    'status': 'error',
+                    'message': str(e)
+                }
+                try:
+                    error_bytes = SecureSerializer.serialize_response(error_response)
+                except Exception as serialize_error:
+                    # Should never happen, but log and use minimal error response
+                    logger.error(f"Failed to serialize error response: {serialize_error}")
+                    # Create minimal error response
+                    minimal_error = {
+                        'status': 'error',
+                        'message': str(e)
+                    }
+                    error_bytes = SecureSerializer.serialize_response(minimal_error)
+                error_len = len(error_bytes)
+                writer.write(bytes([MessageType.ERROR]))  # ERROR message type
+                writer.write(error_len.to_bytes(8, 'big'))
+                writer.write(error_bytes)
+                await writer.drain()
+                logger.info("✅ Error response sent")
+            except (ConnectionResetError, BrokenPipeError, OSError) as conn_error:
+                # ✅ Handle connection loss gracefully (expected for fire-and-forget)
+                logger.debug(f"Connection closed by client (expected for fire-and-forget): {conn_error}")
+            except Exception as send_error:
+                logger.error(f"Failed to send error response: {send_error}")
+                # Connection might be closed, but we tried
+    
+    async def _handle_register_model_binary(self, request: Dict) -> Dict:
+        """
+        Handle model registration with direct binary protocol (optimized path).
+        
+        This is the fast path that avoids JSON overhead and intermediate dict structures.
+        """
+        try:
+            fingerprint = request['fingerprint']
+            descriptor = request['descriptor']
+            weight_ids = request['weight_ids']
+            weights_binary = request['weights_binary']
+            architecture_data = request.get('architecture_data')
+            
+            logger.info(f"✅ PHASE 2: Received direct binary protocol registration ({len(weights_binary) / (1024*1024):.1f} MB)")
+            
+            # Deserialize binary weights
+            from djinn.core.weight_deserializer import deserialize_weights_binary
+            deserialize_start = time.time()
+            uncached_weights = deserialize_weights_binary(weights_binary)
+            deserialize_time = (time.time() - deserialize_start) * 1000
+            logger.info(f"✅ PHASE 2: Binary deserialization complete: {deserialize_time:.1f}ms for {len(uncached_weights)} weights")
+            
+            # Register using existing handler
+            from .resilient_model_handler import ResilientModelHandler
+            if self._model_handler is None:
+                self._model_handler = ResilientModelHandler(gpu_id=0)
+                if hasattr(self.executor, 'model_cache') and self.executor.model_cache:
+                    self._model_handler.model_cache = self.executor.model_cache
+            
+            registration_request = {
+                'fingerprint': fingerprint,
+                'descriptor': descriptor,
+                'weight_ids': weight_ids,
+                'uncached_weights': uncached_weights,
+                'architecture_data': architecture_data
+            }
+            
+            registration_response = await self._model_handler._register_with_recovery(registration_request)
+            
+            if registration_response.get('status') == 'success':
+                logger.info(f"✅ Model {fingerprint} registered successfully (binary protocol)")
+                return registration_response
+            else:
+                error_msg = registration_response.get('message', 'Unknown error')
+                logger.error(f"❌ Model registration failed: {error_msg}")
+                return registration_response
+                
+        except Exception as e:
+            logger.error(f"❌ Binary model registration failed: {e}")
+            import traceback
+            logger.error(f"Traceback:\n{traceback.format_exc()}")
+            return {
+                'status': 'error',
+                'message': str(e)
+            }
+    
+    async def _handle_register_model(self, request: Dict) -> Dict:
+        """Handle model registration request."""
+        try:
+            from .resilient_model_handler import ResilientModelHandler
+            # Use shared handler instance to ensure model cache is shared
+            if self._model_handler is None:
+                self._model_handler = ResilientModelHandler(gpu_id=0)
+                # Use executor's model_cache if available
+                if hasattr(self.executor, 'model_cache') and self.executor.model_cache:
+                    self._model_handler.model_cache = self.executor.model_cache
+            return await self._model_handler._register_with_recovery(request)
+        except Exception as e:
+            logger.error(f"Model registration failed: {e}")
+            import traceback
+            logger.error(f"Traceback:\n{traceback.format_exc()}")
+            return {
+                'status': 'error',
+                'message': str(e)
+            }
+    
+    async def _handle_init_model(self, request: Dict) -> Dict:
+        """Handle model initialization (warmup) request."""
+        try:
+            from .resilient_model_handler import ResilientModelHandler
+            # Use shared handler instance to ensure model cache is shared
+            if self._model_handler is None:
+                self._model_handler = ResilientModelHandler(gpu_id=0)
+                # Use executor's model_cache if available
+                if hasattr(self.executor, 'model_cache') and self.executor.model_cache:
+                    self._model_handler.model_cache = self.executor.model_cache
+            return await self._model_handler._init_model(request)
+        except Exception as e:
+            logger.error(f"Model initialization failed: {e}")
+            import traceback
+            logger.error(f"Traceback:\n{traceback.format_exc()}")
+            return {
+                'status': 'error',
+                'message': str(e)
+            }
+    
+    async def _handle_warmup_gpu(self, request: Dict) -> Dict:
+        """Handle GPU warmup request (one-time, server-wide)."""
+        try:
+            from .server_state import ServerState
+            server_state = ServerState.get_instance()
+            success = server_state.warmup_gpu()
+            
+            if success:
+                return {
+                    'status': 'success',
+                    'message': 'GPU warmed up successfully',
+                    'already_warmed': server_state.is_gpu_warmed()
+                }
+            else:
+                return {
+                    'status': 'error',
+                    'message': 'GPU warmup failed'
+                }
+        except Exception as e:
+            logger.error(f"GPU warmup failed: {e}")
+            import traceback
+            logger.error(f"Traceback:\n{traceback.format_exc()}")
+            return {
+                'status': 'error',
+                'message': str(e)
+            }
+    
+    async def _handle_execute_model(self, request: Dict) -> Dict:
+        """Handle model execution request."""
+        try:
+            from .resilient_model_handler import ResilientModelHandler
+            # Use shared handler instance to ensure model cache is shared
+            if self._model_handler is None:
+                self._model_handler = ResilientModelHandler(gpu_id=0)
+                # Use executor's model_cache if available
+                if hasattr(self.executor, 'model_cache') and self.executor.model_cache:
+                    self._model_handler.model_cache = self.executor.model_cache
+            return await self._model_handler._execute_with_recovery(request)
+        except Exception as e:
+            logger.error(f"Model execution failed: {e}")
+            import traceback
+            logger.error(f"Traceback:\n{traceback.format_exc()}")
+            return {
+                'status': 'error',
+                'message': str(e)
+            }
+    
+    async def _handle_register_model_chunked(
+        self, 
+        request: Dict, 
+        reader: Optional[asyncio.StreamReader] = None,
+        writer: Optional[asyncio.StreamWriter] = None,
+        addr: Optional[tuple] = None
+    ) -> Dict:
+        """Handle chunked model registration header."""
+        try:
+            fingerprint = request['fingerprint']
+            total_chunks = request['total_chunks']
+            architecture_data = request.get('architecture_data')
+            
+            # Initialize chunked registration state
+            if not hasattr(self, '_chunked_registrations'):
+                self._chunked_registrations = {}
+            
+            self._chunked_registrations[fingerprint] = {
+                'fingerprint': fingerprint,
+                'descriptor': request['descriptor'],
+                'weight_ids': request['weight_ids'],
+                'architecture_data': architecture_data,  # May be None if sent separately
+                'total_chunks': total_chunks,
+                'deserialized_chunks': {},  # ✅ Progressive deserialization storage (binary protocol only)
+                'deserialization_tasks': {},  # ✅ Background deserialization tasks
+                'deserialization_lock': asyncio.Lock(),  # ✅ Thread-safe access
+                'start_time': time.time()  # time is imported at top of file
+            }
+            
+            arch_size = len(architecture_data) if architecture_data else 0
+            logger.info(
+                f"Chunked registration started: {fingerprint}, "
+                f"{total_chunks} chunks expected, "
+                f"arch_data={arch_size / (1024*1024):.1f} MB"
+            )
+            
+            return {
+                'status': 'success',
+                'message': f'Chunked registration initialized, expecting {total_chunks} chunks'
+            }
+        except Exception as e:
+            logger.error(f"Chunked registration header failed: {e}")
+            import traceback
+            logger.error(f"Traceback:\n{traceback.format_exc()}")
+            return {
+                'status': 'error',
+                'message': str(e)
+            }
+    
+    async def _handle_register_model_chunk(self, request: Dict) -> Dict:
+        """Handle a single chunk of model registration.
+        
+        Optimized for speed: minimal processing, immediate response.
+        Chunk data is already deserialized by SecureSerializer.
+        """
+        try:
+            fingerprint = request['fingerprint']
+            chunk_id = request['chunk_id']
+            total_chunks = request['total_chunks']
+            
+            # Check if this is architecture_data chunk (chunk_id = -1)
+            if chunk_id == -1:
+                architecture_data = request.get('architecture_data')
+                if not hasattr(self, '_chunked_registrations'):
+                    return {
+                        'status': 'error',
+                        'message': 'No chunked registration in progress'
+                    }
+                if fingerprint not in self._chunked_registrations:
+                    return {
+                        'status': 'error',
+                        'message': f'Chunked registration not initialized for {fingerprint}'
+                    }
+                reg_state = self._chunked_registrations[fingerprint]
+                reg_state['architecture_data'] = architecture_data
+                logger.info(f"Architecture data received for {fingerprint} ({len(architecture_data) / (1024*1024):.1f} MB)")
+                return {
+                    'status': 'success',
+                    'chunk_id': chunk_id,
+                    'message': 'Architecture data received'
+                }
+            
+            # Regular weight chunk - optimized for speed
+            # ✅ Binary protocol only (legacy dict-based removed)
+            if 'chunk_data_binary' not in request:
+                return {
+                    'status': 'error',
+                    'message': 'No chunk_data_binary provided (binary protocol required)'
+                }
+            
+            chunk_data_binary = request['chunk_data_binary']
+            logger.debug(f"✅ Received binary protocol chunk {chunk_id+1}/{total_chunks}")
+            
+            if not hasattr(self, '_chunked_registrations'):
+                return {
+                    'status': 'error',
+                    'message': 'No chunked registration in progress'
+                }
+            
+            if fingerprint not in self._chunked_registrations:
+                return {
+                    'status': 'error',
+                    'message': f'Chunked registration not initialized for {fingerprint}'
+                }
+            
+            # ✅ OPTIMIZATION: Store chunk and deserialize progressively (non-blocking)
+            reg_state = self._chunked_registrations[fingerprint]
+            
+            # ✅ Binary protocol only - direct deserialization
+            async def deserialize_chunk_background():
+                """Deserialize chunk in background for progressive processing."""
+                try:
+                    # Binary protocol - direct deserialization
+                    from djinn.core.weight_deserializer import deserialize_weights_binary
+                    weights = await asyncio.to_thread(deserialize_weights_binary, chunk_data_binary)
+                    
+                    # Store deserialized weights (thread-safe access)
+                    async with reg_state.get('deserialization_lock', asyncio.Lock()):
+                        reg_state['deserialized_chunks'][chunk_id] = weights
+                    
+                    logger.debug(f"✅ Chunk {chunk_id+1}/{total_chunks} deserialized (background, binary protocol)")
+                except Exception as e:
+                    logger.error(f"❌ Failed to deserialize chunk {chunk_id}: {e}")
+                    # Store error for later handling
+                    async with reg_state.get('deserialization_lock', asyncio.Lock()):
+                        reg_state['deserialized_chunks'][chunk_id] = None
+            
+            # Start background deserialization (fire-and-forget)
+            if chunk_id not in reg_state.get('deserialization_tasks', {}):
+                reg_state['deserialization_tasks'][chunk_id] = asyncio.create_task(
+                    deserialize_chunk_background()
+                )
+            
+            # ✅ OPTIMIZATION: Calculate size asynchronously (don't block response)
+            received_count = len(reg_state.get('deserialized_chunks', {}))
+            
+            # Log every chunk for debugging (can be reduced to every 10th in production)
+            if chunk_id % 10 == 0 or received_count == total_chunks or chunk_id < 5:
+                # Calculate size only when logging (lazy evaluation)
+                chunk_size_mb = len(chunk_data_binary) / (1024 * 1024)
+                logger.info(
+                    f"📥 Chunk {chunk_id+1}/{total_chunks} received for {fingerprint} "
+                    f"({received_count}/{total_chunks} total, ~{chunk_size_mb:.1f} MB, binary protocol)"
+                )
+            
+            return {
+                'status': 'success',
+                'chunk_id': chunk_id,
+                'deserialized_chunks': received_count,
+                'total_chunks': total_chunks
+            }
+        except Exception as e:
+            logger.error(f"Chunk registration failed: {e}")
+            import traceback
+            logger.error(f"Traceback:\n{traceback.format_exc()}")
+            return {
+                'status': 'error',
+                'message': str(e)
+            }
+    
+    async def _handle_register_model_finalize(self, request: Dict) -> Dict:
+        """Finalize chunked model registration by reassembling and registering."""
+        try:
+            fingerprint = request['fingerprint']
+            logger.info(f"🔚 FINALIZE called for {fingerprint}")
+            logger.info(f"📥 FINALIZE request received: {request}")
+            
+            if not hasattr(self, '_chunked_registrations'):
+                logger.error("No chunked registrations state found")
+                return {
+                    'status': 'error',
+                    'message': 'No chunked registration in progress'
+                }
+            
+            if fingerprint not in self._chunked_registrations:
+                logger.error(f"Chunked registration not found for {fingerprint}")
+                logger.error(f"Available registrations: {list(self._chunked_registrations.keys())}")
+                return {
+                    'status': 'error',
+                    'message': f'Chunked registration not found for {fingerprint}'
+                }
+            
+            reg_state = self._chunked_registrations[fingerprint]
+            total_chunks = reg_state['total_chunks']
+            deserialized_chunks = reg_state.get('deserialized_chunks', {})
+            
+            logger.info(
+                f"📊 FINALIZE: {len(deserialized_chunks)}/{total_chunks} chunks deserialized "
+                f"for {fingerprint}"
+            )
+            
+            # Verify all chunks deserialized
+            if len(deserialized_chunks) != total_chunks:
+                missing = set(range(total_chunks)) - set(deserialized_chunks.keys())
+                logger.error(
+                    f"Missing chunks for {fingerprint}: {missing} "
+                    f"({len(deserialized_chunks)}/{total_chunks} deserialized)"
+                )
+                return {
+                    'status': 'error',
+                    'message': f'Missing chunks: {missing} ({len(deserialized_chunks)}/{total_chunks} deserialized)'
+                }
+            
+            # ✅ OPTIMIZATION: Progressive reassembly - use pre-deserialized chunks if available
+            logger.info(f"🔄 Reassembling {total_chunks} chunks for {fingerprint}...")
+            reassemble_start = time.time()
+            
+            # Check if chunks were deserialized progressively (background tasks)
+            deserialized_chunks = reg_state.get('deserialized_chunks', {})
+            deserialization_tasks = reg_state.get('deserialization_tasks', {})
+            
+            # Wait for any remaining background deserialization tasks
+            if deserialization_tasks:
+                logger.info(f"⏳ Waiting for {len(deserialization_tasks)} background deserialization tasks...")
+                wait_start = time.time()
+                try:
+                    # Wait with timeout to prevent hanging indefinitely
+                    await asyncio.wait_for(
+                        asyncio.gather(*deserialization_tasks.values(), return_exceptions=True),
+                        timeout=300.0  # 5 minute timeout
+                    )
+                    wait_time = time.time() - wait_start
+                    logger.info(f"✅ Background deserialization tasks completed in {wait_time:.1f}s")
+                except asyncio.TimeoutError:
+                    logger.warning(f"⚠️ Timeout waiting for deserialization tasks (after {time.time() - wait_start:.1f}s)")
+                    # Continue anyway - some chunks may be deserialized
+            
+            # Use pre-deserialized chunks if available, otherwise deserialize now
+            if len(deserialized_chunks) == total_chunks and all(
+                chunk_id in deserialized_chunks and deserialized_chunks[chunk_id] is not None 
+                for chunk_id in range(total_chunks)
+            ):
+                # All chunks already deserialized progressively - just reassemble
+                logger.info(f"✅ Using pre-deserialized chunks (progressive processing worked!)")
+                uncached_weights = {}
+                for chunk_id in sorted(deserialized_chunks.keys()):
+                    if deserialized_chunks[chunk_id] is not None:
+                        uncached_weights.update(deserialized_chunks[chunk_id])
+                deserialize_time = 0.0  # Already done
+            else:
+                # Some chunks not deserialized yet - wait for background tasks to complete
+                logger.info(f"🔄 Waiting for background deserialization to complete...")
+                deserialize_start = time.time()
+                
+                # Wait for all background deserialization tasks to complete
+                pending_tasks = [
+                    task for chunk_id, task in reg_state.get('deserialization_tasks', {}).items()
+                    if chunk_id not in deserialized_chunks or deserialized_chunks[chunk_id] is None
+                ]
+                
+                if pending_tasks:
+                    await asyncio.gather(*pending_tasks, return_exceptions=True)
+                
+                # Check if all chunks are now deserialized
+                missing_chunks = [
+                    chunk_id for chunk_id in range(total_chunks)
+                    if chunk_id not in deserialized_chunks or deserialized_chunks[chunk_id] is None
+                ]
+                
+                if missing_chunks:
+                    logger.error(f"❌ Failed to deserialize chunks: {missing_chunks}")
+                    raise RuntimeError(f"Failed to deserialize chunks: {missing_chunks}")
+                
+                deserialize_time = time.time() - deserialize_start
+                logger.info(f"✅ All chunks deserialized (waited {deserialize_time:.1f}s for background tasks)")
+                
+                # Reassemble weights from all deserialized chunks
+                uncached_weights = {}
+                for chunk_id in sorted(deserialized_chunks.keys()):
+                    if deserialized_chunks[chunk_id] is not None:
+                        uncached_weights.update(deserialized_chunks[chunk_id])
+            
+            reassemble_time = time.time() - reassemble_start
+            logger.info(
+                f"✅ Reassembled {len(uncached_weights)} weights from {total_chunks} chunks "
+                f"in {reassemble_time:.1f}s (deserialize: {deserialize_time:.1f}s)"
+            )
+            
+            # Register model with reassembled weights
+            logger.info(f"Registering model with {len(uncached_weights)} weights...")
+            register_start = time.time()
+            
+            from .resilient_model_handler import ResilientModelHandler
+            if self._model_handler is None:
+                self._model_handler = ResilientModelHandler(gpu_id=0)
+                if hasattr(self.executor, 'model_cache') and self.executor.model_cache:
+                    self._model_handler.model_cache = self.executor.model_cache
+            
+            # Create registration request
+            registration_request = {
+                'fingerprint': fingerprint,
+                'descriptor': reg_state['descriptor'],
+                'weight_ids': reg_state['weight_ids'],
+                'uncached_weights': uncached_weights,
+                'architecture_data': reg_state.get('architecture_data')
+            }
+            
+            # Register using existing handler
+            try:
+                registration_response = await self._model_handler._register_with_recovery(registration_request)
+                register_time = time.time() - register_start
+                logger.info(f"Model registration completed in {register_time:.1f}s")
+            except Exception as e:
+                logger.error(f"Model registration failed during finalize: {e}")
+                logger.info(f"⚠️ Registration failed, but preserving state for {fingerprint} to allow retries")
+                import traceback
+                logger.error(f"Traceback:\n{traceback.format_exc()}")
+                # ✅ FIX: Don't raise - return error but preserve state for retry
+                # Raising would cause outer handler to catch, but we want to preserve state
+                return {
+                    'status': 'error',
+                    'message': str(e),
+                    'retry_safe': True  # Signal to client that retry is safe
+                }
+            
+            # ✅ Cleanup only on success
+            if fingerprint in self._chunked_registrations:
+                del self._chunked_registrations[fingerprint]
+                logger.info(f"✅ Cleaned up chunked registration state for {fingerprint}")
+            
+            elapsed = time.time() - reg_state['start_time']
+            logger.info(
+                f"Chunked registration complete: {fingerprint} "
+                f"({total_chunks} chunks, {elapsed:.1f}s)"
+            )
+            
+            return registration_response
+            
+        except Exception as e:
+            logger.error(f"Chunked registration finalization failed: {e}")
+            import traceback
+            logger.error(f"Traceback:\n{traceback.format_exc()}")
+            # ✅ FIX: Preserve state on error to allow client retries
+            # Only clean up on success (line 1069), not on error
+            # This allows client to retry finalization if registration fails (e.g., CUDA OOM)
+            logger.info(f"⚠️ Preserving chunked registration state for {fingerprint} to allow retries")
+            return {
+                'status': 'error',
+                'message': str(e)
+            }
 
     async def _heartbeat_loop(self):
         """Send periodic heartbeats to connected clients."""
@@ -313,6 +1321,44 @@ class DjinnServer:
                 break
             except Exception as e:
                 logger.error(f"Heartbeat error: {e}")
+    
+    async def _start_health_reporting(self):
+        """Start health reporting to global fleet coordinator (Phase 3)."""
+        try:
+            # Check if global coordinator is enabled
+            fleet_config = self._central_config.fleet
+            if not fleet_config.enable_global_coordinator:
+                logger.debug("Global fleet coordinator disabled, skipping health reporting")
+                return
+            
+            # Get global coordinator from coordinator if available
+            global_coordinator = None
+            if self.coordinator and hasattr(self.coordinator, 'global_coordinator'):
+                global_coordinator = self.coordinator.global_coordinator
+            
+            if not global_coordinator:
+                logger.debug("Global coordinator not available, skipping health reporting")
+                return
+            
+            # Get server address (host:port format)
+            import socket
+            hostname = socket.gethostname()
+            server_address = f"{hostname}:{self.data_port}"
+            
+            # Create and start health reporter
+            from ..fleet.server_reporter import ServerHealthReporter
+            self._health_reporter = ServerHealthReporter(
+                server_address=server_address,
+                global_coordinator=global_coordinator,
+                report_interval=30.0  # Report every 30 seconds
+            )
+            
+            await self._health_reporter.start()
+            logger.info(f"✅ Started health reporting to global coordinator")
+        except Exception as e:
+            logger.warning(f"⚠️  Failed to start health reporting: {e}")
+            import traceback
+            logger.debug(f"Traceback: {traceback.format_exc()}")
 
     async def _transfer_handler_loop(self):
         """Handle incoming transfer requests and execute operations."""

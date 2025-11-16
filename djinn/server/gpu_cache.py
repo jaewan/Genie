@@ -48,12 +48,13 @@ class SimpleGPUCache:
             device: Target device (defaults to cuda:0 if available, else cpu)
             max_memory_mb: Maximum total memory in MB (optional). If set, enables memory-aware eviction.
         """
-        # Support both old and new formats during migration
-        self.cache_old: OrderedDict[str, Dict[int, torch.Tensor]] = OrderedDict()  # Old: model_id → {tensor_id → tensor}
-        self.cache_new: OrderedDict[str, torch.Tensor] = OrderedDict()  # New: identifier → tensor
+        # Cache storage: identifier-based format (new)
+        self.cache_new: OrderedDict[str, torch.Tensor] = OrderedDict()  # identifier → tensor
         
-        # Backward compatibility: alias cache to cache_old for existing code
-        self.cache = self.cache_old
+        # Legacy cache: model_id-based format (deprecated, kept for backward compatibility)
+        # TODO: Remove after migration complete
+        self.cache_old: OrderedDict[str, Dict[int, torch.Tensor]] = OrderedDict()  # model_id → {tensor_id → tensor}
+        self.cache = self.cache_old  # Backward compatibility alias
         
         self.max_models = max_models
         self.max_memory_mb = max_memory_mb  # None = unlimited
@@ -71,9 +72,6 @@ class SimpleGPUCache:
         }
         self._model_memory: Dict[str, int] = {}  # Track memory per model
         
-        # Migration flag
-        self._migrated = False
-        
         logger.info(
             "SimpleGPUCache initialized: max_models=%d, max_memory_mb=%s, device=%s",
             max_models,
@@ -87,7 +85,10 @@ class SimpleGPUCache:
         weight_dict: Dict[int, np.ndarray],
     ) -> Dict[int, torch.Tensor]:
         """
-        Get cached weights or load to GPU.
+        Get cached weights or load to GPU (legacy API - deprecated).
+        
+        This method is kept for backward compatibility. New code should use
+        get_weights_by_identifier() instead.
         
         Args:
             model_id: Unique identifier for the model (e.g., "gpt2-xl-v1.0")
@@ -95,6 +96,9 @@ class SimpleGPUCache:
             
         Returns:
             Dictionary mapping tensor IDs to GPU tensors
+            
+        Deprecated:
+            Use get_weights_by_identifier() for new code.
         """
         # ✅ PROFILING: Measure GPU cache lookup time
         try:
@@ -270,28 +274,12 @@ class SimpleGPUCache:
         """Get memory usage of a cached model in MB."""
         return self._model_memory.get(model_id, 0) / (1024 * 1024)
 
-    def _migrate_to_new_format(self):
-        """
-        Migrate old cache to new identifier-based format.
-        
-        Called lazily on first cache query to avoid blocking initialization.
-        For now, this is a placeholder - actual migration requires model registry
-        to map old tensor IDs to new identifiers.
-        """
-        if self._migrated:
-            return
-        
-        # For Phase 1, we'll start fresh with identifier-based cache
-        # Migration from old format will be handled when we receive new identifiers
-        logger.debug("Cache migration: Starting fresh with identifier-based format")
-        self._migrated = True
-    
     def get_weights_by_identifier(
         self,
         weight_dict: Dict[str, torch.Tensor]
     ) -> Dict[str, torch.Tensor]:
         """
-        Get cached weights by identifier (new API for Phase 1).
+        Get cached weights by identifier (primary API).
         
         Args:
             weight_dict: Dictionary mapping identifiers to tensors
@@ -299,9 +287,6 @@ class SimpleGPUCache:
         Returns:
             Dictionary mapping identifiers to GPU tensors
         """
-        # Ensure migration is complete
-        self._migrate_to_new_format()
-        
         gpu_weights = {}
         
         for identifier, tensor_data in weight_dict.items():
@@ -341,7 +326,6 @@ class SimpleGPUCache:
         self.cache = self.cache_old  # Reset alias
         self._model_memory.clear()
         self.stats["total_memory_bytes"] = 0
-        self._migrated = False
         logger.info("GPU cache cleared")
 
     def get_stats(self) -> Dict[str, Any]:

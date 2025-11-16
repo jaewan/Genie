@@ -13,10 +13,9 @@ logger = logging.getLogger(__name__)
 # Import interception control for cleaner recursion handling
 from .interception_control import should_intercept, disable_interception, InterceptionContext
 
-# Week 1-2: Materialization control for immediate execution decisions
-from .materialization_control import (
-    should_materialize_immediately,
-    PYTHON_PROTOCOL_OPS
+# Week 1-2: Operation classification for immediate execution decisions
+from .operation_classifier import (
+    OperationClassifier,
 )
 
 # ✅ OPTIMIZATION: Import MetadataPlaceholder at module level to avoid per-call import overhead
@@ -898,11 +897,10 @@ class LazyTensor(torch.Tensor):
             # This ensures LazyTuple is created for split/chunk/unbind
             op_name = cls._normalize_op_name(func)
             func_name = getattr(func, '__name__', '')
-            from .materialization_control import TUPLE_RETURNING_OPS
             
-            logger.debug(f"CHECK: func_name='{func_name}', in TUPLE_OPS={func_name in TUPLE_RETURNING_OPS}")
+            logger.debug(f"CHECK: func_name='{func_name}', is_tuple_returning={OperationClassifier.is_tuple_returning(func_name)}")
             
-            if func_name in TUPLE_RETURNING_OPS:
+            if OperationClassifier.is_tuple_returning(func_name):
                 # Week 3-4: Return LazyTuple (proper solution)
                 logger.debug(f"✅ Creating LazyTuple for {func_name}")
                 from .lazy_tuple import LazyTuple
@@ -1409,12 +1407,10 @@ class LazyTensor(torch.Tensor):
             
             # Week 1-2: Check if operation requires immediate materialization
             # This must happen BEFORE checking for LazyTensors to avoid infinite loops
-            should_materialize, reason = should_materialize_immediately(func_name)
-            
-            if should_materialize:
+            if OperationClassifier.is_materialization_trigger(func_name):
                 # Execute immediately with materialized inputs
-                logger.debug(f"Materializing {func_name} (reason: {reason})")
-                return cls._execute_immediate(func, args, kwargs, reason)
+                logger.debug(f"Materializing {func_name} (reason: materialization_trigger)")
+                return cls._execute_immediate(func, args, kwargs, "materialization_trigger")
             
             # Check if any of the arguments are LazyTensors
             # Use direct type check to avoid triggering torch operations
@@ -1607,16 +1603,14 @@ class LazyTensor(torch.Tensor):
                 # If automatic dispatch failed, fall through to special handlers
                 logger.debug(f"Automatic dispatch failed for {op_name}, trying special handlers")
             
-            # Week 1-2: Use materialization control for tuple operations
+            # Week 1-2: Use operation classifier for tuple operations
             # This replaces the old hardcoded split/chunk/unbind handling
             # Check if operation requires immediate materialization
             func_name = getattr(func, '__name__', '')
-            should_materialize, reason = should_materialize_immediately(func_name)
-            
-            if should_materialize:
+            if OperationClassifier.is_materialization_trigger(func_name):
                 # Execute immediately with materialized inputs
-                logger.debug(f"Materializing {func_name} (reason: {reason})")
-                return cls._execute_immediate(func, args, kwargs, reason)
+                logger.debug(f"Materializing {func_name} (reason: materialization_trigger)")
+                return cls._execute_immediate(func, args, kwargs, "materialization_trigger")
             
             # ✅ SPECIAL HANDLING: scaled_dot_product_attention for CLIP and other models
             # This is PyTorch's optimized attention implementation
@@ -2255,7 +2249,7 @@ class LazyTensor(torch.Tensor):
         
         try:
             # ✅ Week 3: Use MaterializationOptimizer for optimized local execution
-            from ...server.materialization_optimizer import MaterializationOptimizer
+            from ...server.optimizations.materialization_optimizer import MaterializationOptimizer
             from ...server.executor import _executor
 
             optimizer = MaterializationOptimizer(
@@ -2281,7 +2275,7 @@ class LazyTensor(torch.Tensor):
         This reduces O(n) network round-trips to O(1).
         """
         from ...backend.runtime.initialization import get_runtime_state
-        from ...server.smart_subgraph_builder import SmartSubgraphBuilder, FragmentationConfig
+        from ...server.optimizations.smart_subgraph_builder import SmartSubgraphBuilder, FragmentationConfig
         from ...server.subgraph_cache import get_subgraph_cache
         import asyncio
 
@@ -3979,13 +3973,12 @@ class LazyTensor(torch.Tensor):
         This is the DEFAULT path - most operations go here.
         """
         from .lazy_tuple import LazyTuple, is_lazy_tuple
-        from .materialization_control import TUPLE_RETURNING_OPS
         
         op_name = cls._normalize_op_name(func)
         func_name = getattr(func, '__name__', '')
         
         # Check if this is a tuple-returning operation (returns LazyTuple)
-        if func_name in TUPLE_RETURNING_OPS:
+        if OperationClassifier.is_tuple_returning(func_name):
             # Week 3-4: Return LazyTuple (proper solution)
             if func_name == 'split':
                 split_size_or_sections = args[1] if len(args) > 1 else kwargs.get('split_size_or_sections')

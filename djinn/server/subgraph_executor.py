@@ -22,7 +22,7 @@ import traceback
 from dataclasses import dataclass
 from typing import Dict, List, Callable, Any, Optional
 import time
-from ..frontend.core.operation_registry import get_operation_registry
+from ..frontend.core.universal_dispatcher import get_universal_dispatcher
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ class SubgraphExecutor:
     def __init__(self, gpu_id: int = 0):
         self.gpu_id = gpu_id
         self.device = torch.device(f'cuda:{gpu_id}')
-        self.operation_registry = get_operation_registry()  # Use shared registry
+        self.universal_dispatcher = get_universal_dispatcher()  # Use universal dispatcher
 
         # Statistics
         self.stats = {
@@ -58,7 +58,7 @@ class SubgraphExecutor:
             'errors': []
         }
 
-        logger.info(f"SubgraphExecutor initialized on GPU {gpu_id} with shared operation registry")
+        logger.info(f"SubgraphExecutor initialized on GPU {gpu_id} with universal dispatcher")
 
     def execute(self,
                 subgraph_request: Dict[str, Any],
@@ -431,8 +431,8 @@ class SubgraphExecutor:
             # Move input to GPU
             gpu_tensor = tensor.to(self.device)
             
-            # Execute operation using shared registry
-            result_gpu = self.operation_registry.execute(operation, [gpu_tensor], {})
+            # Execute operation using universal dispatcher
+            result_gpu = self.universal_dispatcher.dispatch(operation, [gpu_tensor], {})
             
             # Move result to CPU
             result_cpu = result_gpu.cpu().detach()
@@ -578,7 +578,7 @@ class SubgraphExecutor:
 
             # ✅ SENIOR ENGINEER FIX: Execute with comprehensive error handling
             try:
-                result = self.operation_registry.execute(operation, inputs, kwargs)
+                result = self.universal_dispatcher.dispatch(operation, inputs, kwargs)
             except RuntimeError as e:
                 # ✅ CRITICAL: Catch dtype mismatch errors and provide detailed diagnostics
                 error_msg = str(e)

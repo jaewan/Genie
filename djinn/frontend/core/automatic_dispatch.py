@@ -1,9 +1,13 @@
 """
-Automatic Dispatch System for LazyTensor Operations.
+Automatic Dispatch System for Shape Inference (Graph Construction Phase)
 
-This module implements Phase 2 of the strategic plan: automatic operation dispatch
-using PyTorch's meta tensor system. This eliminates the need for manual shape inference
-and special handlers for most operations.
+Purpose: Infer shapes/dtypes during graph construction (capture phase)
+Input: LazyTensors
+Output: LazyTensor with inferred metadata
+When: Called from __torch_dispatch__ during operation capture
+
+This module uses PyTorch's meta tensor system to automatically infer shapes,
+dtypes, and other metadata for operations without manual intervention.
 
 Key Features:
 1. Automatic shape inference via meta tensors
@@ -13,6 +17,14 @@ Key Features:
 
 Architecture:
     LazyTensor → Meta Tensor → PyTorch Op → Meta Result → LazyTensor
+
+Key Distinction:
+- This is a TOOL used by shape inference, not shape inference itself
+- Used during graph construction (capture phase)
+- Converts LazyTensors → meta tensors → calls PyTorch → infers shape/dtype
+- Returns new LazyTensor with inferred metadata
+
+See also: universal_dispatcher.py (execution phase)
 """
 
 import torch
@@ -24,10 +36,23 @@ logger = logging.getLogger(__name__)
 
 class AutomaticDispatch:
     """
-    Automatic dispatch system for LazyTensor operations.
-    
-    Uses PyTorch's meta tensor system to automatically infer shapes, dtypes,
-    and other metadata for operations without manual intervention.
+    Automatic Dispatch System for Shape Inference (Graph Construction Phase)
+
+    Purpose: Infer shapes/dtypes during graph construction (capture phase)
+    Input: LazyTensors
+    Output: LazyTensor with inferred metadata
+    When: Called from __torch_dispatch__ during operation capture
+
+    This module uses PyTorch's meta tensor system to automatically infer shapes,
+    dtypes, and other metadata for operations without manual intervention.
+
+    Key Distinction:
+    - This is a TOOL used by shape inference, not shape inference itself
+    - Used during graph construction (capture phase)
+    - Converts LazyTensors → meta tensors → calls PyTorch → infers shape/dtype
+    - Returns new LazyTensor with inferred metadata
+
+    See also: universal_dispatcher.py (execution phase)
     """
     
     # Operations that require special handling (cannot use meta tensors)

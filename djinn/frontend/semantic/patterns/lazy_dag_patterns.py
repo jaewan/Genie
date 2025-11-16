@@ -5,20 +5,38 @@ Key difference from FX patterns:
 - Nodes are LazyTensor instances
 - Operation is string (e.g., 'aten::matmul')
 - Use metadata hints for detection
+
+NOTE: LazyDAGAttentionMatcher and LazyDAGConvolutionMatcher have been
+consolidated into AdvancedLLMPattern and AdvancedVisionPattern respectively.
+These classes are kept for reference but are no longer registered.
 """
 
+import warnings
 from typing import List, Optional
 from ...patterns.base import PatternPlugin, PatternMatch
 
 
+# DEPRECATED: Use AdvancedLLMPattern instead (supports metadata hints)
 class LazyDAGAttentionMatcher(PatternPlugin):
-    """Detect attention pattern in LazyDAG."""
-
+    """
+    Detect attention pattern in LazyDAG.
+    
+    DEPRECATED: This class is no longer registered. Use AdvancedLLMPattern
+    which now supports both NetworkX matching and metadata hints.
+    This class is kept for reference only.
+    """
     name = "attention"
     expected_operations = frozenset({'matmul', 'softmax'})
     min_nodes = 3
 
     def match(self, graph) -> Optional[PatternMatch]:
+        warnings.warn(
+            "LazyDAGAttentionMatcher is deprecated and no longer registered. "
+            "Use AdvancedLLMPattern instead, which supports both NetworkX matching "
+            "and metadata hints. See docs/REFACTORING_MIGRATION_GUIDE.md",
+            DeprecationWarning,
+            stacklevel=2
+        )
         """Detect Q@K.T → softmax → @V pattern."""
 
         # Strategy 1: Use pattern hints from metadata
@@ -206,14 +224,27 @@ class LazyDAGLinearMatcher(PatternPlugin):
         return None
 
 
+# DEPRECATED: Use AdvancedVisionPattern instead (supports metadata hints)
 class LazyDAGConvolutionMatcher(PatternPlugin):
-    """Detect convolution patterns in LazyDAG."""
-
+    """
+    Detect convolution patterns in LazyDAG.
+    
+    DEPRECATED: This class is no longer registered. Use AdvancedVisionPattern
+    which now supports both NetworkX matching and metadata hints.
+    This class is kept for reference only.
+    """
     name = "convolution"
     expected_operations = frozenset({'conv2d', 'conv1d', 'conv3d'})
 
     def match(self, graph) -> Optional[PatternMatch]:
         """Detect convolutional patterns."""
+        warnings.warn(
+            "LazyDAGConvolutionMatcher is deprecated and no longer registered. "
+            "Use AdvancedVisionPattern instead, which supports both NetworkX matching "
+            "and metadata hints. See docs/REFACTORING_MIGRATION_GUIDE.md",
+            DeprecationWarning,
+            stacklevel=2
+        )
 
         conv_nodes = []
         for node in graph.nodes():

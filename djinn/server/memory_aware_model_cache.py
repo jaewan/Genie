@@ -16,7 +16,7 @@ import logging
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
 
 import torch
 import torch.nn as nn
@@ -57,8 +57,16 @@ class MemoryAwareModelCache:
         # Auto-detect available memory if not specified
         if max_memory_gb is None:
             if torch.cuda.is_available():
-                gpu_memory_bytes = torch.cuda.get_device_properties(0).total_memory
-                max_memory_gb = (gpu_memory_bytes / 1024**3) * target_utilization
+                # ✅ IMPROVEMENT: Use actual FREE GPU memory, not total memory
+                # This accounts for other processes using the GPU
+                free_memory_bytes, total_memory_bytes = torch.cuda.mem_get_info(self.device)
+                # Use 80% of FREE memory (not total) to leave headroom
+                max_memory_gb = (free_memory_bytes / 1024**3) * target_utilization
+                logger.info(
+                    f"GPU memory: {total_memory_bytes/1024**3:.1f}GB total, "
+                    f"{free_memory_bytes/1024**3:.1f}GB free, "
+                    f"cache limit: {max_memory_gb:.1f}GB ({target_utilization*100:.0f}% of free)"
+                )
             else:
                 max_memory_gb = 8.0  # Default 8GB for CPU
         
@@ -67,6 +75,8 @@ class MemoryAwareModelCache:
         # Model storage
         self.models: OrderedDict[str, nn.Module] = OrderedDict()
         self.profiles: Dict[str, ModelMemoryProfile] = {}
+        # Track which models have been initialized (warmed up)
+        self._initialized_models: Set[str] = set()
         
         # Architecture registry
         from .architecture_registry import HybridArchitectureRegistry
@@ -75,6 +85,22 @@ class MemoryAwareModelCache:
         # Reuse Phase 1 weight cache
         from .gpu_cache import get_global_cache
         self.weight_cache = get_global_cache()
+        
+        # Integrate SmartTensorRegistry for shared weight caching with graph-based system
+        # This allows both model cache and graph execution to share the same weight cache
+        try:
+            from .optimizations.tensor_registry import SmartTensorRegistry
+            # Initialize with same memory limits as model cache
+            max_total_bytes = self.max_memory_bytes
+            self.tensor_registry = SmartTensorRegistry(
+                max_cached_models=5,  # Reasonable default
+                max_bytes_per_model=None,  # Use total limit instead
+                max_total_bytes=max_total_bytes
+            )
+            logger.info("SmartTensorRegistry integrated for shared weight caching")
+        except Exception as e:
+            logger.warning(f"Failed to initialize SmartTensorRegistry: {e}")
+            self.tensor_registry = None
         
         # Phase-aware memory management
         try:
@@ -132,6 +158,8 @@ class MemoryAwareModelCache:
             ValueError: If architecture cannot be reconstructed
             MemoryError: If model is too large for available memory
         """
+        import time
+        total_start = time.perf_counter()
         
         if fingerprint in self.models:
             logger.info(f"Model {fingerprint} already registered")
@@ -174,20 +202,132 @@ class MemoryAwareModelCache:
                 )
             self._evict_least_valuable_model()
         
-        # Load state dict (leveraging Phase 1 cache)
+        # ✅ OPTIMIZATION: Progressive GPU transfer with CUDA streams (pipelining)
+        # Load state dict (leveraging Phase 1 cache and SmartTensorRegistry)
         state_dict = {}
-        for param_name, weight_id in weight_ids.items():
-            if param_name in uncached_weights:
-                # New weight - add to Phase 1 cache
-                weight_tensor = uncached_weights[param_name]
-                if isinstance(weight_tensor, dict):
-                    weight_tensor = self._deserialize_tensor(weight_tensor)
+        
+        # ✅ FIX: Handle CUDA OOM during registration with automatic eviction
+        # Try to transfer weights to GPU, with OOM recovery
+        max_oom_retries = 2
+        oom_retry_count = 0
+        
+        while oom_retry_count <= max_oom_retries:
+            try:
+                # Use CUDA streams for parallel GPU transfers (if CUDA available)
+                if torch.cuda.is_available() and self.device.type == 'cuda' and len(uncached_weights) > 1:
+                    # Create multiple streams for parallel transfers
+                    num_streams = min(4, len(uncached_weights))  # Use up to 4 streams
+                    streams = [torch.cuda.Stream() for _ in range(num_streams)]
+                    
+                    # Transfer uncached weights in parallel using streams
+                    uncached_items = [
+                        (param_name, weight_id, uncached_weights[param_name])
+                        for param_name, weight_id in weight_ids.items()
+                        if param_name in uncached_weights
+                    ]
+                    
+                    if uncached_items:
+                        gpu_transfer_start = time.perf_counter()
+                        logger.info(f"🔄 Transferring {len(uncached_items)} weights to GPU using {num_streams} CUDA streams...")
+                        
+                        # Schedule transfers on different streams (parallel)
+                        for i, (param_name, weight_id, weight_tensor) in enumerate(uncached_items):
+                            if isinstance(weight_tensor, dict):
+                                weight_tensor = self._deserialize_tensor(weight_tensor)
+                            
+                            # Assign to stream (round-robin)
+                            stream = streams[i % num_streams]
+                            with torch.cuda.stream(stream):
+                                # Move to GPU (non-blocking, uses stream)
+                                gpu_tensor = weight_tensor.to(self.device, non_blocking=True)
+                                
+                                # Add to Phase 1 cache
+                                self.weight_cache.cache_new[weight_id] = gpu_tensor
+                                
+                                # Also register in SmartTensorRegistry
+                                if self.tensor_registry:
+                                    self._register_weight_in_tensor_registry(
+                                        fingerprint, param_name, gpu_tensor
+                                    )
+                                
+                                state_dict[param_name] = gpu_tensor
+                        
+                        # Synchronize all streams (wait for all transfers to complete)
+                        for stream in streams:
+                            stream.synchronize()
+                        
+                        gpu_transfer_time = (time.perf_counter() - gpu_transfer_start) * 1000
+                        logger.info(f"✅ Transferred {len(uncached_items)} weights to GPU (CUDA streams): {gpu_transfer_time:.1f}ms")
+                else:
+                    # Fallback: Sequential transfer (CPU, no CUDA, or single weight)
+                    for param_name, weight_id in weight_ids.items():
+                        if param_name in uncached_weights:
+                            # New weight - add to Phase 1 cache
+                            weight_tensor = uncached_weights[param_name]
+                            if isinstance(weight_tensor, dict):
+                                weight_tensor = self._deserialize_tensor(weight_tensor)
+                            
+                            gpu_tensor = weight_tensor.to(self.device, non_blocking=True)
+                            # Add to Phase 1 cache
+                            self.weight_cache.cache_new[weight_id] = gpu_tensor
+                            
+                            # Also register in SmartTensorRegistry for shared caching with graph-based system
+                            # This allows graph-based execution to reuse weights cached by model cache
+                            if self.tensor_registry:
+                                self._register_weight_in_tensor_registry(
+                                    fingerprint, param_name, gpu_tensor
+                                )
+                            
+                            state_dict[param_name] = gpu_tensor
                 
-                gpu_tensor = weight_tensor.to(self.device, non_blocking=True)
-                # Add to Phase 1 cache
-                self.weight_cache.cache_new[weight_id] = gpu_tensor
-                state_dict[param_name] = gpu_tensor
-            else:
+                # Success - break out of retry loop
+                break
+                
+            except RuntimeError as e:
+                if 'out of memory' in str(e).lower():
+                    oom_retry_count += 1
+                    self.stats['oom_events'] += 1
+                    logger.warning(
+                        f"⚠️ CUDA OOM during model registration (attempt {oom_retry_count}/{max_oom_retries + 1}). "
+                        f"Evicting models to free memory..."
+                    )
+                    
+                    # Emergency eviction: free more memory
+                    self._handle_oom()
+                    
+                    # Clear CUDA cache
+                    if self.device.type == 'cuda':
+                        torch.cuda.empty_cache()
+                    
+                    # Also evict more aggressively if we have models
+                    if self.models and oom_retry_count < max_oom_retries:
+                        # Evict additional models (50% on second attempt)
+                        evict_count = max(1, len(self.models) // 2)
+                        for _ in range(evict_count):
+                            if self.models:
+                                self._evict_least_valuable_model()
+                        if self.device.type == 'cuda':
+                            torch.cuda.empty_cache()
+                    
+                    if oom_retry_count > max_oom_retries:
+                        # All retries exhausted
+                        logger.error(
+                            f"❌ CUDA OOM: Failed to register model after {max_oom_retries + 1} attempts. "
+                            f"Model requires {total_bytes/1024**3:.1f}GB but only {self.current_memory_bytes/1024**3:.1f}GB "
+                            f"available after eviction."
+                        )
+                        raise MemoryError(
+                            f"CUDA out of memory: Cannot register model {fingerprint}. "
+                            f"Required: {total_bytes/1024**3:.1f}GB, "
+                            f"Available after eviction: {(self.max_memory_bytes - self.current_memory_bytes)/1024**3:.1f}GB"
+                        )
+                else:
+                    # Not an OOM error - re-raise
+                    raise
+        
+        # Add cached weights to state dict
+        for param_name, weight_id in weight_ids.items():
+            if param_name not in state_dict:
                 # Get from Phase 1 cache
                 if weight_id in self.weight_cache.cache_new:
                     state_dict[param_name] = self.weight_cache.cache_new[weight_id]
@@ -195,12 +335,95 @@ class MemoryAwareModelCache:
                     logger.warning(f"Weight {weight_id} not found in cache")
         
         # Load state dict into model
+        load_start = time.perf_counter()
         model.load_state_dict(state_dict, strict=False)
         model = model.to(self.device)
         model.eval()
+        load_time = (time.perf_counter() - load_start) * 1000
+        logger.info(f"⏱️  Model load_state_dict + to(device): {load_time:.1f}ms")
         
-        # Warmup: Execute model once to trigger CUDA kernel JIT compilation
-        # This ensures first execution after registration doesn't include compilation overhead
+        # ✅ NEW: Warmup is now done via explicit init_model() call
+        # This makes registration fast (~2-3s instead of 12.9s)
+        # Model is registered but not yet initialized (warmed up)
+        logger.info(f"Model {fingerprint} registered (not yet initialized - call init_model() to warmup)")
+        
+        # Store model and profile
+        self.models[fingerprint] = model
+        self.profiles[fingerprint] = ModelMemoryProfile(
+            fingerprint=fingerprint,
+            param_bytes=param_bytes,
+            activation_bytes=activation_bytes,
+            total_bytes=total_bytes,
+            last_access_time=time.time(),
+            access_count=0
+        )
+        
+        self.current_memory_bytes += total_bytes
+        
+        total_time = (time.perf_counter() - total_start) * 1000
+        logger.info(
+            f"Model {fingerprint} registered: {total_bytes/1024**3:.2f}GB "
+            f"(total cached: {self.current_memory_bytes/1024**3:.2f}GB, "
+            f"total time: {total_time:.1f}ms)"
+        )
+    
+    def init_model(self, fingerprint: str) -> bool:
+        """
+        Initialize (warmup) a registered model by triggering CUDA kernel JIT compilation.
+        
+        This is an explicit initialization step that can be called after registration.
+        It executes the model once to trigger kernel compilation, ensuring fast first execution.
+        
+        **Benefits of explicit initialization:**
+        - Registration is fast (~2-3s instead of 12.9s)
+        - User controls when warmup happens (can batch multiple models)
+        - Better separation of concerns (registration vs. initialization)
+        
+        Args:
+            fingerprint: Model fingerprint to initialize
+        
+        Returns:
+            True if initialization succeeded, False otherwise
+        
+        Example:
+            # Register model (fast, ~2-3s)
+            cache.register_model(fingerprint, descriptor, weight_ids, weights)
+            
+            # Initialize model (warmup, ~8-10s for GPT-2-small)
+            cache.init_model(fingerprint)
+            
+            # Now first execution will be fast (no compilation overhead)
+        """
+        if fingerprint not in self.models:
+            logger.warning(f"Model {fingerprint} not registered, cannot initialize")
+            return False
+        
+        if fingerprint in self._initialized_models:
+            logger.debug(f"Model {fingerprint} already initialized")
+            return True
+        
+        model = self.models[fingerprint]
+        profile = self.profiles.get(fingerprint)
+        
+        # Try to get descriptor from architecture registry
+        descriptor = {}
+        try:
+            arch_data = self.architecture_registry.get_architecture(fingerprint)
+            if arch_data:
+                descriptor = arch_data.get('descriptor', {})
+        except:
+            pass
+        
+        # Fallback: infer from model
+        if not descriptor:
+            descriptor = {
+                'class_name': model.__class__.__name__,
+                'class_module': model.__class__.__module__,
+            }
+        
+        logger.info(f"Initializing model {fingerprint} (JIT compilation warmup)...")
+        warmup_start = time.perf_counter()
+        
         try:
             # Create dummy input based on model type
             dummy_input = self._create_dummy_input(model, descriptor)
@@ -219,28 +442,93 @@ class MemoryAwareModelCache:
                     # Synchronize to ensure compilation completes
                     if self.device.type == 'cuda':
                         torch.cuda.synchronize()
-                logger.debug(f"Model {fingerprint} warmed up (JIT compilation triggered)")
+                
+                warmup_time = (time.perf_counter() - warmup_start) * 1000
+                self._initialized_models.add(fingerprint)
+                logger.info(f"✅ Model {fingerprint} initialized (JIT compilation): {warmup_time:.1f}ms")
+                return True
+            else:
+                logger.warning(f"Could not create dummy input for {fingerprint}, skipping warmup")
+                return False
         except Exception as e:
-            # Warmup failure is not critical - log and continue
-            logger.warning(f"Model warmup failed for {fingerprint}: {e}")
+            warmup_time = (time.perf_counter() - warmup_start) * 1000
+            logger.warning(f"Model initialization failed for {fingerprint} (took {warmup_time:.1f}ms): {e}")
+            return False
+    
+    def _register_weight_in_tensor_registry(
+        self, 
+        model_id: str, 
+        tensor_name: str, 
+        tensor: torch.Tensor
+    ):
+        """
+        Register a weight tensor in SmartTensorRegistry for shared caching.
         
-        # Store model and profile
-        self.models[fingerprint] = model
-        self.profiles[fingerprint] = ModelMemoryProfile(
-            fingerprint=fingerprint,
-            param_bytes=param_bytes,
-            activation_bytes=activation_bytes,
-            total_bytes=total_bytes,
-            last_access_time=time.time(),
-            access_count=0
-        )
+        This allows the graph-based execution system to reuse weights cached
+        by the model cache system, reducing memory duplication.
         
-        self.current_memory_bytes += total_bytes
+        Args:
+            model_id: Model fingerprint/identifier
+            tensor_name: Parameter name (e.g., "transformer.layer.0.weight")
+            tensor: The weight tensor on GPU
+        """
+        if not self.tensor_registry:
+            return
         
-        logger.info(
-            f"Model {fingerprint} registered: {total_bytes/1024**3:.2f}GB "
-            f"(total cached: {self.current_memory_bytes/1024**3:.2f}GB)"
-        )
+        try:
+            import asyncio
+            from .optimizations.tensor_registry import RemoteHandle
+            import uuid
+            
+            # Create remote handle for the tensor
+            tensor_bytes = tensor.numel() * tensor.element_size()
+            remote_handle = RemoteHandle(
+                device_id=str(self.device),
+                tensor_id=str(uuid.uuid4()),
+                shape=tensor.shape,
+                dtype=tensor.dtype,
+                timestamp=time.time(),
+                version=0,  # Model version (could be enhanced with version tracking)
+                tensor_bytes=tensor_bytes
+            )
+            
+            # Register in tensor registry (async call in sync context)
+            # Try to use existing event loop, or create new one if needed
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # Event loop is running - skip registration for now
+                    # TODO: Could use asyncio.create_task if we make this async
+                    logger.debug(f"Skipping tensor registry registration (event loop running): {tensor_name}")
+                    return
+            except RuntimeError:
+                # No event loop - create one
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            try:
+                needs_transfer, handle = loop.run_until_complete(
+                    self.tensor_registry.check_and_register(
+                        model_id=model_id,
+                        tensor_name=tensor_name,
+                        tensor=tensor,
+                        model_version=0,
+                        remote_handle=remote_handle
+                    )
+                )
+                if not needs_transfer:
+                    logger.debug(f"✓ Weight {tensor_name} registered in SmartTensorRegistry")
+            finally:
+                # Only close if we created the loop
+                try:
+                    current_loop = asyncio.get_event_loop()
+                    if loop != current_loop:
+                        loop.close()
+                except RuntimeError:
+                    loop.close()
+        except Exception as e:
+            # Graceful degradation - continue without tensor registry
+            logger.debug(f"Failed to register weight in SmartTensorRegistry: {e}")
     
     def _detect_execution_phase(self, model: nn.Module, inputs: Dict[str, Any], 
                                 hints: Optional[Dict] = None) -> 'ExecutionPhase':
@@ -399,6 +687,9 @@ class MemoryAwareModelCache:
         
         model = self.models[fingerprint]
         
+        # ✅ DIAGNOSTIC: Log execution start
+        logger.info(f"🔍 [DIAGNOSTIC] Starting model execution for {fingerprint[:16]}...")
+        
         # Detect execution phase and adjust memory budgets
         if self.phase_memory_manager and self.ExecutionPhase:
             phase = self._detect_execution_phase(model, inputs, hints)
@@ -418,6 +709,7 @@ class MemoryAwareModelCache:
         # Prepare inputs - handle both dict format and direct tensors
         # This is OUTSIDE GPU execution timing (like PyTorch baseline)
         # Optimization: Use non_blocking=True for async transfer, pinned memory when possible
+        deserialize_start = time.perf_counter()
         gpu_inputs = {}
         for key, value in inputs.items():
             if isinstance(value, dict) and 'data' in value:
@@ -446,6 +738,9 @@ class MemoryAwareModelCache:
         if self.device.type == 'cuda':
             torch.cuda.synchronize()
         
+        deserialize_time = (time.perf_counter() - deserialize_start) * 1000
+        logger.info(f"🔍 [DIAGNOSTIC] Input deserialization + GPU transfer: {deserialize_time:.1f}ms")
+        
         # Execute model with OOM protection
         # Handle nn.Sequential models - they expect positional args, not keyword args
         try:
@@ -464,9 +759,8 @@ class MemoryAwareModelCache:
                         'fingerprint': fingerprint,
                         'input_count': len(gpu_inputs)
                     }):
-                        # Synchronize GPU before execution (like PyTorch baseline)
-                        if self.device.type == 'cuda':
-                            torch.cuda.synchronize()
+                        # Note: We already synchronized above (line 447), so no need to sync again here
+                        # This eliminates redundant synchronization overhead
                         
                         # Handle nn.Sequential models - they expect positional args
                         if isinstance(model, nn.Sequential) and len(gpu_inputs) == 1:
@@ -487,8 +781,13 @@ class MemoryAwareModelCache:
                                     output = model(*input_values)
                         
                         # Synchronize GPU after execution (like PyTorch baseline)
+                        # This ensures all GPU work completes before we measure the end time
+                        forward_end = time.perf_counter()
                         if self.device.type == 'cuda':
                             torch.cuda.synchronize()
+                        
+                        forward_time = (time.perf_counter() - forward_end) * 1000
+                        logger.info(f"🔍 [DIAGNOSTIC] Model forward pass: {forward_time:.1f}ms (sync overhead)")
         except RuntimeError as e:
             if 'out of memory' in str(e):
                 self.stats['oom_events'] += 1
@@ -526,10 +825,15 @@ class MemoryAwareModelCache:
             # Tuple output (e.g., (logits, past_key_values))
             output = output[0]
         
+        # ✅ DIAGNOSTIC: Log CPU transfer time
+        cpu_transfer_start = time.perf_counter()
         result = output.cpu()
+        cpu_transfer_time = (time.perf_counter() - cpu_transfer_start) * 1000
+        logger.info(f"🔍 [DIAGNOSTIC] Output CPU transfer: {cpu_transfer_time:.1f}ms")
         
         # Record execution time
         execution_time_ms = (time.perf_counter() - start_time) * 1000
+        logger.info(f"🔍 [DIAGNOSTIC] Total execution time: {execution_time_ms:.1f}ms")
         profile.execution_time_ms = execution_time_ms
         self.stats['total_latency_ms'] += execution_time_ms
         
@@ -544,31 +848,9 @@ class MemoryAwareModelCache:
                 self._evict_least_valuable_model()
     
     def _deserialize_tensor(self, tensor_dict: Dict) -> torch.Tensor:
-        """Deserialize tensor from dict."""
-        import numpy as np
-        
-        data = tensor_dict['data']
-        shape = tensor_dict['shape']
-        dtype_str = tensor_dict.get('dtype', 'float32')
-        
-        dtype_map = {
-            'float32': torch.float32,
-            'float16': torch.float16,
-            'int64': torch.int64,
-            'int32': torch.int32,
-            'bool': torch.bool,
-        }
-        dtype = dtype_map.get(dtype_str, torch.float32)
-        
-        if isinstance(data, list):
-            tensor = torch.tensor(data, dtype=dtype)
-        else:
-            tensor = torch.from_numpy(np.array(data, dtype=dtype.numpy()))
-        
-        if list(tensor.shape) != shape:
-            tensor = tensor.reshape(shape)
-        
-        return tensor
+        """Deserialize tensor from dict (delegates to centralized function)."""
+        from .serialization import deserialize_tensor_from_dict
+        return deserialize_tensor_from_dict(tensor_dict)
     
     def get_memory_status(self) -> Dict:
         """Get current memory status."""

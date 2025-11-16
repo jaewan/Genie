@@ -168,19 +168,34 @@ class RemoteServerManager:
                 sys.path.insert(0, current_dir)
                 logger.info(f"Added to Python path: {current_dir}")
 
-            # Import Djinn TCP server - the new async implementation
-            from djinn.server.tcp_server import start_server, initialize_server
+            # Import Djinn server - use the main server implementation
+            from djinn.server.server import DjinnServer, ServerConfig
+            import asyncio
 
-            logger.info(f"Starting TCP server on port {self.port}...")
+            logger.info(f"Starting Djinn server on port {self.port}...")
 
-            # Start TCP server (this blocks)
+            # Start server (this blocks)
             try:
-                async def run_tcp_server():
-                    """Initialize and start TCP server."""
-                    await initialize_server()
-                    await start_server(host="127.0.0.1", port=self.port)
+                async def run_server():
+                    """Initialize and start server."""
+                    config = ServerConfig(
+                        node_id="test-server",
+                        control_port=self.port - 1,  # Control port is typically data_port - 1
+                        data_port=self.port,
+                        tcp_fallback=True
+                    )
+                    server = DjinnServer(config)
+                    success = await server.start()
+                    if not success:
+                        raise RuntimeError("Server failed to start")
+                    # Keep server running
+                    try:
+                        while True:
+                            await asyncio.sleep(1)
+                    except KeyboardInterrupt:
+                        await server.stop()
 
-                asyncio.run(run_tcp_server())
+                asyncio.run(run_server())
             except Exception as e:
                 logger.error(f"TCP server start failed: {e}")
                 import traceback

@@ -140,7 +140,7 @@ class ModelSecurityValidator:
         Validate state dict structure and sizes.
         
         Ensures:
-        - All values are tensors
+        - All values are tensors (or serialized tensor dicts)
         - Parameter sizes are within limits
         - Total model size is within limits
         """
@@ -148,12 +148,24 @@ class ModelSecurityValidator:
         total_size = 0
         
         for name, param in state_dict.items():
-            if not isinstance(param, torch.Tensor):
+            # Handle serialized tensors (dict format from client)
+            if isinstance(param, dict):
+                # Deserialize to get actual size
+                try:
+                    from .serialization import deserialize_tensor_from_dict
+                    # Deserialize tensor (numpy_binary format)
+                    tensor = deserialize_tensor_from_dict(param)
+                    param_size = tensor.numel() * tensor.element_size()
+                except Exception as e:
+                    raise SecurityError(
+                        f"Cannot deserialize tensor {name}: {e}"
+                    )
+            elif isinstance(param, torch.Tensor):
+                param_size = param.numel() * param.element_size()
+            else:
                 raise SecurityError(
                     f"State dict contains non-tensor: {name} ({type(param)})"
                 )
-            
-            param_size = param.numel() * param.element_size()
             
             if param_size > self.MAX_PARAM_SIZE:
                 raise SecurityError(

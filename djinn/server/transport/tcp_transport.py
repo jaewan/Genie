@@ -406,15 +406,28 @@ class TCPTransport(Transport):
             logger.info(f"Source node in received metadata: {metadata.get('source_node')}")
 
             # Check if this is multi-tensor or single-tensor message
-            # Try to peek at the next byte to see if it's a tensor count (multi-tensor)
-            # or a tensor size (single-tensor)
-            peek_data = await reader.readexactly(1)
-            next_byte_val = struct.unpack('B', peek_data)[0]
+            # ✅ FIX: Use explicit message type instead of heuristics
+            from .protocol import MessageType
             
-            # Multi-tensor: next byte is number of tensors (typically < 256, small integer)
-            # Single-tensor: next 8 bytes form a size (typically large number)
-            # Heuristic: if next_byte_val is very small and 'num_inputs' in metadata, it's multi-tensor
-            is_multi_tensor = 'num_inputs' in metadata and next_byte_val <= 10
+            # Protocol: [1 byte: msg_type] [metadata...] [tensor data...]
+            # msg_type: 0x01 = SINGLE_TENSOR, 0x02 = MULTI_TENSOR
+            peek_data = await reader.readexactly(1)
+            msg_type_byte = struct.unpack('B', peek_data)[0]
+            
+            # Explicit message type detection (no heuristics)
+            if msg_type_byte == MessageType.SINGLE_TENSOR:
+                is_multi_tensor = False
+            elif msg_type_byte == MessageType.MULTI_TENSOR:
+                is_multi_tensor = True
+            else:
+                # Fallback to heuristic for backward compatibility (legacy clients)
+                # This should be deprecated eventually
+                logger.warning(
+                    f"Legacy protocol detected (msg_type={msg_type_byte:02x}), "
+                    f"using heuristic detection. Consider upgrading client."
+                )
+                next_byte_val = msg_type_byte
+                is_multi_tensor = 'num_inputs' in metadata and next_byte_val <= 10
             
             if is_multi_tensor:
                 # Multi-tensor protocol

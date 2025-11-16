@@ -48,10 +48,6 @@ class BatchExecutor:
         Returns:
             Final output tensor
         """
-        # Stale profiling code removed - use ProfilingContext instead
-        # from djinn.server.profiling_context import get_profiler
-        profiler = None
-
         # Step 1: Initialize tensor storage
         tensors: Dict[str, Any] = {}
         tensors.update(input_data)
@@ -64,8 +60,6 @@ class BatchExecutor:
 
         # Step 3: Execute operations in order
         for op_dict in exec_order:
-            op_start = time.perf_counter()
-
             # Resolve input tensors
             inputs = []
             for inp_ref in op_dict.get('inputs', []):
@@ -94,20 +88,12 @@ class BatchExecutor:
                 from djinn.frontend.core.universal_dispatcher import get_universal_dispatcher
                 self.universal_dispatcher = get_universal_dispatcher()
 
-            # Profile operation execution
-            op_start = time.perf_counter()
+            # Execute operation
             result = self.universal_dispatcher.dispatch(operation, inputs, kwargs)
-            op_elapsed_ms = (time.perf_counter() - op_start) * 1000
-
-            # Profiling is handled via ProfilingContext (djinn/server/profiling_context.py)
-            # No need for separate profiler instance here
 
             # Store result
             op_id = op_dict['op_id']
             tensors[str(op_id)] = result
-
-            # Profiling is handled via ProfilingContext (djinn/server/profiling_context.py)
-            # No need for separate profiler instance here
 
         # Step 4: Return final output
         output_id = str(subgraph_request.get('output_tensor_id'))

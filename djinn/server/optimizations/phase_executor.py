@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from djinn.core.types import ExecutionPhase, DataResidency
-from .semantic_memory_manager import (
+from ..semantic_memory_manager import (
     PhaseAwareMemoryManager,
     LifetimeBasedEvictor,
     EvictionPriority

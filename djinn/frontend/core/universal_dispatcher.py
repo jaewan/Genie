@@ -52,7 +52,12 @@ def _materialize_lazy_tensor(tensor: torch.Tensor) -> torch.Tensor:
 
 class UniversalDispatcher:
     """
-    Universal operation dispatcher using PyTorch's built-in dispatch system.
+    Universal Dispatcher for Operation Execution (Execution Phase)
+    
+    Purpose: Execute operations during materialization (execution phase)
+    Input: Concrete tensors (materialized)
+    Output: Concrete torch.Tensor
+    When: Called from executor during graph execution
     
     This achieves TRUE transparency - we don't need to know operations in advance.
     PyTorch's dispatch system handles everything automatically.
@@ -67,6 +72,14 @@ class UniversalDispatcher:
     - ✅ No manual handler maintenance
     - ✅ Works with future PyTorch versions
     - ✅ Achieves research goal of transparency
+    
+    Key Distinction:
+    - This is for EXECUTION (materialization phase)
+    - Used during graph execution (execution phase)
+    - Executes operations on concrete tensors
+    - Returns concrete torch.Tensor
+    
+    See also: automatic_dispatch.py (graph construction phase)
     """
     
     def __init__(self):

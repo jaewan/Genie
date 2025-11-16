@@ -2,7 +2,14 @@
 
 from benchmarks.utils.server_spawner import RemoteServerManager
 from benchmarks.utils.common import *
-from benchmarks.utils.models import *
+
+# ✅ FIX: Lazy import models to avoid transformers dependency if not available
+try:
+    from benchmarks.utils.models import *
+except ImportError:
+    # transformers not available - models module will fail gracefully
+    pass
+
 from benchmarks.utils.metrics import *
 
 __all__ = [

@@ -12,7 +12,7 @@ Result: 50-100x reduction in data transfer for iterative workloads.
 
 import logging
 import torch
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Union, Any
 from dataclasses import dataclass
 import hashlib
 
@@ -49,8 +49,15 @@ class GPUWeightCache:
         Initialize GPU weight cache.
         
         Args:
-            max_memory_gb: Maximum GPU memory to allocate for cache
+            max_memory_gb: Maximum GPU memory to allocate for cache (must be > 0)
+        
+        Raises:
+            ValueError: If max_memory_gb is invalid
         """
+        if max_memory_gb <= 0:
+            raise ValueError(
+                f"max_memory_gb must be > 0, got {max_memory_gb}"
+            )
         self.max_memory_bytes = int(max_memory_gb * 1024 * 1024 * 1024)
         
         # Cache storage: model_id -> name -> CachedWeight
@@ -231,14 +238,40 @@ class GPUWeightCache:
     
     @staticmethod
     def _compute_hash(tensor: torch.Tensor) -> str:
-        """Compute hash of tensor data for identity verification."""
-        # Hash only shape and dtype for efficiency
-        # (actual data hash would be expensive)
-        hash_str = f"{tensor.shape}:{tensor.dtype}:{tensor.device}"
-        return hashlib.md5(hash_str.encode()).hexdigest()[:12]
+        """
+        Compute hash of tensor data for identity verification.
+        
+        Args:
+            tensor: Tensor to hash
+            
+        Returns:
+            Hash string (12 characters)
+            
+        Raises:
+            ValueError: If tensor is None
+            TypeError: If tensor is not a torch.Tensor
+        """
+        if tensor is None:
+            raise ValueError("Cannot hash None tensor")
+        if not isinstance(tensor, torch.Tensor):
+            raise TypeError(f"Expected torch.Tensor, got {type(tensor)}")
+        
+        try:
+            # Hash only shape and dtype for efficiency
+            # (actual data hash would be expensive)
+            hash_str = f"{tensor.shape}:{tensor.dtype}:{tensor.device}"
+            return hashlib.md5(hash_str.encode()).hexdigest()[:12]
+        except Exception as e:
+            logger.error(f"Failed to compute tensor hash: {e}")
+            raise
     
-    def get_stats(self) -> Dict[str, any]:
-        """Get cache statistics."""
+    def get_stats(self) -> Dict[str, Union[int, float, Dict[str, Any]]]:
+        """
+        Get cache statistics.
+        
+        Returns:
+            Dictionary with cache statistics including hit rate, memory usage, etc.
+        """
         total_requests = self.stats['cache_hits'] + self.stats['cache_misses']
         hit_rate = (
             self.stats['cache_hits'] / total_requests * 100

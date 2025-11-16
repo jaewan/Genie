@@ -33,7 +33,31 @@ class AdvancedLLMPattern(PatternPlugin):
 
     @track_performance
     def match(self, graph) -> Optional[PatternMatch]:
-        """Detect LLM patterns using sophisticated graph analysis."""
+        """Detect LLM patterns using sophisticated graph analysis.
+        
+        Uses multiple strategies:
+        1. Metadata hints (fast, for LazyDAG graphs)
+        2. NetworkX subgraph matching (accurate, for all graph types)
+        3. Structural analysis (fallback)
+        """
+        # Strategy 1: Check for metadata hints (fast path for LazyDAG)
+        attention_nodes = []
+        for node in graph.nodes():
+            if hasattr(node, 'metadata'):
+                metadata = getattr(node, 'metadata', {})
+                if isinstance(metadata, dict):
+                    hints = metadata.get('pattern_hints', {})
+                    if hints.get('likely_pattern') == 'attention':
+                        attention_nodes.append(node.id)
+        
+        # If we have metadata hints, try to expand the pattern
+        if attention_nodes:
+            for hinted_node_id in attention_nodes[:1]:  # Try first hint
+                expanded = self._expand_pattern_from_hint(graph, hinted_node_id)
+                if expanded:
+                    return expanded
+        
+        # Strategy 2: NetworkX subgraph matching (accurate, works for all graphs)
         # Convert to NetworkX for pattern analysis (handles all graph types)
         G = graph_to_networkx(graph)
 
@@ -94,6 +118,54 @@ class AdvancedLLMPattern(PatternPlugin):
                 optimization_hints={"can_use_flash_attention": True},
                 metadata={"semantic_role": "attention_layer"}
             )
+        
+        return None
+    
+    def _expand_pattern_from_hint(self, graph, hinted_node_id) -> Optional[PatternMatch]:
+        """Expand pattern from a node with attention hints (from LazyDAG metadata)."""
+        # Find the hinted node
+        hinted_node = None
+        for node in graph.nodes():
+            if str(node.id) == str(hinted_node_id):
+                hinted_node = node
+                break
+        
+        if not hinted_node:
+            return None
+
+        # Look backwards for softmax and matmul
+        pattern_nodes = [str(hinted_node_id)]
+        
+        # Try to find softmax and matmul in graph structure
+        # This is a simplified approach - NetworkX matching is more accurate
+        # but this provides a fast path for metadata-annotated graphs
+        nodes_list = list(graph.nodes())
+        for i, node in enumerate(nodes_list):
+            if str(node.id) == str(hinted_node_id):
+                # Look for softmax before this node
+                if i > 0:
+                    prev_node = nodes_list[i-1]
+                    if 'softmax' in prev_node.operation.lower():
+                        pattern_nodes.insert(0, str(prev_node.id))
+                        # Look for matmul before softmax
+                        if i > 1:
+                            prev_prev = nodes_list[i-2]
+                            if 'matmul' in prev_prev.operation.lower():
+                                pattern_nodes.insert(0, str(prev_prev.id))
+                                return PatternMatch(
+                                    pattern_name=self.name,
+                                    confidence=0.85,
+                                    matched_nodes=pattern_nodes,
+                                    operation_sequence=['matmul', 'softmax', 'matmul'],
+                                    optimization_hints={
+                                        'can_use_flash_attention': True,
+                                        'supports_kv_cache': True
+                                    },
+                                    metadata={'detection_method': 'metadata_hints_expanded'}
+                                )
+                break
+        
+        return None
 
 
 class AdvancedVisionPattern(PatternPlugin):
@@ -115,7 +187,40 @@ class AdvancedVisionPattern(PatternPlugin):
 
     @track_performance
     def match(self, graph) -> Optional[PatternMatch]:
-        """Detect vision patterns including CNNs and ViTs."""
+        """Detect vision patterns including CNNs and ViTs.
+        
+        Uses multiple strategies:
+        1. Metadata hints (fast, for LazyDAG graphs)
+        2. NetworkX subgraph matching (accurate, for all graph types)
+        """
+        # Strategy 1: Check for metadata hints (fast path for LazyDAG)
+        conv_nodes = []
+        for node in graph.nodes():
+            if hasattr(node, 'metadata'):
+                metadata = getattr(node, 'metadata', {})
+                if isinstance(metadata, dict):
+                    hints = metadata.get('pattern_hints', {})
+                    if hints.get('likely_pattern') in ['conv_bn_relu', 'convolution']:
+                        conv_nodes.append(node.id)
+        
+        # If we have metadata hints, return a pattern match
+        if conv_nodes:
+            return PatternMatch(
+                pattern_name=self.name,
+                confidence=0.85,
+                matched_nodes=[str(nid) for nid in conv_nodes],
+                operation_sequence=['conv2d'],
+                optimization_hints={
+                    'can_fuse_conv_bn': True,
+                    'memory_bandwidth_sensitive': True
+                },
+                metadata={
+                    'detection_method': 'metadata_hints',
+                    'modality': 'vision'
+                }
+            )
+        
+        # Strategy 2: NetworkX subgraph matching (accurate, works for all graphs)
         # Use NetworkX for pattern analysis
         G = graph_to_networkx(graph)
         
@@ -283,24 +388,6 @@ class MultiModalPattern(PatternPlugin):
     @track_performance
     def match(self, graph) -> Optional[PatternMatch]:
         """Detect multi-modal patterns combining vision and language components."""
-        # Prefer FX-based matching when available
-        if isinstance(graph, fx.GraphModule):
-            attn_fx = find_attention_pattern_fx(graph)
-            conv_fx = find_conv_activation_pattern_fx(graph)
-            if attn_fx is not None and conv_fx is not None:
-                matched_nodes = [n.name for n in (attn_fx.nodes + conv_fx.nodes)]
-                return PatternMatch(
-                    pattern_name=self.name,
-                    confidence=0.85,
-                    matched_nodes=list(set(matched_nodes)),
-                    operation_sequence=["conv2d", "matmul", "fusion"],
-                    optimization_hints={
-                        "can_pipeline_modalities": True,
-                        "supports_async_gpu_compute": True
-                    },
-                    metadata={"semantic_role": "multimodal_encoder"}
-                )
-
         # Convert to NetworkX for pattern analysis (handles all graph types)
         G = graph_to_networkx(graph)
         

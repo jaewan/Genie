@@ -89,6 +89,20 @@ class TCPRemoteExecutionClient:
                 asyncio.open_connection(self.host, self.port),
                 timeout=self.timeout
             )
+            # ✅ PHASE 3: Apply TCP optimizations for high-performance transfer
+            import socket
+            sock = writer.get_extra_info('socket')
+            if sock:
+                try:
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 16 * 1024 * 1024)  # 16MB
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16 * 1024 * 1024)  # 16MB
+                    try:
+                        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_WINDOW_CLAMP, 64 * 1024 * 1024)
+                    except (AttributeError, OSError):
+                        pass
+                except Exception as e:
+                    logger.warning(f"Failed to optimize TCP socket: {e}")
             self._connection = (reader, writer)
             self._last_activity = now
             return reader, writer

@@ -107,7 +107,14 @@ class SemanticAnnotator:
         node_inputs = []
         for node in graph.nodes():
             # ✅ FIX: Convert all IDs to strings to avoid type comparison errors
-            input_ids = sorted([str(getattr(inp, 'id', id(inp))) for inp in node.inputs])
+            # Handle both node objects and string IDs in inputs
+            input_ids = []
+            for inp in node.inputs:
+                if isinstance(inp, str):
+                    input_ids.append(str(inp))
+                else:
+                    input_ids.append(str(getattr(inp, 'id', id(inp))))
+            input_ids = sorted(input_ids)
             node_inputs.append((str(getattr(node, 'id', id(node))), node.operation, tuple(input_ids)))
         node_inputs.sort()
         hasher.update(str(node_inputs).encode())
@@ -441,63 +448,6 @@ class SemanticAnnotator:
         }
 
         logger.info(f"Cost estimation complete")
-        
-        return AnnotatedGraph(graph, patterns, phases, graph_costs, self.metadata_registry)
-    
-    def _annotate_uncached(self, graph) -> 'AnnotatedGraph':
-        """Original uncached implementation."""
-        logger.info(f"Starting semantic analysis for {len(list(graph.nodes()))} nodes")
-        
-        patterns = self.pattern_registry.match_all(graph)
-        logger.debug(f"Detected patterns: {list(patterns.keys())}")
-
-        phases = self.phase_detector.detect_phases(graph)
-        logger.debug(f"Phase distribution: {self._count_phases(phases)}")
-
-        logger.info("Creating node metadata...")
-        for node in graph.nodes():
-            phase_obj = phases.get(node.id)
-            phase_value = phase_obj.value if hasattr(phase_obj, 'value') else str(phase_obj) if phase_obj else None
-
-            # ✅ FIX: Use getattr() instead of .get() to support both dict and MetadataPlaceholder
-            node_meta = getattr(node, 'metadata', {})
-            metadata = NodeMetadata(
-                node_id=node.id,
-                phase=phase_value,
-                semantic_role=getattr(node_meta, 'semantic_role', None),
-                modality=getattr(node_meta, 'modality', None),
-            )
-
-            metadata.optimization_hints = getattr(node_meta, 'optimization_hints', {})
-
-            self.metadata_registry.register_metadata(node.id, metadata)
-
-        cost_results = self.cost_estimator.estimate_graph(graph)
-        costs = cost_results['per_node']
-        total_compute = cost_results['total_compute_flops']
-        total_memory = cost_results['total_memory_bytes']
-        total_data_movement = cost_results['total_data_movement_bytes']
-
-        logger.info("Updating metadata with cost estimates...")
-        for node in graph.nodes():
-            node_cost = costs.get(node.id)
-            if node_cost:
-                self.metadata_registry.update_metadata(node.id, {
-                    'compute_flops': node_cost.compute_flops,
-                    'memory_bytes': node_cost.memory_bytes,
-                    'operational_intensity': node_cost.operational_intensity,
-                    'data_movement_bytes': node_cost.data_movement_bytes,
-                })
-
-        graph_costs = {
-            'per_node': costs,
-            'total_compute_flops': total_compute,
-            'total_memory_bytes': total_memory,
-            'total_data_movement_bytes': total_data_movement,
-            'mean_operational_intensity': (total_compute / total_memory if total_memory > 0 else 0),
-        }
-
-        logger.info(f"Semantic analysis complete")
         
         return AnnotatedGraph(graph, patterns, phases, graph_costs, self.metadata_registry)
 

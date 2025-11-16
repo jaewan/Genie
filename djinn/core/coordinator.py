@@ -144,9 +144,49 @@ class DjinnCoordinator:
         if self.enable_profiling:
             logger.info("✓ Profiling enabled (via ProfilingContext)")
 
+        # ✅ ADD: Global Fleet Coordinator integration (Phase 3)
+        self.global_coordinator = None
+        self._init_global_coordinator()
+
         # ✅ Register as global instance
         set_coordinator(self)
 
+    def _init_global_coordinator(self):
+        """Initialize global fleet coordinator if enabled."""
+        fleet_config = self._central_config.fleet
+        
+        if not fleet_config.enable_global_coordinator:
+            logger.debug("Global fleet coordinator disabled")
+            return
+        
+        if not fleet_config.global_coordinator_address:
+            logger.debug("Global fleet coordinator address not configured, using direct server mode")
+            return
+        
+        try:
+            from ..fleet import GlobalFleetCoordinator
+            from ..fleet.model_registry import GlobalModelRegistry
+            
+            # Initialize global coordinator with Redis backend if available
+            model_registry = GlobalModelRegistry(
+                backend=None,  # Auto-detect
+                redis_url=fleet_config.redis_url
+            )
+            
+            self.global_coordinator = GlobalFleetCoordinator(
+                model_registry=model_registry,
+                redis_url=fleet_config.redis_url
+            )
+            
+            logger.info(
+                f"✅ Global fleet coordinator initialized "
+                f"(address={fleet_config.global_coordinator_address})"
+            )
+        except Exception as e:
+            logger.warning(f"⚠️  Failed to initialize global fleet coordinator: {e}")
+            logger.warning("Falling back to direct server mode")
+            self.global_coordinator = None
+    
     def start_sync(self):
         """Synchronous wrapper for start()."""
         try:
@@ -238,6 +278,71 @@ class DjinnCoordinator:
             raise RuntimeError("No transports available!")
             
         logger.info(f"DjinnCoordinator ready: {list(self.transports.keys())}")
+    
+    async def get_capabilities(self) -> Dict[str, Any]:
+        """
+        Get server capabilities from remote server.
+        
+        Returns:
+            Dictionary with server capabilities (gpu_count, gpus, etc.)
+            
+        NOTE: This queries the control plane for capabilities. The control plane
+        should have received server capabilities during connection establishment.
+        If not available, returns a minimal dict to avoid breaking initialization.
+        """
+        if self.control_plane is None:
+            raise RuntimeError("Control plane not initialized")
+        
+        # Get capabilities from control plane
+        # The control plane stores server capabilities after capability exchange
+        try:
+            capabilities = self.control_plane.get_capabilities()
+            
+            # Handle None case (capabilities not yet exchanged)
+            if capabilities is None:
+                logger.debug("Control plane capabilities not yet available (capability exchange may not have completed)")
+                return {
+                    'gpu_count': 0,  # Unknown until exchange completes
+                    'gpus': [],
+                    'networks': [],
+                    'total_memory_gb': 0,
+                    'supported_transports': ['tcp'],
+                    'hostname': 'unknown',
+                    'node_id': 'unknown',
+                }
+            
+            # Convert NodeCapabilities dataclass to dict
+            from dataclasses import asdict
+            try:
+                caps_dict = asdict(capabilities)
+                # Ensure gpu_count is present (NodeCapabilities has it)
+                if 'gpu_count' not in caps_dict:
+                    caps_dict['gpu_count'] = getattr(capabilities, 'gpu_count', 0)
+                return caps_dict
+            except Exception:
+                # Fallback: manual conversion
+                return {
+                    'gpu_count': getattr(capabilities, 'gpu_count', 0),
+                    'gpus': [],
+                    'networks': [],
+                    'total_memory_gb': 0,
+                    'supported_transports': ['tcp'],
+                    'hostname': getattr(capabilities, 'node_id', 'unknown'),
+                    'node_id': getattr(capabilities, 'node_id', 'unknown'),
+                }
+            
+        except Exception as e:
+            logger.warning(f"Failed to get capabilities from control plane: {e}")
+            # Return minimal dict to avoid breaking initialization
+            return {
+                'gpu_count': 0,
+                'gpus': [],
+                'networks': [],
+                'total_memory_gb': 0,
+                'supported_transports': ['tcp'],
+                'hostname': 'unknown',
+                'node_id': 'unknown',
+            }
     
     async def send_tensor(
         self, 
@@ -764,7 +869,16 @@ class DjinnCoordinator:
 
         try:
             # ✅ Week 3: Use DifferentialGraphProtocol for iterative workloads
-            # DISABLED for compatibility: always use standard protocol
+            # 
+            # STATUS: DISABLED (2024)
+            # Reason: Disabled for compatibility with current model cache system.
+            # The new model cache system (memory_aware_model_cache.py) handles
+            # model caching more efficiently, making differential graph updates
+            # less critical. This feature may be re-enabled in the future if
+            # profiling shows it provides benefits for specific workloads.
+            # 
+            # To re-enable: Set condition to `if enable_differential and graph_id:`
+            # and ensure server-side delta reconstruction is implemented.
             if False:  # enable_differential and graph_id:
                 try:
                     from djinn.server.differential_graph import DifferentialGraphProtocol
@@ -815,7 +929,7 @@ class DjinnCoordinator:
             
             # ✅ PHASE 2: Negotiate protocol version and serialize
             try:
-                from djinn.server.fast_serialization import (
+                from djinn.server.optimizations.fast_serialization import (
                     FastSerializer,
                     get_protocol_negotiator,
                     SerializationVersion
@@ -1231,10 +1345,10 @@ class DjinnCoordinator:
             else:
                 inputs = [tensor_or_tensors]
 
-            # Execute using the shared operation registry
-            from .operation_registry import get_operation_registry
-            registry = get_operation_registry()
-            result = registry.execute(operation, inputs)
+            # Execute using universal dispatcher
+            from ..frontend.core.universal_dispatcher import get_universal_dispatcher
+            dispatcher = get_universal_dispatcher()
+            result = dispatcher.dispatch(operation, inputs, {})
 
             # Send result back (using the metadata's client_port if available)
             result_id = metadata.get('result_id', f"{transfer_id}_result")

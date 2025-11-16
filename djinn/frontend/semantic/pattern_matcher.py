@@ -25,8 +25,14 @@ class IPatternMatcher(ABC):
     This interface allows different pattern matching implementations to be
     plugged into SemanticAnalyzer via dependency injection.
     
+    NOTE: This wraps PatternPlugin instances internally. The PatternPlugin
+    interface is the primary interface for pattern implementations. IPatternMatcher
+    provides a service layer abstraction for dependency injection.
+    
     Implementations:
-    - NetworkXPatternMatcher: Uses NetworkX for graph pattern matching
+    - NetworkXPatternMatcher: Uses NetworkX for graph pattern matching (wraps PatternRegistry)
+    - SimplifiedPatternMatcher: Fast heuristic-based matching
+    - CompositePatternMatcher: Combines multiple matchers
     - TorchDynamoPatternMatcher: (Future) Uses PyTorch Dynamo patterns
     """
     

@@ -59,7 +59,14 @@ class MatchingMetrics:
 
 
 class PatternRegistry:
-	"""Registry and orchestrator for pattern plugins with thread safety and observability."""
+	"""
+	Registry and orchestrator for pattern plugins with thread safety and observability.
+	
+	NOTE: This is the NEW PatternRegistry (production). There is also an old PatternRegistry
+	in djinn/frontend/semantic/patterns/base_matcher.py that is deprecated and only used
+	for backward compatibility with PatternMatcher interface. This class uses PatternPlugin
+	interface and returns MatchedPattern results.
+	"""
 
 	def __init__(self) -> None:
 		# Thread safety
@@ -108,20 +115,22 @@ class PatternRegistry:
 		self.register_pattern(ResidualBlockPattern())
 
 	def register_lazy_dag_patterns(self) -> None:
-		"""Register LazyDAG-specific pattern matchers."""
+		"""Register LazyDAG-specific pattern matchers.
+		
+		NOTE: LazyDAGAttentionMatcher and LazyDAGConvolutionMatcher have been
+		consolidated into AdvancedLLMPattern and AdvancedVisionPattern respectively.
+		Only specialized LazyDAG patterns remain (KV cache, linear, activation).
+		"""
 		# Import here to avoid circular dependency
 		from .patterns.lazy_dag_patterns import (
-			LazyDAGAttentionMatcher,
 			LazyDAGKVCacheMatcher,
 			LazyDAGLinearMatcher,
-			LazyDAGConvolutionMatcher,
 			LazyDAGActivationMatcher
 		)
-		# Register LazyDAG patterns
-		self.register_pattern(LazyDAGAttentionMatcher())
+		# Register only specialized LazyDAG patterns
+		# Attention and convolution are now handled by AdvancedLLMPattern/AdvancedVisionPattern
 		self.register_pattern(LazyDAGKVCacheMatcher())
 		self.register_pattern(LazyDAGLinearMatcher())
-		self.register_pattern(LazyDAGConvolutionMatcher())
 		self.register_pattern(LazyDAGActivationMatcher())
 
 	def _load_external_plugins(self) -> None:
