@@ -23,7 +23,7 @@ logging.basicConfig(
     force=True
 )
 
-# Set Djinn loggers to ERROR to reduce noise (only show errors, not warnings)
+# Set Djinn loggers to ERROR to reduce noise
 for logger_name in ['djinn', 'djinn.core', 'djinn.server', 'djinn.backend', 'djinn.fleet']:
     logging.getLogger(logger_name).setLevel(logging.ERROR)
 

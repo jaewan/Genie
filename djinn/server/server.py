@@ -250,27 +250,34 @@ class DjinnServer:
         logger.info(f"TCP CONNECTION: New connection from {addr}")
 
         try:
-            # ✅ BUG FIX: Validate message type is reasonable before processing
-            # This catches cases where leftover data from previous message is being read
+            # Import protocol constants early for validation
+            from .transport.protocol import MessageType
+            
+            # Validate message type is reasonable before processing
             first_byte = await reader.readexactly(1)
             msg_type = struct.unpack('B', first_byte)[0]
             
-            # ✅ BUG FIX: Validate message type is reasonable
-            # Message types should be < 0xFF (ERROR = 0xFF is the max)
-            if msg_type > 0xFF:
-                raise ValueError(
-                    f"⚠️  Invalid message type: 0x{msg_type:02x} (max: 0xFF). "
-                    f"Possible protocol mismatch or leftover data from previous message."
-                )
+            # ✅ CRITICAL: Log first byte received for ALL connections
+            logger.info(f"📥 SERVER: Received first byte from {addr}: 0x{msg_type:02x} ({msg_type})")
             
-            # Import protocol constants
-            from .transport.protocol import MessageType
+            
+            # ✅ CRITICAL: Log protocol detection decision
+            is_model_cache = MessageType.is_model_cache_protocol(msg_type)
+            logger.info(f"📥 SERVER: Protocol detection for 0x{msg_type:02x}: is_model_cache={is_model_cache}")
+            
+            # ✅ BUFFER CLEANUP: Before processing, ensure reader buffer is clean
+            # This prevents leftover data from previous messages on reused connections
+            # Only do this if connection was possibly reused (check for leftover async buffer)
+            # Note: We've already read first byte, so buffer should be mostly clean
+            # But we log if we detect issues
             
             # New protocol: message type
-            if MessageType.is_model_cache_protocol(msg_type):
+            if is_model_cache:
                 logger.info(f"🔍 DEBUG: Detected new protocol message type: 0x{msg_type:02x} from {addr}")
                 if msg_type == MessageType.EXECUTE_MODEL:
                     logger.info(f"🔍 DEBUG: EXECUTE_MODEL message detected! Routing to handler...")
+                elif msg_type == MessageType.REGISTER_MODEL_CHUNK:
+                    logger.info(f"✅ SERVER: REGISTER_MODEL_CHUNK (0x0A) detected from {addr} - routing to handler")
                 # Store msg_type for finally block to use appropriate delay
                 self._last_msg_type = msg_type
                 try:
@@ -284,118 +291,18 @@ class DjinnServer:
                 # Don't return here - let finally block close connection after response is sent
                 return
             
-            # Old protocol: transfer_id + metadata (backward compatibility)
-            # First byte is part of 4-byte length field, read 3 more bytes
-            transfer_id_len_bytes = first_byte + await reader.readexactly(3)
-            transfer_id_len = struct.unpack('>I', transfer_id_len_bytes)[0]
-            transfer_id_bytes = await reader.readexactly(transfer_id_len)
-            transfer_id = transfer_id_bytes.decode('utf-8')
-
-            # Read metadata
-            metadata_len_bytes = await reader.readexactly(4)
-            metadata_len = struct.unpack('>I', metadata_len_bytes)[0]
-            metadata_bytes = await reader.readexactly(metadata_len)
-            metadata = json.loads(metadata_bytes.decode('utf-8'))
-            logger.info(f"DIRECT TCP: Received metadata: {metadata}")
-            logger.info(f"DIRECT TCP: Client port in metadata: {metadata.get('client_port')}")
-            logger.info(f"DIRECT TCP: Source node in metadata: {metadata.get('source_node')}")
-
-            # Check if this is multi-tensor or single-tensor message
-            # ✅ FIX: Use explicit message type instead of heuristics
-            from .transport.protocol import MessageType
-            
-            peek_data = await reader.readexactly(1)
-            msg_type_byte = struct.unpack('B', peek_data)[0]
-            
-            # Explicit message type detection (no heuristics)
-            if msg_type_byte == MessageType.SINGLE_TENSOR:
-                is_multi_tensor = False
-            elif msg_type_byte == MessageType.MULTI_TENSOR:
-                is_multi_tensor = True
-            else:
-                # Fallback to heuristic for backward compatibility (legacy clients)
-                logger.warning(
-                    f"Legacy protocol detected (msg_type={msg_type_byte:02x}), "
-                    f"using heuristic detection. Consider upgrading client."
-                )
-                next_byte_val = msg_type_byte
-                is_multi_tensor = 'num_inputs' in metadata and next_byte_val <= 10
-
-            if is_multi_tensor:
-                # Multi-tensor protocol
-                num_tensors = next_byte_val
-                logger.info(f"Receiving {num_tensors} tensors for {transfer_id}")
-
-                tensors = []
-                for i in range(num_tensors):
-                    # Read tensor size
-                    size_bytes = await reader.readexactly(8)
-                    tensor_size = struct.unpack('>Q', size_bytes)[0]
-
-                    # Read tensor data
-                    tensor_bytes = await reader.readexactly(tensor_size)
-
-                    # Reconstruct tensor
-                    shape = metadata['input_shapes'][i]
-                    dtype_str = metadata['input_dtypes'][i]
-
-                    # Map PyTorch dtype string to NumPy dtype
-                    dtype_map = {
-                        'torch.float32': np.float32,
-                        'torch.float16': np.float16,
-                        'torch.int64': np.int64,
-                        'torch.int32': np.int32,
-                        'torch.float64': np.float64,
-                    }
-                    np_dtype = dtype_map.get(dtype_str, np.float32)
-
-                    # Create numpy array
-                    np_array = np.frombuffer(tensor_bytes, dtype=np_dtype)
-                    np_array = np_array.reshape(shape)
-
-                    # Convert to PyTorch tensor
-                    tensor = torch.from_numpy(np_array.copy())
-                    tensors.append(tensor)
-
-                    logger.debug(f"  Received tensor {i}: {shape}")
-
-                # Handle operation request
-                await self._handle_operation_request(transfer_id, tensors, metadata)
-
-            else:
-                # Single-tensor protocol (fallback)
-                # Re-interpret first byte + next 7 bytes as tensor size
-                size_bytes_full = peek_data + await reader.readexactly(7)
-                tensor_size = struct.unpack('>Q', size_bytes_full)[0]
-
-                logger.info(f"Receiving single tensor: {transfer_id}, {tensor_size} bytes")
-
-                # Read tensor data
-                tensor_bytes = await reader.readexactly(tensor_size)
-
-                # Reconstruct tensor
-                shape = metadata['shape']
-                dtype_str = metadata['dtype']
-
-                # Map PyTorch dtype string to NumPy dtype
-                dtype_map = {
-                    'torch.float32': np.float32,
-                    'torch.float16': np.float16,
-                    'torch.int64': np.int64,
-                    'torch.int32': np.int32,
-                    'torch.float64': np.float64,
-                }
-                np_dtype = dtype_map.get(dtype_str, np.float32)
-
-                # Create numpy array
-                np_array = np.frombuffer(tensor_bytes, dtype=np_dtype)
-                np_array = np_array.reshape(shape)
-
-                # Convert to PyTorch tensor
-                tensor = torch.from_numpy(np_array.copy())
-
-                # Handle operation request (single tensor)
-                await self._handle_operation_request(transfer_id, tensor, metadata)
+            # ✅ CRITICAL FIX: REJECT invalid message types instead of falling back
+            # The old protocol is DEPRECATED. All clients must use new protocol.
+            # If first byte is not valid, connection is corrupted or client is outdated.
+            logger.error(
+                f"🚨 PROTOCOL ERROR: First byte 0x{msg_type:02x} from {addr} is NOT a valid model cache protocol message! "
+                f"Connection is likely corrupted or client is using outdated protocol. "
+                f"Valid message types: 0x01-0x02, 0x05-0x0B, 0xFF"
+            )
+            raise ValueError(
+                f"Invalid protocol: first byte 0x{msg_type:02x} is not a recognized message type. "
+                f"Connection must use new message-type-based protocol (0x01-0x0B or 0xFF)."
+            )
 
         except Exception as e:
             logger.error(f"Error handling connection from {addr}: {e}")
@@ -417,22 +324,24 @@ class DjinnServer:
                     should_keep_alive = self._last_request.get('_keep_alive', False)
             
             if should_keep_alive:
-                # Keep connection open - client will reuse it
-                logger.debug(f"Keeping connection alive for {addr} (keep-alive requested)")
-                # Don't close - connection will be reused
-                # Note: Connection will be closed by client or on timeout
-            else:
-                # Close connection after response (with delay for client to read)
-                try:
-                    # Variable delay based on message type
-                    delay = 5.0 if (hasattr(self, '_last_msg_type') and 
-                                   self._last_msg_type == MessageType.REGISTER_MODEL_FINALIZE) else 2.0
-                    await asyncio.sleep(delay)  # Delay to allow client to read
-                    if not writer.is_closing():
-                        writer.close()
-                        await writer.wait_closed()
-                except Exception:
-                    pass  # Ignore errors during cleanup
+                # ✅ FIX: DISABLE KEEP-ALIVE - Always close connections to prevent buffer pollution
+                # When server keeps connections alive, chunks arriving on different connections
+                # can read leftover response data from previous messages, causing protocol errors!
+                logger.debug(f"⚠️  Keep-alive DISABLED to prevent buffer pollution (was requested for {addr})")
+                # Fall through to close connection
+                should_keep_alive = False
+            
+            # Always close connection after response
+            try:
+                # Variable delay based on message type
+                delay = 5.0 if (hasattr(self, '_last_msg_type') and 
+                               self._last_msg_type == MessageType.REGISTER_MODEL_FINALIZE) else 0.1  # Reduced delay
+                await asyncio.sleep(delay)  # Delay to allow client to read
+                if not writer.is_closing():
+                    writer.close()
+                    await writer.wait_closed()
+            except Exception:
+                pass  # Ignore errors during cleanup
     
     async def _handle_message_type_protocol(self, reader, writer, msg_type, addr):
         """Handle new message type protocol (REGISTER_MODEL, EXECUTE_MODEL).
@@ -454,6 +363,26 @@ class DjinnServer:
                     timeout=10.0  # 10s timeout for length header
                 )
                 length = int.from_bytes(length_bytes, 'big')
+                
+                # ✅ BUG FIX: Log the raw bytes for debugging protocol mismatches
+                logger.debug(f"Length header bytes: {length_bytes.hex()} = {length} bytes ({length / (1024*1024):.2f} MB)")
+                
+                # ✅ BUG FIX: Validate length header is not a suspicious round number BEFORE reading data
+                # This catches protocol mismatches early (before wasting time reading wrong amount of data)
+                SUSPICIOUS_SIZES = [
+                    64 * 1024 * 1024,      # 64MB (2^26) - common in errors
+                    128 * 1024 * 1024,     # 128MB (2^27)
+                    256 * 1024 * 1024,     # 256MB (2^28)
+                ]
+                if length in SUSPICIOUS_SIZES:
+                    # This is almost certainly a protocol mismatch - reject early
+                    raise ValueError(
+                        f"⚠️  PROTOCOL MISMATCH: Suspicious length header {length} bytes ({length / (1024*1024):.1f} MB) "
+                        f"for message type 0x{msg_type:02x}. "
+                        f"Length header bytes: {length_bytes.hex()}. "
+                        f"This indicates leftover data from previous message or connection state corruption. "
+                        f"Closing connection and requesting client to reconnect."
+                    )
                 
                 # ✅ BUG FIX: Validate message length to catch protocol mismatches
                 MAX_REASONABLE_MESSAGE_SIZE = 10 * 1024 * 1024 * 1024  # 10GB (safety limit)
@@ -613,21 +542,52 @@ class DjinnServer:
                 raise RuntimeError("Request timeout - payload too large or connection too slow")
             except asyncio.IncompleteReadError as e:
                 # ✅ BUG FIX: Better error message for protocol mismatch detection
-                logger.error(
-                    f"Incomplete read from {addr}: got {e.partial} bytes, expected {e.expected} bytes "
-                    f"({e.expected / (1024*1024):.1f} MB). "
-                    f"Possible causes: protocol mismatch, connection closed, or leftover data."
-                )
-                # Check if this looks like a protocol mismatch
-                if e.expected > 100 * 1024 * 1024:  # > 100MB is suspicious
+                partial_len = len(e.partial) if e.partial else 0
+                expected_len = e.expected if e.expected else 0
+                
+                # Check if this is a suspicious round number (protocol mismatch indicator)
+                SUSPICIOUS_SIZES = [
+                    64 * 1024 * 1024,      # 64MB (2^26)
+                    128 * 1024 * 1024,     # 128MB (2^27)
+                    256 * 1024 * 1024,     # 256MB (2^28)
+                ]
+                
+                if expected_len in SUSPICIOUS_SIZES and partial_len < 1000:
+                    # This is almost certainly a protocol mismatch
                     logger.error(
-                        f"⚠️  Suspicious large expected size ({e.expected} bytes = {e.expected / (1024*1024):.1f} MB) "
+                        f"⚠️  PROTOCOL MISMATCH detected from {addr}: "
+                        f"Expected {expected_len} bytes ({expected_len / (1024*1024):.1f} MB, round number), "
+                        f"but only got {partial_len} bytes. "
+                        f"This indicates the client is using a different protocol or connection state is corrupted. "
+                        f"Message type: 0x{msg_type:02x}. "
+                        f"Closing connection and requesting client to reconnect."
+                    )
+                    # Close connection to force client to reconnect with clean state
+                    try:
+                        writer.close()
+                        await writer.wait_closed()
+                    except:
+                        pass
+                    raise ValueError(
+                        f"Protocol mismatch: expected {expected_len} bytes (suspicious round number), "
+                        f"got {partial_len} bytes. Connection closed. Please reconnect."
+                    )
+                elif expected_len > 100 * 1024 * 1024:  # > 100MB is suspicious
+                    logger.error(
+                        f"⚠️  Suspicious large expected size ({expected_len} bytes = {expected_len / (1024*1024):.1f} MB) "
                         f"suggests protocol mismatch. "
+                        f"Got {partial_len} bytes. "
                         f"Check if binary protocol detection is working correctly or if there's leftover data."
+                    )
+                else:
+                    logger.error(
+                        f"Incomplete read from {addr}: got {partial_len} bytes, expected {expected_len} bytes "
+                        f"({expected_len / (1024*1024):.1f} MB). "
+                        f"Possible causes: protocol mismatch, connection closed, or leftover data."
                     )
                 raise RuntimeError(
                     f"Incomplete read: connection closed during transfer "
-                    f"(got {e.partial} bytes, expected {e.expected} bytes)"
+                    f"(got {partial_len} bytes, expected {expected_len} bytes)"
                 )
             
             logger.info(f"✅ Received message type 0x{msg_type:02x} from {addr}, length={length} bytes")

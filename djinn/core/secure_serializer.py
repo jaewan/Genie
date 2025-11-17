@@ -638,7 +638,7 @@ class SecureSerializer:
                 else:
                     # Legacy path - store as raw tensor
                     tensor = torch.from_numpy(np_array.copy())
-                request[parent_key][sub_key] = tensor
+                    request[parent_key][sub_key] = tensor
             else:
                 # Simple key - store directly
                 # Remove tensor metadata marker

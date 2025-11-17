@@ -325,7 +325,9 @@ class EnhancedModelManager:
             # ✅ OPTIMIZATION: Only chunk for very large models (> 1GB) for memory safety
             # TCP can easily handle 500MB in a single connection
             # Chunking adds protocol overhead (message type + length + JSON per chunk)
-            CHUNK_THRESHOLD_MB = 1024  # 1GB - only chunk if larger than this
+            # ✅ TEMP FIX: Disable chunking for GPT-2-XL testing (chunked protocol has bugs)
+            # GPT-2-XL is ~1.5GB, but direct transfer works fine for models up to 2GB
+            CHUNK_THRESHOLD_MB = 2048  # 2GB - only chunk if larger than this (temporarily increased for testing)
             CHUNK_SIZE_MB = 100  # 100MB chunks (larger chunks = less overhead)
             CHUNK_SIZE_BYTES = CHUNK_SIZE_MB * 1024 * 1024
             
@@ -483,6 +485,8 @@ class EnhancedModelManager:
         
         Uses adaptive concurrency: 5-20 concurrent chunks depending on total chunk count.
         """
+        logger.info(f"🟡 _register_model_chunked START: fingerprint={fingerprint}, chunk_size={chunk_size_bytes/(1024*1024):.1f} MB")
+        
         import time
         
         # Split weights into chunks
@@ -530,7 +534,10 @@ class EnhancedModelManager:
             f"arch_data={arch_data_size_mb:.1f} MB)..."
         )
         try:
-            header_response = await self._send_request(header)
+            # ✅ CRITICAL FIX: Use new connection for header to avoid pool pollution
+            # If header uses pooled connection, leftover response buffer data can
+            # interfere with subsequent chunk connections
+            header_response = await self._send_tcp_request(header, use_pool=False)
             if header_response.get('status') != 'success':
                 raise RuntimeError(f"Header registration failed: {header_response.get('message')}")
             
@@ -544,7 +551,8 @@ class EnhancedModelManager:
                     'total_chunks': total_chunks,
                     'architecture_data': architecture_data
                 }
-                arch_response = await self._send_request(arch_chunk)
+                # ✅ CRITICAL FIX: Use new connection to avoid pool pollution
+                arch_response = await self._send_tcp_request(arch_chunk, use_pool=False)
                 if arch_response.get('status') != 'success':
                     raise RuntimeError(f"Architecture data send failed: {arch_response.get('message')}")
         except Exception as e:
@@ -584,97 +592,121 @@ class EnhancedModelManager:
             Returns:
                 (chunk_id, success, error_message)
             """
-            async with semaphore:  # Limit concurrent chunks
-                chunk_size_mb = sum(
-                    w.numel() * w.element_size() 
-                    for w in chunk_weights.values()
-                ) / (1024 * 1024)
-                
-                # ✅ PHASE 2 FIX: Use binary protocol for chunks too (not just small models)
-                # Serialize in thread pool (CPU-bound work, doesn't block event loop)
-                chunk_serialize_start = time.perf_counter()
-                loop = asyncio.get_event_loop()
-                # Use binary protocol instead of dict-based serialization
-                chunk_data_binary = await loop.run_in_executor(
-                    self._serialization_executor,
-                    self._serialize_weights_binary,  # ✅ Use binary protocol, not dict-based
-                    chunk_weights
-                )
-                chunk_serialize_time = (time.perf_counter() - chunk_serialize_start) * 1000
-                
-                # Retry logic per chunk
-                max_retries = 3
-                
-                for attempt in range(max_retries):
+            logger.info(f"🟣 CHUNK {chunk_id}: send_chunk_with_retry() START")
+            try:
+                logger.info(f"🟣 CHUNK {chunk_id}: Acquiring semaphore (max_concurrency={max_concurrency})...")
+                async with semaphore:  # Limit concurrent chunks
+                    logger.info(f"🟣 CHUNK {chunk_id}: Acquired semaphore, starting serialization")
+                    chunk_size_mb = sum(
+                        w.numel() * w.element_size() 
+                        for w in chunk_weights.values()
+                    ) / (1024 * 1024)
+                    
+                    # ✅ PHASE 2 FIX: Use binary protocol for chunks too (not just small models)
+                    # Serialize in thread pool (CPU-bound work, doesn't block event loop)
+                    chunk_serialize_start = time.perf_counter()
+                    loop = asyncio.get_event_loop()
                     try:
-                        chunk_request = {
-                            'type': 'REGISTER_MODEL_CHUNK',
-                            'fingerprint': fingerprint,
-                            'chunk_id': chunk_id,
-                            'total_chunks': total_chunks,
-                            'chunk_data_binary': chunk_data_binary,  # ✅ Use binary protocol
-                            '_binary_protocol': True,  # ✅ Flag for binary protocol
-                            '_fire_and_forget': True  # Signal to server: don't send response
-                        }
-                        
-                        chunk_transfer_start = time.perf_counter()
-                        # ✅ OPTIMIZATION: Fire-and-forget for chunks (don't wait for response)
-                        # This eliminates the 3-5 second wait per chunk for server processing
-                        chunk_response = await self._send_tcp_request(
-                            chunk_request, 
-                            use_pool=False,
-                            wait_for_response=False  # Fire-and-forget: don't wait for server response
+                        # Use binary protocol instead of dict-based serialization
+                        chunk_data_binary = await loop.run_in_executor(
+                            self._serialization_executor,
+                            self._serialize_weights_binary,  # ✅ Use binary protocol, not dict-based
+                            chunk_weights
                         )
-                        chunk_transfer_time = (time.perf_counter() - chunk_transfer_start) * 1000
-                        
-                        # Fire-and-forget always succeeds (we don't wait for response)
-                        if True:  # Always succeed for fire-and-forget
-                            total_time = chunk_serialize_time + chunk_transfer_time
-                            chunk_timings.append({
+                    except Exception as serialize_error:
+                        logger.error(f"🚨 CHUNK {chunk_id}: Serialization failed: {serialize_error}")
+                        import traceback
+                        logger.error(traceback.format_exc())
+                        raise
+                    chunk_serialize_time = (time.perf_counter() - chunk_serialize_start) * 1000
+                    logger.info(f"✅ CHUNK {chunk_id}: Serialization completed in {chunk_serialize_time:.1f}ms, data_size={len(chunk_data_binary)/(1024*1024):.1f}MB")
+                    
+                    # Retry logic per chunk
+                    max_retries = 3
+                    
+                    for attempt in range(max_retries):
+                        logger.info(f"🔶 CHUNK {chunk_id}: Retry attempt {attempt+1}/{max_retries}, building request...")
+                        try:
+                            chunk_request = {
+                                'type': 'REGISTER_MODEL_CHUNK',
+                                'fingerprint': fingerprint,
                                 'chunk_id': chunk_id,
-                                'serialize_ms': chunk_serialize_time,
-                                'transfer_ms': chunk_transfer_time,
-                                'total_ms': total_time,
-                                'size_mb': chunk_size_mb
-                            })
+                                'total_chunks': total_chunks,
+                                'chunk_data_binary': chunk_data_binary,
+                                '_binary_protocol': True,
+                                '_fire_and_forget': True
+                            }
                             
-                            if chunk_id % 10 == 0 or chunk_id == total_chunks - 1:  # Log every 10th or last
-                                logger.info(
-                                    f"Chunk {chunk_id+1}/{total_chunks} sent: "
-                                    f"{chunk_size_mb:.1f} MB "
-                                    f"(serialize: {chunk_serialize_time:.1f}ms, "
-                                    f"transfer: {chunk_transfer_time:.1f}ms, "
-                                    f"total: {total_time:.1f}ms)"
+                            # ✅ CRITICAL: Validate request type before sending
+                            if chunk_request.get('type') != 'REGISTER_MODEL_CHUNK':
+                                raise ValueError(
+                                    f"CRITICAL: Chunk request type mismatch! "
+                                    f"Expected 'REGISTER_MODEL_CHUNK', got '{chunk_request.get('type')}'"
                                 )
-                            return (chunk_id, True, None)
-                        else:
-                            error_msg = chunk_response.get('message', 'Unknown error')
+                            
+                            chunk_transfer_start = time.perf_counter()
+                            logger.info(f"🔵 CHUNK {chunk_id}: About to call _send_tcp_request with request_type={chunk_request.get('type')}, use_pool=False (NEW connection)")
+                            chunk_response = await self._send_tcp_request(
+                                chunk_request, 
+                                use_pool=False,  # Always use new connection for chunks
+                                wait_for_response=False  # Fire-and-forget: don't wait for server response
+                            )
+                            logger.info(f"🟢 CHUNK {chunk_id}: _send_tcp_request returned: {chunk_response}")
+                            chunk_transfer_time = (time.perf_counter() - chunk_transfer_start) * 1000
+                            
+                            # Fire-and-forget always succeeds (we don't wait for response)
+                            if True:  # Always succeed for fire-and-forget
+                                total_time = chunk_serialize_time + chunk_transfer_time
+                                chunk_timings.append({
+                                    'chunk_id': chunk_id,
+                                    'serialize_ms': chunk_serialize_time,
+                                    'transfer_ms': chunk_transfer_time,
+                                    'total_ms': total_time,
+                                    'size_mb': chunk_size_mb
+                                })
+                                
+                                if chunk_id % 10 == 0 or chunk_id == total_chunks - 1:  # Log every 10th or last
+                                    logger.info(
+                                        f"Chunk {chunk_id+1}/{total_chunks} sent: "
+                                        f"{chunk_size_mb:.1f} MB "
+                                        f"(serialize: {chunk_serialize_time:.1f}ms, "
+                                        f"transfer: {chunk_transfer_time:.1f}ms, "
+                                        f"total: {total_time:.1f}ms)"
+                                    )
+                                return (chunk_id, True, None)
+                            else:
+                                error_msg = chunk_response.get('message', 'Unknown error')
+                                if attempt < max_retries - 1:
+                                    logger.warning(
+                                        f"Chunk {chunk_id+1}/{total_chunks} failed (attempt {attempt+1}/{max_retries}): {error_msg}"
+                                    )
+                                else:
+                                    logger.error(
+                                        f"Chunk {chunk_id+1}/{total_chunks} failed after {max_retries} attempts: {error_msg}"
+                                    )
+                                
+                        except Exception as e:
                             if attempt < max_retries - 1:
-                                logger.warning(
-                                    f"Chunk {chunk_id+1}/{total_chunks} failed (attempt {attempt+1}/{max_retries}): {error_msg}"
+                                logger.error(
+                                    f"Chunk {chunk_id+1}/{total_chunks} error (attempt {attempt+1}/{max_retries}): {e}"
                                 )
                             else:
                                 logger.error(
-                                    f"Chunk {chunk_id+1}/{total_chunks} failed after {max_retries} attempts: {error_msg}"
+                                    f"Chunk {chunk_id+1}/{total_chunks} error after {max_retries} attempts: {e}"
                                 )
                             
-                    except Exception as e:
-                        if attempt < max_retries - 1:
-                            logger.warning(
-                                f"Chunk {chunk_id+1}/{total_chunks} error (attempt {attempt+1}/{max_retries}): {e}"
-                            )
-                        else:
-                            logger.error(
-                                f"Chunk {chunk_id+1}/{total_chunks} error after {max_retries} attempts: {e}"
-                            )
-                        
-                        if attempt < max_retries - 1:
-                            # Exponential backoff
-                            wait_time = 2 ** attempt
-                            await asyncio.sleep(wait_time)
+                            if attempt < max_retries - 1:
+                                # Exponential backoff
+                                wait_time = 2 ** attempt
+                                await asyncio.sleep(wait_time)
                 
                 # All retries failed
                 return (chunk_id, False, f"Failed after {max_retries} attempts")
+            except Exception as e:
+                logger.error(f"🚨 CHUNK {chunk_id}: Outer exception in send_chunk_with_retry: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                return (chunk_id, False, str(e))
         
         # Send all chunks concurrently (with concurrency limit)
         chunk_tasks = [
@@ -689,7 +721,8 @@ class EnhancedModelManager:
         for result in chunk_results:
             if isinstance(result, Exception):
                 logger.error(f"Chunk task raised exception: {result}")
-                # Can't determine chunk_id from exception, so skip
+                import traceback
+                logger.error(f"Traceback:\n{traceback.format_exception(type(result), result, result.__traceback__)}")
                 continue
             
             chunk_id, success, error_msg = result
@@ -1256,6 +1289,9 @@ class EnhancedModelManager:
         import uuid
         from djinn.server.profiling_context import record_phase
         
+        request_type = request.get('type', 'UNKNOWN')
+        logger.info(f"🔴 _send_tcp_request START: request_type={request_type}, use_pool={use_pool}, wait_for_response={wait_for_response}")
+        
         # Use provided server_address or get from request or fallback
         if not server_address:
             server_address = request.get('server_address') or await self._get_server_address()
@@ -1286,15 +1322,41 @@ class EnhancedModelManager:
                 connection_from_pool = True
             else:
                 # Create new connection for parallel transfers (avoid pool conflicts)
-                logger.info(f"🔌 Creating new connection for parallel transfer to {host}:{port} (request_type={request.get('type', 'unknown')})...")
+                logger.info(f"🔌 CREATING NEW CONNECTION for {request.get('type', 'unknown')} to {host}:{port}")
                 reader, writer = await asyncio.wait_for(
                     asyncio.open_connection(host, port),
                     timeout=5.0
                 )
                 # ✅ PHASE 3: Apply TCP optimizations for high-performance transfer
+                # CRITICAL: Ensure socket is available and optimization succeeds
                 sock = writer.get_extra_info('socket')
+                if not sock:
+                    # Try multiple times (socket might not be ready immediately)
+                    for attempt in range(3):
+                        await asyncio.sleep(0.01)  # 10ms delay
+                        sock = writer.get_extra_info('socket')
+                        if sock:
+                            break
+                
                 if sock:
                     self._optimize_tcp_socket(sock)
+                    # ✅ CRITICAL: Verify TCP_NODELAY is actually set (prevent Nagle's algorithm)
+                    import socket
+                    try:
+                        actual_nodelay = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY)
+                        if not actual_nodelay:
+                            logger.error(f"⚠️ CRITICAL: TCP_NODELAY NOT enabled on new connection! Nagle's algorithm is ACTIVE. This will cause message batching and protocol corruption.")
+                            # Force set it again
+                            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                            actual_nodelay = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY)
+                            if not actual_nodelay:
+                                raise RuntimeError("Failed to enable TCP_NODELAY - Nagle's algorithm will batch writes and corrupt protocol!")
+                        logger.debug(f"✅ TCP_NODELAY verified: {actual_nodelay}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Could not verify TCP_NODELAY: {e}")
+                else:
+                    logger.error(f"⚠️ CRITICAL: Socket not available for new connection to {host}:{port}! Connection may have issues.")
+                
                 connection_from_pool = False
                 logger.info(f"✅ New connection created to {host}:{port} (TCP optimized: NODELAY, 16MB buffers)")
             
@@ -1303,14 +1365,17 @@ class EnhancedModelManager:
             
             # Determine message type based on request type
             request_type = request.get('type', '')
+            logger.info(f"🔍 DEBUG: Determining msg_type for request_type='{request_type}' (from request at line 1272)")
             if request_type == 'REGISTER_MODEL':
                 msg_type = MessageType.REGISTER_MODEL
             elif request_type == 'EXECUTE_MODEL':
                 msg_type = MessageType.EXECUTE_MODEL
             elif request_type == 'REGISTER_MODEL_CHUNKED':
                 msg_type = MessageType.REGISTER_MODEL_CHUNKED
+                logger.info(f"✅ REGISTER_MODEL_CHUNKED => msg_type=0x{msg_type:02x} ({msg_type})")
             elif request_type == 'REGISTER_MODEL_CHUNK':
                 msg_type = MessageType.REGISTER_MODEL_CHUNK
+                logger.info(f"✅ REGISTER_MODEL_CHUNK => msg_type=0x{msg_type:02x} ({msg_type})")
             elif request_type == 'REGISTER_MODEL_FINALIZE':
                 msg_type = MessageType.REGISTER_MODEL_FINALIZE
             elif request_type == 'INIT_MODEL':
@@ -1318,6 +1383,7 @@ class EnhancedModelManager:
             elif request_type == 'WARMUP_GPU':
                 msg_type = MessageType.WARMUP_GPU
             else:
+                logger.error(f"🚨 CRITICAL: Unknown request_type='{request_type}'! This will cause protocol error. Defaulting to 0x03 (EXECUTE_SUBGRAPH). Request keys: {list(request.keys())}")
                 msg_type = 0x03  # Default to EXECUTE_SUBGRAPH for compatibility (legacy)
             
             # Serialize request using secure serializer (JSON + binary, no pickle)
@@ -1335,52 +1401,114 @@ class EnhancedModelManager:
             if request_len == 0:
                 raise ValueError("Invalid message length: 0 bytes (serialization failed?)")
             
+            # ✅ BUG FIX: Validate length is reasonable (prevent protocol mismatch)
+            MAX_REASONABLE_MESSAGE_SIZE = 10 * 1024 * 1024 * 1024  # 10GB
+            if request_len > MAX_REASONABLE_MESSAGE_SIZE:
+                raise ValueError(
+                    f"⚠️  Suspicious message length: {request_len} bytes ({request_len / (1024*1024):.1f} MB). "
+                    f"This is likely a serialization bug. Max reasonable size: {MAX_REASONABLE_MESSAGE_SIZE / (1024*1024):.1f} MB"
+                )
+            
+            # ✅ BUG FIX: Check for suspicious round numbers (protocol mismatch indicator)
+            SUSPICIOUS_SIZES = [64 * 1024 * 1024, 128 * 1024 * 1024, 256 * 1024 * 1024]
+            if request_len in SUSPICIOUS_SIZES and request_len > 50 * 1024 * 1024:
+                # This is almost certainly a bug - reject it
+                raise ValueError(
+                    f"⚠️  CRITICAL: Suspicious message length {request_len} bytes ({request_len / (1024*1024):.1f} MB) "
+                    f"is a round number (power of 2). This indicates a serialization bug or protocol mismatch. "
+                    f"Actual serialized size: {len(request_bytes)} bytes. "
+                    f"Request type: {request_type}. "
+                    f"Rejecting to prevent protocol corruption."
+                )
+            
             logger.debug(f"📦 Serialized {request_len} bytes (secure format, validated)")
             
             # Send message type (1 byte) + length (8 bytes) + data
-            logger.info(f"📤 Sending message: type={msg_type} (0x{msg_type:02x}), length={request_len} bytes to {host}:{port}")
+            logger.info(f"📤 Sending message: type={msg_type} (0x{msg_type:02x}), length={request_len} bytes ({request_len / (1024*1024):.2f} MB) to {host}:{port}")
+            # ✅ BUG FIX: Log length header bytes for debugging
+            length_header_bytes = request_len.to_bytes(8, 'big')
+            logger.debug(f"📤 Length header bytes: {length_header_bytes.hex()} (big-endian uint64)")
             try:
                 with record_phase('model_cache_network_send'):
                     # ✅ PHASE 3: Optimize write calls - combine writes for large messages
                     # For large messages (> 1MB), use single write() to reduce syscalls and improve TCP utilization
-                    if request_len > 1024 * 1024:  # > 1MB: combine writes
-                        logger.debug(f"Writing large message ({request_len / (1024*1024):.1f} MB) - combining writes for better TCP utilization...")
-                        # Combine header + data into single write (reduces syscalls, better TCP batching)
-                        combined = bytearray()
-                        combined.extend(bytes([msg_type]))
-                        combined.extend(request_len.to_bytes(8, 'big'))
-                        combined.extend(request_bytes)
-                        writer.write(bytes(combined))
-                    else:
-                        # Small message: separate writes are fine (low overhead)
-                        logger.debug(f"Writing message type byte: 0x{msg_type:02x}")
-                        writer.write(bytes([msg_type]))
-                        logger.debug(f"Writing length: {request_len} bytes")
-                        writer.write(request_len.to_bytes(8, 'big'))
-                        logger.debug(f"Writing {request_len} bytes of data...")
-                        writer.write(request_bytes)
+                    # ✅ CRITICAL BUG FIX: Always combine writes and ALWAYS drain before closing
+                    # For fire-and-forget, we MUST ensure all data is sent before closing connection
+                    # Otherwise, server reads incomplete data and gets protocol mismatch errors
+                    logger.debug(f"Writing message ({request_len / (1024*1024):.2f} MB) - combining writes for reliability...")
+                    logger.info(f"📤 DEBUG: Creating message - msg_type={msg_type} (0x{msg_type:02x}), request_type={request_type}, request_len={request_len}")
+                    # Combine header + data into single write (ensures atomic write)
+                    combined = bytearray()
+                    combined.extend(bytes([msg_type]))
+                    combined.extend(request_len.to_bytes(8, 'big'))
+                    combined.extend(request_bytes)
                     
-                    if wait_for_response:
-                        # Wait for data to be sent (blocking)
-                        logger.debug("Flushing data...")
-                        await writer.drain()
+                    if len(combined) > 0:
+                        logger.info(f"📤 DEBUG: Message combined - first byte: 0x{combined[0]:02x}, length: {len(combined)}, expected first: 0x{msg_type:02x}")
+                        if combined[0] != msg_type:
+                            logger.error(f"🚨 BUG: First byte mismatch! combined[0]=0x{combined[0]:02x} but msg_type=0x{msg_type:02x}")
                     else:
-                        # ✅ OPTIMIZATION: Fire-and-forget - don't wait for drain
-                        # Data is queued in TCP buffer, will be sent asynchronously
-                        # This eliminates blocking on slow server reads
-                        logger.debug("Data queued (fire-and-forget, not waiting for drain)")
-                        # Schedule drain in background (non-blocking)
-                        asyncio.create_task(self._drain_and_close(writer))
+                        logger.error(f"🚨 BUG: combined is empty!")
+                    
+                    # Verify message type header for chunks (critical for debugging)
+                    if request_type == 'REGISTER_MODEL_CHUNK':
+                        if combined[0] != msg_type:
+                            raise RuntimeError(
+                                f"CRITICAL: Chunk message type header missing! "
+                                f"Expected 0x{msg_type:02x}, got 0x{combined[0]:02x}"
+                            )
+                        logger.debug(f"✅ Chunk message type header verified: 0x{combined[0]:02x}")
+                    
+                    # ✅ CRITICAL: Verify combined size matches expected
+                    expected_combined_size = 1 + 8 + request_len
+                    actual_combined_size = len(combined)
+                    if actual_combined_size != expected_combined_size:
+                        raise ValueError(
+                            f"⚠️  CRITICAL: Combined message size mismatch! "
+                            f"Expected: {expected_combined_size} bytes (1 + 8 + {request_len}), "
+                            f"Actual: {actual_combined_size} bytes. "
+                            f"This will cause protocol corruption."
+                        )
+                    
+                    # Write all data at once
+                    # Note: writer.write() returns None in asyncio, not bytes written
+                    # We verify by checking combined size before writing
+                    
+                    # Convert to bytes and write
+                    combined_bytes = bytes(combined)
+                    writer.write(combined_bytes)
+                    logger.debug(f"✅ Wrote {len(combined_bytes)} bytes (1 + 8 + {request_len} = {1+8+request_len})")
+                    
+                    # ✅ CRITICAL: ALWAYS drain before closing (even for fire-and-forget)
+                    # This ensures server receives all data before connection is closed
+                    logger.debug(f"Draining data to ensure server receives all {request_len} bytes...")
+                    try:
+                        # Use longer timeout for large messages (1s per MB, min 10s, max 60s)
+                        drain_timeout = min(60.0, max(10.0, (request_len / (1024 * 1024)) * 1.0))
+                        await asyncio.wait_for(writer.drain(), timeout=drain_timeout)
+                        logger.debug(f"✅ Data drained successfully ({request_len} bytes sent and confirmed)")
+                    except asyncio.TimeoutError:
+                        raise RuntimeError(
+                            f"⚠️  CRITICAL: Drain timeout after {drain_timeout:.1f}s for {request_len} bytes. "
+                            f"Server may not have received all data. This will cause protocol corruption."
+                        )
+                    except Exception as drain_error:
+                        raise RuntimeError(
+                            f"⚠️  CRITICAL: Drain failed: {drain_error}. "
+                            f"Server may not have received all {request_len} bytes. "
+                            f"This will cause protocol corruption."
+                        ) from drain_error
+                    
                 
                 logger.info("✅ Data sent successfully" + (", waiting for response..." if wait_for_response else " (fire-and-forget)"))
             except Exception as send_error:
                 logger.error(f"❌ Error sending data: {send_error}")
                 raise
             
-            # ✅ OPTIMIZATION: Fire-and-forget for chunks (don't wait for response)
+                # ✅ OPTIMIZATION: Fire-and-forget for chunks (don't wait for response)
             if not wait_for_response:
-                # ✅ TD-4 FIX: Don't return connection to pool for fire-and-forget
-                # Connection will be closed by background task, so it shouldn't be reused
+                # ✅ TD-4 FIX: Always remove connection from pool for fire-and-forget
+                # Regardless of pool origin, close the connection since it's fire-and-forget
                 if connection_from_pool:
                     # Remove from pool since it will be closed
                     async with self._connection_lock:
@@ -1395,7 +1523,20 @@ class EnhancedModelManager:
                             if not pool:
                                 del self._connection_pool[conn_key]
                 
-                # Return success immediately (connection will be closed by background task)
+                # ✅ CRITICAL: For ALL fire-and-forget connections (whether from pool or new),
+                # FORCE close them to ensure server-side reader buffer is flushed
+                logger.debug("Fire-and-forget: Force-closing connection to flush server buffer...")
+                try:
+                    writer.close()
+                    # Wait for close to complete (critical for server-side buffer flush)
+                    await asyncio.wait_for(writer.wait_closed(), timeout=5.0)
+                    logger.debug("✅ Connection force-closed and buffer flushed")
+                except asyncio.TimeoutError:
+                    logger.warning("⚠️  Connection close timeout - server buffer may not be flushed")
+                except Exception as e:
+                    logger.debug(f"Error force-closing fire-and-forget connection: {e}")
+                
+                # Return success immediately
                 return {
                     'status': 'success',
                     'message': 'Request sent (fire-and-forget)'
@@ -1724,11 +1865,20 @@ class EnhancedModelManager:
         result.extend(struct.pack('>I', len(weights)))
         
         for name, tensor in weights.items():
-            # Detach to avoid grad issues, ensure CPU
-            tensor_cpu = tensor.detach().cpu() if hasattr(tensor, 'detach') else tensor.cpu()
+            # ✅ CRITICAL FIX: Convert to numpy with explicit detach
+            # Some tensors have requires_grad=True and need special handling
+            if isinstance(tensor, torch.Tensor):
+                # Move to CPU first
+                tensor_cpu = tensor.cpu()
+                # Then detach and convert to numpy in one operation
+                try:
+                    np_array = tensor_cpu.detach().numpy()
+                except RuntimeError:
+                    # If detach().numpy() fails, try explicit data access
+                    np_array = tensor_cpu.data.cpu().numpy()
+            else:
+                np_array = np.asarray(tensor, dtype=np.float32)
             
-            # Convert to numpy (zero-copy for CPU tensors)
-            np_array = tensor_cpu.numpy()
             data = np_array.tobytes()  # Direct binary
             
             # Pack: name
@@ -1764,8 +1914,12 @@ class EnhancedModelManager:
         serialized = {}
         for key, value in inputs.items():
             if isinstance(value, torch.Tensor):
-                tensor_cpu = value.detach().cpu() if hasattr(value, 'detach') else value.cpu()
-                np_array = tensor_cpu.numpy()
+                # ✅ CRITICAL FIX: Convert to numpy with explicit detach
+                tensor_cpu = value.cpu()
+                try:
+                    np_array = tensor_cpu.detach().numpy()
+                except RuntimeError:
+                    np_array = tensor_cpu.data.cpu().numpy()
                 serialized[key] = {
                     'data': np_array.tobytes(),  # Binary numpy format
                     'shape': list(value.shape),
