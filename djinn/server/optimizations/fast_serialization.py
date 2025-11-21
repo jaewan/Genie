@@ -261,6 +261,261 @@ class FastSerializer:
         return bytes(result)
     
     @staticmethod
+    def serialize_execution_request(
+        fingerprint: str,
+        inputs: Dict[str, torch.Tensor],
+        profile_id: Optional[str] = None,
+        version: SerializationVersion = SerializationVersion.V2_BINARY
+    ) -> bytes:
+        """
+        Serialize model execution request with tensors.
+        
+        Args:
+            fingerprint: Model fingerprint
+            inputs: Input tensors (model execution inputs)
+            profile_id: Optional profile ID
+            version: Serialization version
+        
+        Returns:
+            Serialized bytes
+        """
+        # Build metadata
+        metadata = {
+            'type': 'EXECUTE_MODEL',
+            'fingerprint': fingerprint,
+            'profile_id': profile_id,
+            'version': version,
+            'tensor_metadata': []
+        }
+        
+        # Serialize tensors
+        tensor_data = []
+        current_offset = 0
+        
+        for key, tensor in inputs.items():
+            # Skip meta tensors
+            if tensor.device.type == 'meta':
+                logger.warning(f"Skipping meta tensor: {key}")
+                continue
+            
+            # Convert to CPU if needed
+            cpu_tensor = tensor.cpu().detach()
+            
+            # Convert to numpy
+            np_array = cpu_tensor.numpy()
+            blob = np_array.tobytes()
+            
+            # Record metadata
+            metadata['tensor_metadata'].append({
+                'identifier': key,
+                'shape': list(tensor.shape),
+                'dtype': str(tensor.dtype),
+                'offset': current_offset,
+                'size_bytes': len(blob)
+            })
+            
+            tensor_data.append(blob)
+            current_offset += len(blob)
+        
+        # Combine metadata (JSON) + tensor data (binary)
+        metadata_json = json.dumps(metadata).encode('utf-8')
+        
+        # Format:
+        # [4 bytes: metadata length (big-endian)]
+        # [N bytes: metadata JSON]
+        # [tensor blobs concatenated]
+        
+        result = bytearray()
+        result.extend(struct.pack('>I', len(metadata_json)))
+        result.extend(metadata_json)
+        for blob in tensor_data:
+            result.extend(blob)
+        
+        logger.debug(f"Serialized execution request: {len(metadata_json)} bytes metadata + {current_offset} bytes tensors")
+        return bytes(result)
+    
+    @staticmethod
+    def deserialize_execution_request(data: bytes) -> Tuple[Dict[str, Any], Dict[str, torch.Tensor]]:
+        """
+        Deserialize model execution request.
+        
+        Returns:
+            (metadata_dict, tensors_dict)
+        """
+        offset = 0
+        
+        # Read metadata length
+        metadata_len = struct.unpack('>I', data[offset:offset+4])[0]
+        offset += 4
+        
+        # Read metadata
+        metadata_json = data[offset:offset+metadata_len].decode('utf-8')
+        offset += metadata_len
+        metadata = json.loads(metadata_json)
+        
+        # Deserialize tensors
+        tensors = {}
+        for tensor_meta in metadata.get('tensor_metadata', []):
+            identifier = tensor_meta['identifier']
+            shape = tuple(tensor_meta['shape'])
+            dtype_str = tensor_meta['dtype']
+            tensor_offset = tensor_meta['offset']
+            size_bytes = tensor_meta['size_bytes']
+            
+            # Extract tensor data
+            tensor_blob = data[offset + tensor_offset:offset + tensor_offset + size_bytes]
+            
+            # Convert back to tensor
+            np_dtype = TORCH_TO_NUMPY_DTYPE.get(
+                torch.dtype if isinstance(torch.dtype, type) else eval(dtype_str)
+            )
+            np_array = np.frombuffer(tensor_blob, dtype=np_dtype)
+            np_array = np_array.reshape(shape)
+            tensor = torch.from_numpy(np_array.copy())
+            
+            tensors[identifier] = tensor
+        
+        return metadata, tensors
+    
+    @staticmethod
+    def serialize_execution_response(
+        result: Any,
+        profile_id: Optional[str] = None,
+        metrics: Optional[Dict[str, float]] = None,
+        version: SerializationVersion = SerializationVersion.V2_BINARY
+    ) -> bytes:
+        """
+        Serialize model execution response.
+        
+        Args:
+            result: Execution result (dict, tensor, etc.)
+            profile_id: Optional profile ID
+            metrics: Optional execution metrics
+            version: Serialization version
+        
+        Returns:
+            Serialized bytes
+        """
+        # For now, serialize as JSON + binary data
+        # Extract tensors from result if needed
+        
+        metadata = {
+            'type': 'EXECUTE_RESPONSE',
+            'profile_id': profile_id,
+            'version': version,
+            'metrics': metrics or {},
+            'result_type': type(result).__name__,
+            'tensor_metadata': []
+        }
+        
+        # Serialize any tensors in result
+        tensor_data = []
+        current_offset = 0
+        
+        if isinstance(result, torch.Tensor):
+            # Single tensor result
+            cpu_tensor = result.cpu().detach()
+            np_array = cpu_tensor.numpy()
+            blob = np_array.tobytes()
+            
+            metadata['tensor_metadata'].append({
+                'identifier': 'result',
+                'shape': list(result.shape),
+                'dtype': str(result.dtype),
+                'offset': current_offset,
+                'size_bytes': len(blob)
+            })
+            
+            tensor_data.append(blob)
+            current_offset += len(blob)
+        
+        elif isinstance(result, dict):
+            # Dict result (common for HuggingFace models)
+            for key, value in result.items():
+                if isinstance(value, torch.Tensor):
+                    cpu_tensor = value.cpu().detach()
+                    np_array = cpu_tensor.numpy()
+                    blob = np_array.tobytes()
+                    
+                    metadata['tensor_metadata'].append({
+                        'identifier': key,
+                        'shape': list(value.shape),
+                        'dtype': str(value.dtype),
+                        'offset': current_offset,
+                        'size_bytes': len(blob)
+                    })
+                    
+                    tensor_data.append(blob)
+                    current_offset += len(blob)
+                else:
+                    # Store non-tensor values in metadata
+                    metadata[f'_value_{key}'] = str(value)
+        
+        # Combine
+        metadata_json = json.dumps(metadata).encode('utf-8')
+        
+        result = bytearray()
+        result.extend(struct.pack('>I', len(metadata_json)))
+        result.extend(metadata_json)
+        for blob in tensor_data:
+            result.extend(blob)
+        
+        logger.debug(f"Serialized execution response: {len(metadata_json)} bytes metadata + {current_offset} bytes tensors")
+        return bytes(result)
+    
+    @staticmethod
+    def deserialize_execution_response(data: bytes) -> Tuple[Any, Dict[str, Any]]:
+        """
+        Deserialize model execution response.
+        
+        Returns:
+            (result, metadata)
+        """
+        offset = 0
+        
+        # Read metadata length
+        metadata_len = struct.unpack('>I', data[offset:offset+4])[0]
+        offset += 4
+        
+        # Read metadata
+        metadata_json = data[offset:offset+metadata_len].decode('utf-8')
+        offset += metadata_len
+        metadata = json.loads(metadata_json)
+        
+        # Deserialize tensors
+        tensors = {}
+        for tensor_meta in metadata.get('tensor_metadata', []):
+            identifier = tensor_meta['identifier']
+            shape = tuple(tensor_meta['shape'])
+            dtype_str = tensor_meta['dtype']
+            tensor_offset = tensor_meta['offset']
+            size_bytes = tensor_meta['size_bytes']
+            
+            # Extract tensor data
+            tensor_blob = data[offset + tensor_offset:offset + tensor_offset + size_bytes]
+            
+            # Convert back to tensor
+            torch_dtype = eval(dtype_str)
+            np_dtype = TORCH_TO_NUMPY_DTYPE.get(torch_dtype, np.float32)
+            np_array = np.frombuffer(tensor_blob, dtype=np_dtype)
+            np_array = np_array.reshape(shape)
+            tensor = torch.from_numpy(np_array.copy())
+            
+            tensors[identifier] = tensor
+        
+        # Reconstruct result based on type
+        result_type = metadata.get('result_type', 'dict')
+        
+        if result_type == 'Tensor':
+            result = tensors.get('result')
+        elif result_type == 'dict':
+            result = tensors
+        else:
+            result = tensors
+        
+        return result, metadata
+    
+    @staticmethod
     def deserialize_subgraph(data: bytes) -> Tuple[SubgraphMessage, Dict[str, torch.Tensor]]:
         """
         Deserialize binary format to subgraph + tensors.

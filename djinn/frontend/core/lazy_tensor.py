@@ -2424,31 +2424,8 @@ class LazyTensor(torch.Tensor):
                     # Fallback for other types
                     input_data[str(tensor_id)] = tensor
 
-            # ✅ NEW: Try to detect model from input tensors for automatic model cache usage
             detected_model = None
-            try:
-                from ...core.model_tracker import get_model_tracker
-                from ...core.model_fingerprint import ModelFingerprint
-                
-                tracker = get_model_tracker()
-                
-                # Check if any input tensor belongs to a tracked model
-                # Look for model parameters in input_data
-                for tensor_id_str, tensor in input_data.items():
-                    if isinstance(tensor, torch.Tensor):
-                        # Check if this tensor is a parameter of a tracked model
-                        fingerprint = tracker.get_model_fingerprint(tensor)
-                        if fingerprint and tracker.is_registered(fingerprint):
-                            # Found a registered model - try to find the model instance
-                            # We can't directly get the model from fingerprint, but we can
-                            # try model cache execution with the fingerprint
-                            logger.debug(f"🎯 Detected registered model {fingerprint} from input tensor")
-                            # We'll pass fingerprint to coordinator, which can use it
-                            break
-            except Exception as e:
-                logger.debug(f"Model detection failed: {e}, using graph execution")
-                # Fall through to graph execution
-            
+
             # Send entire subgraph for execution
             # ✅ Week 3: Enable differential updates for iterative workloads
             graph_id = f"subgraph_{id(self)}"  # Use tensor ID as graph identifier

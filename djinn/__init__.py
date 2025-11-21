@@ -135,12 +135,10 @@ from .server.optimizations.smart_subgraph_builder import (
 )
 
 # Public API - Phase 2 (Semantic Analysis & Scheduling)
-from .semantic import (
-    SemanticAnalyzer,
-    WorkloadProfile,
-    WorkloadType,
-    PatternRegistry,
-)
+# Note: semantic module was deprecated and removed - imports moved to frontend.semantic
+from .frontend.semantic.analyzer import SemanticAnalyzer
+from .frontend.semantic.workload import WorkloadProfile, WorkloadType
+from .frontend.semantic.pattern_registry import PatternRegistry
 from .scheduler import (
     Scheduler,
     ExecutionSchedule,

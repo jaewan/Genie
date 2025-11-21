@@ -80,7 +80,7 @@ class MaterializationOptimizer:
             # Schedule inputs first (DFS post-order)
             input_ids = []
             for i, inp in enumerate(lt.inputs):
-                from ..frontend.core.lazy_tensor import LazyTensor
+                from ...frontend.core.lazy_tensor import LazyTensor
                 if isinstance(inp, LazyTensor):
                     inp_id = build_schedule_recursive(inp)
                     input_ids.append(inp_id)

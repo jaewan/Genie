@@ -180,7 +180,14 @@ class SecureSerializer:
                         'size': len(value['data']),
                         'shape': value.get('shape', []),
                         'dtype': value.get('dtype', 'float32'),
-                        'format': value.get('format', 'numpy_binary')
+                        'format': value.get('format', 'numpy_binary'),
+                        'keys': [key],
+                        'tensors': {
+                            key: {
+                                'shape': value.get('shape', []),
+                                'dtype': value.get('dtype', 'float32')
+                            }
+                        }
                     }
                 # Legacy dict-based serialization removed - use binary protocol instead
                 # If you see this code path, it means something is still using old dict format
@@ -209,453 +216,244 @@ class SecureSerializer:
         if len(metadata_json) > MAX_METADATA_SIZE:
             raise ValueError(f"Metadata too large: {len(metadata_json)} bytes (max: {MAX_METADATA_SIZE})")
         
+        # Phase 3: Only binary protocol or simple JSON requests supported
+        # No legacy tensor/binary data serialization
+
         # Build message
         msg = bytearray()
         msg.append(PROTOCOL_VERSION)  # 1 byte: version
         msg.extend(struct.pack('>I', len(metadata_json)))  # 4 bytes: metadata length
         msg.extend(metadata_json)  # N bytes: JSON metadata
-        
-        # Serialize tensors and binary data
-        if tensor_data:
-            # Count total tensors and binary data (including dicts of tensors)
-            total_tensors = 0
-            binary_data_count = 0
-            for value in tensor_data.values():
-                if isinstance(value, dict):
-                    total_tensors += len(value)
-                elif isinstance(value, bytes):
-                    binary_data_count += 1
-                else:
-                    total_tensors += 1
-            
-            # Add tensor count (4 bytes) + binary data count (4 bytes)
-            msg.extend(struct.pack('>I', total_tensors))
-            msg.extend(struct.pack('>I', binary_data_count))
-            
-            # First, serialize binary data
-            for key, value in tensor_data.items():
-                if isinstance(value, bytes):
-                    # Binary data - serialize like tensor but without shape/dtype
-                    key_bytes = key.encode('utf-8')
-                    msg.extend(struct.pack('>I', len(key_bytes)))
-                    msg.extend(key_bytes)
-                    msg.extend(struct.pack('>Q', len(value)))  # 8 bytes: size
-                    msg.extend(value)  # N bytes: binary data
-            
-            # Then, serialize tensors
-            for key, value in tensor_data.items():
-                if isinstance(value, bytes):
-                    continue  # Already handled above
-                elif isinstance(value, dict):
-                    # Check if this is a dict of already-serialized weights
-                    is_serialized = any(isinstance(v, dict) and 'data' in v and 'format' in v for v in value.values())
-                    
-                    if is_serialized:
-                        # Dict of serialized weights - serialize each as binary data
-                        for sub_key, serialized_weight in value.items():
-                            full_key = f"{key}.{sub_key}"  # e.g., "chunk_data.layer1.weight"
-                            key_bytes = full_key.encode('utf-8')
-                            msg.extend(struct.pack('>I', len(key_bytes)))
-                            msg.extend(key_bytes)
-                            
-                            # Serialized weight is a dict with 'data', 'shape', 'dtype', 'format'
-                            # Send the binary data directly
-                            weight_data = serialized_weight['data']  # Already bytes
-                            msg.extend(struct.pack('>Q', len(weight_data)))  # 8 bytes: data size
-                            msg.extend(weight_data)  # N bytes: binary data
-                    else:
-                        # Dict of tensors - serialize each tensor with key prefix
-                        for sub_key, tensor in value.items():
-                            full_key = f"{key}.{sub_key}"  # e.g., "uncached_weights.layer1.weight"
-                            key_bytes = full_key.encode('utf-8')
-                            msg.extend(struct.pack('>I', len(key_bytes)))
-                            msg.extend(key_bytes)
-                            
-                            # Convert tensor to numpy and serialize
-                            if tensor.is_cuda:
-                                tensor_cpu = tensor.cpu()
-                            else:
-                                tensor_cpu = tensor
-                            
-                            np_array = tensor_cpu.detach().numpy()
-                            tensor_bytes = np_array.tobytes()
-                            
-                            msg.extend(struct.pack('>Q', len(tensor_bytes)))  # 8 bytes: tensor size
-                            msg.extend(tensor_bytes)  # N bytes: tensor data
-                else:
-                    # Single tensor
-                    key_bytes = key.encode('utf-8')
-                    msg.extend(struct.pack('>I', len(key_bytes)))
-                    msg.extend(key_bytes)
-                    
-                    # Convert tensor to numpy and serialize
-                    if value.is_cuda:
-                        tensor_cpu = value.cpu()
-                    else:
-                        tensor_cpu = value
-                    
-                    np_array = tensor_cpu.detach().numpy()
-                    tensor_bytes = np_array.tobytes()
-                    
-                    msg.extend(struct.pack('>Q', len(tensor_bytes)))  # 8 bytes: tensor size
-                    msg.extend(tensor_bytes)  # N bytes: tensor data
-        else:
-            # No tensors or binary data: [4 bytes: 0] [4 bytes: 0]
-            msg.extend(struct.pack('>I', 0))  # tensor count
-            msg.extend(struct.pack('>I', 0))  # binary data count
-        
+
+        # Append binary data for serialized tensors (e.g., execution inputs)
+        tensor_entries = []
+        for key, entry in metadata.items():
+            if not isinstance(entry, dict):
+                continue
+
+            if entry.get('_is_serialized_dict'):
+                dict_bytes = tensor_data.get(key)
+                if dict_bytes is None:
+                    continue
+                for tensor_key in entry.get('keys', []):
+                    tensor_payload = dict_bytes.get(tensor_key)
+                    if tensor_payload is None:
+                        continue
+                    tensor_entries.append((tensor_key, tensor_payload['data']))
+
+            elif entry.get('_is_binary'):
+                tensor_bytes = tensor_data.get(key)
+                if tensor_bytes is None:
+                    continue
+                # Support multiple keys if provided (rare)
+                keys = entry.get('keys') or [key]
+                for tensor_key in keys:
+                    tensor_entries.append((tensor_key, tensor_bytes))
+
+        if tensor_entries:
+            msg.extend(struct.pack('>I', len(tensor_entries)))
+            for tensor_key, tensor_bytes in tensor_entries:
+                key_bytes = tensor_key.encode('utf-8')
+                msg.extend(struct.pack('>I', len(key_bytes)))
+                msg.extend(key_bytes)
+                msg.extend(struct.pack('>Q', len(tensor_bytes)))
+                msg.extend(tensor_bytes)
+
         return bytes(msg)
-    
+
     @staticmethod
     def deserialize_request(data: bytes) -> Dict[str, Any]:
         """
-        Deserialize request from secure binary format.
-        
+        Deserialize request from secure binary format (Phase 3 simplified).
+
+        Only supports:
+        - Binary protocol (REGISTER_MODEL with weights_binary)
+        - Simple JSON requests (no additional data)
+
         Args:
             data: Serialized request bytes
-            
+
         Returns:
             Deserialized request dictionary
         """
         if len(data) < 5:
             raise ValueError(f"Invalid request data: too short ({len(data)} bytes)")
-        
+
         offset = 0
-        
+
         # Read version
         version = data[offset]
         offset += 1
-        
+
         if version != PROTOCOL_VERSION:
             raise ValueError(f"Unsupported protocol version: {version} (expected: {PROTOCOL_VERSION})")
-        
+
         # Read metadata length
         metadata_len = struct.unpack('>I', data[offset:offset+4])[0]
         offset += 4
-        
+
         if metadata_len > MAX_METADATA_SIZE:
             raise ValueError(f"Metadata too large: {metadata_len} bytes (max: {MAX_METADATA_SIZE})")
-        
+
         # Read metadata
         metadata_json = data[offset:offset+metadata_len].decode('utf-8')
         offset += metadata_len
-        
+
         try:
             metadata = json.loads(metadata_json)
         except json.JSONDecodeError as e:
             raise ValueError(f"Failed to parse metadata JSON: {e}")
-        
-        # ✅ OPTIMIZATION: Check if this is direct binary protocol (new format)
-        # Check for explicit flag first (most reliable)
+
         request_type = metadata.get('type', '')
+
+        # Check for binary protocol
         is_register_model = request_type == 'REGISTER_MODEL'
         is_register_chunk = request_type == 'REGISTER_MODEL_CHUNK'
-        
-        # ✅ BUG FIX: More robust binary protocol detection
-        # Check multiple indicators, not just flag (in case flag is lost during JSON encoding)
+        is_execute_model = request_type == 'EXECUTE_MODEL'
         is_binary_protocol = (
-            metadata.get('_binary_protocol') or  # Explicit flag (most reliable)
-            'weights_binary' in metadata or      # Field presence (fallback)
-            'chunk_data_binary' in metadata      # Field presence (fallback)
+            metadata.get('_binary_protocol') or
+            'weights_binary' in metadata or
+            'chunk_data_binary' in metadata
         ) and (is_register_model or is_register_chunk)
-        
-        # Log protocol detection for debugging
-        logger.debug(
-            f"Protocol detection: _binary_protocol={metadata.get('_binary_protocol')}, "
-            f"type={request_type}, has_weights_binary={'weights_binary' in metadata}, "
-            f"has_chunk_data_binary={'chunk_data_binary' in metadata}, "
-            f"is_binary_protocol={is_binary_protocol}, data_len={len(data)}, offset={offset}"
+
+        tensor_data = {}
+        has_serialized_inputs = (
+            is_execute_model and
+            'inputs' in metadata and
+            isinstance(metadata['inputs'], dict) and
+            metadata['inputs'].get('_is_serialized_dict')
         )
-        
+        binary_entries_required = any(
+            isinstance(entry, dict) and (
+                entry.get('_is_serialized_dict') or entry.get('_is_binary')
+            )
+            for entry in metadata.values()
+        )
+
+        # Parse appended binary data for serialized tensors (inputs or results)
+        if not is_binary_protocol and offset < len(data):
+            if not binary_entries_required:
+                raise ValueError(
+                    f"Unexpected binary payload (no metadata declares serialized tensors). "
+                    f"metadata keys: {list(metadata.keys())}"
+                )
+            tensor_count = struct.unpack('>I', data[offset:offset+4])[0]
+            offset += 4
+            for i in range(tensor_count):
+                if len(data) < offset + 4:
+                    raise ValueError(f"Invalid tensor payload: missing key length for tensor {i}")
+                key_len = struct.unpack('>I', data[offset:offset+4])[0]
+                offset += 4
+
+                if len(data) < offset + key_len:
+                    raise ValueError(f"Invalid tensor payload: missing key for tensor {i}")
+                key = data[offset:offset+key_len].decode('utf-8')
+                offset += key_len
+
+                if len(data) < offset + 8:
+                    raise ValueError(f"Invalid tensor payload: missing data length for tensor {i}")
+                data_len = struct.unpack('>Q', data[offset:offset+8])[0]
+                offset += 8
+
+                if len(data) < offset + data_len:
+                    raise ValueError(f"Invalid tensor payload: missing data for tensor {i}")
+                tensor_bytes = data[offset:offset+data_len]
+                offset += data_len
+
+                tensor_data[key] = tensor_bytes
+
         if is_binary_protocol:
-            # Direct binary protocol - read architecture_data first, then binary_data
+            # Binary protocol: read architecture_data size, then architecture_data, then binary data
             if len(data) < offset + 8:
                 raise ValueError("Invalid binary protocol data: missing architecture_data size")
-            
+
             arch_data_size = struct.unpack('>Q', data[offset:offset+8])[0]
             offset += 8
-            
-            # ✅ BUG FIX: Validate arch_data_size to catch protocol mismatches
-            # If arch_data_size is suspiciously large, it might be message length being read incorrectly
-            MAX_REASONABLE_ARCH_SIZE = 100 * 1024 * 1024  # 100MB max for architecture data
-            if arch_data_size > MAX_REASONABLE_ARCH_SIZE:
-                raise ValueError(
-                    f"⚠️  Suspicious arch_data_size: {arch_data_size} bytes ({arch_data_size / (1024*1024):.1f} MB). "
-                    f"This is likely a protocol mismatch - arch_data_size should be < 100MB. "
-                    f"Check if binary protocol detection is working correctly."
-                )
-            
+
             architecture_data = None
             if arch_data_size > 0:
                 if len(data) < offset + arch_data_size:
-                    raise ValueError(f"Invalid binary protocol data: missing architecture_data (expected {arch_data_size} bytes)")
+                    raise ValueError(f"Invalid binary protocol data: missing architecture_data ({arch_data_size} bytes)")
                 architecture_data = data[offset:offset+arch_data_size]
                 offset += arch_data_size
-            
-            # Remaining data is binary (weights_binary or chunk_data_binary)
+
+            # Remaining data is binary
             remaining_data = data[offset:]
             request = metadata.copy()
-            
-            # Determine which field to use based on request type
+
+            # Set the appropriate binary field based on request type
             if is_register_model:
                 request['weights_binary'] = remaining_data
             elif is_register_chunk:
                 request['chunk_data_binary'] = remaining_data
-            
+
             if architecture_data:
                 request['architecture_data'] = architecture_data
-            
-            # ✅ TD-6 FIX: Validate that binary protocol detection worked correctly
-            # Verify we have the expected fields
-            if is_register_model and 'weights_binary' not in request:
-                raise ValueError(
-                    f"Binary protocol detection failed: expected 'weights_binary' but got keys: {list(request.keys())}"
-                )
-            if is_register_chunk and 'chunk_data_binary' not in request:
-                raise ValueError(
-                    f"Binary protocol detection failed: expected 'chunk_data_binary' but got keys: {list(request.keys())}"
-                )
-            
-            logger.debug(f"✅ Detected direct binary protocol (explicit flag, type={request_type}, arch_data={len(architecture_data) if architecture_data else 0} bytes, validated)")
+
             return request
-        
-        # Fallback: Try to detect by pattern (for backward compatibility)
-        remaining_data = data[offset:]
-        if len(remaining_data) > 0 and 'type' in metadata and metadata.get('type') == 'REGISTER_MODEL':
-            # Check if remaining data looks like binary weights (starts with num_weights uint32)
-            if len(remaining_data) >= 4:
-                # Try to detect: first 4 bytes should be reasonable num_weights (< 10000)
-                try:
-                    num_weights = struct.unpack('>I', remaining_data[0:4])[0]
-                    if 0 < num_weights < 10000:  # Reasonable range for model weights
-                        # Additional check: second 4 bytes should be small (name length, not tensor count)
-                        if len(remaining_data) >= 8:
-                            second_word = struct.unpack('>I', remaining_data[4:8])[0]
-                            if second_word < 1000:  # Small value = likely name length in binary format
-                                # This is likely direct binary format
-                                request = metadata.copy()
-                                request['weights_binary'] = remaining_data
-                                logger.debug(f"✅ Detected direct binary protocol (pattern): {num_weights} weights")
-                                return request
-                except:
-                    pass  # Not binary format, continue with legacy path
-        
-        # Legacy path: Read tensor count and binary data count
-        if len(data) < offset + 8:
-            raise ValueError("Invalid request data: missing tensor/binary count")
-        
-        tensor_count = struct.unpack('>I', data[offset:offset+4])[0]
-        offset += 4
-        binary_data_count = struct.unpack('>I', data[offset:offset+4])[0]
-        offset += 4
-        
-        # Deserialize tensors and bytes
-        request = metadata.copy()
-        
-        # First, handle small bytes data (base64 encoded)
-        for key, value in request.items():
-            if isinstance(value, dict) and value.get('_is_bytes'):
-                # Restore bytes from base64
-                import base64
-                request[key] = base64.b64decode(value['data'])
-            elif isinstance(value, dict) and value.get('_is_tensor_dict'):
-                # Initialize dict for tensor dict
-                request[key] = {}
-            elif isinstance(value, dict) and value.get('_is_serialized_dict'):
-                # Initialize dict for serialized weight dict
-                request[key] = {}
-            elif isinstance(value, dict) and value.get('_is_binary'):
-                # Large binary data - will be deserialized below
-                # Store metadata for reconstruction (shape, dtype, format)
-                # Don't overwrite - keep the metadata dict
-                pass
-        
-        # Deserialize binary data first
-        for _ in range(binary_data_count):
-            if len(data) < offset + 4:
-                raise ValueError("Invalid request data: missing binary key length")
-            
-            # Read binary key
-            key_len = struct.unpack('>I', data[offset:offset+4])[0]
-            offset += 4
-            
-            if len(data) < offset + key_len:
-                raise ValueError("Invalid request data: missing binary key")
-            
-            key = data[offset:offset+key_len].decode('utf-8')
-            offset += key_len
-            
-            # Read binary size
-            if len(data) < offset + 8:
-                raise ValueError("Invalid request data: missing binary size")
-            
-            binary_size = struct.unpack('>Q', data[offset:offset+8])[0]
-            offset += 8
-            
-            # Read binary data
-            if len(data) < offset + binary_size:
-                raise ValueError(f"Invalid request data: missing binary data (expected {binary_size} bytes)")
-            
-            binary_data = data[offset:offset+binary_size]
-            offset += binary_size
-            
-            # Store binary data
-            # ✅ FIX: If this is a serialized tensor (has metadata), reconstruct dict
-            if key in request and isinstance(request[key], dict) and request[key].get('_is_binary'):
-                # Reconstruct serialized tensor dict (from _serialize_tensor)
-                metadata = request[key]
-                request[key] = {
-                    'data': binary_data,
-                    'shape': metadata.get('shape', []),
-                    'dtype': metadata.get('dtype', 'float32'),
-                    'format': metadata.get('format', 'numpy_binary')
-                }
-            else:
-                # Plain binary data
-                request[key] = binary_data
-        
-        # Then, deserialize tensors
-        for _ in range(tensor_count):
-            if len(data) < offset + 4:
-                raise ValueError("Invalid request data: missing tensor key length")
-            
-            # Read tensor key
-            key_len = struct.unpack('>I', data[offset:offset+4])[0]
-            offset += 4
-            
-            if len(data) < offset + key_len:
-                raise ValueError("Invalid request data: missing tensor key")
-            
-            full_key = data[offset:offset+key_len].decode('utf-8')
-            offset += key_len
-            
-            # Check if this is a nested key (e.g., "uncached_weights.layer1.weight")
-            if '.' in full_key:
-                # Split into parent key and sub key
-                parts = full_key.split('.', 1)
-                parent_key = parts[0]
-                sub_key = parts[1]
-                
-                # Ensure parent dict exists
-                if parent_key not in request:
-                    request[parent_key] = {}
-                elif not isinstance(request[parent_key], dict):
-                    request[parent_key] = {}
-            else:
-                parent_key = full_key
-                sub_key = None
-            
-            # Read tensor size
-            if len(data) < offset + 8:
-                raise ValueError("Invalid request data: missing tensor size")
-            
-            tensor_size = struct.unpack('>Q', data[offset:offset+8])[0]
-            offset += 8
-            
-            # Read tensor data
-            if len(data) < offset + tensor_size:
-                raise ValueError(f"Invalid request data: missing tensor data (expected {tensor_size} bytes)")
-            
-            tensor_bytes = data[offset:offset+tensor_size]
-            offset += tensor_size
-            
-            # ✅ BUG FIX: Handle nested keys (e.g., "inputs.input_ids" or "chunk_data.layer1.weight")
-            # For nested keys, look up metadata from parent key's tensor metadata
-            if sub_key:
-                # Nested tensor - get metadata from parent's tensor dict
-                parent_metadata = metadata.get(parent_key, {})
-                if isinstance(parent_metadata, dict) and parent_metadata.get('_is_serialized_dict'):
-                    # ✅ BUG FIX: Handle _is_serialized_dict (execution inputs or chunked weights)
-                    tensor_metadata = parent_metadata.get('tensors', {})
-                    tensor_info = tensor_metadata.get(sub_key, {})
-                elif isinstance(parent_metadata, dict) and parent_metadata.get('_is_tensor_dict'):
-                    # Legacy _is_tensor_dict handling
-                    tensor_metadata = parent_metadata.get('tensors', {})
-                    tensor_info = tensor_metadata.get(sub_key, {})
-                else:
-                    tensor_info = {}
-            else:
-                # Simple tensor - get metadata directly
-                tensor_info = metadata.get(full_key, {})
-            
-            shape = tuple(tensor_info.get('shape', []))
-            dtype_str = tensor_info.get('dtype', 'torch.float32')
-            
-            # If shape is empty, try to infer from tensor size
-            if not shape and tensor_size > 0:
-                # This shouldn't happen, but handle gracefully
-                logger.warning(f"No shape metadata for tensor {full_key}, inferring from size")
-                # Can't infer shape without dtype, so use default
-                shape = (tensor_size // 4,)  # Assume float32 as fallback
-            
-            # Parse dtype
-            if dtype_str.startswith('torch.'):
-                dtype_str = dtype_str[6:]
-            
-            dtype_map = {
-                'float32': torch.float32,
-                'float16': torch.float16,
-                'float64': torch.float64,
-                'int64': torch.int64,
-                'int32': torch.int32,
-                'int8': torch.int8,
-                'uint8': torch.uint8,
-                'bool': torch.bool,
-            }
-            torch_dtype = dtype_map.get(dtype_str, torch.float32)
-            
-            # Convert bytes to numpy array
-            numpy_dtype_map = {
-                torch.float32: np.float32,
-                torch.float16: np.float16,
-                torch.float64: np.float64,
-                torch.int64: np.int64,
-                torch.int32: np.int32,
-                torch.int8: np.int8,
-                torch.uint8: np.uint8,
-                torch.bool: np.bool_,
-            }
-            numpy_dtype = numpy_dtype_map.get(torch_dtype, np.float32)
-            
-            np_array = np.frombuffer(tensor_bytes, dtype=numpy_dtype)
-            np_array = np_array.reshape(shape)
-            
-            # ✅ BUG FIX: Store as serialized tensor dict for _is_serialized_dict, raw tensor otherwise
-            # For execution inputs (from _serialize_inputs), we need to keep the dict format
-            # so deserialize_tensor_from_dict can handle it correctly
-            if sub_key:
-                # Nested key - store in parent dict
-                parent_metadata = metadata.get(parent_key, {})
-                if isinstance(parent_metadata, dict) and parent_metadata.get('_is_serialized_dict'):
-                    # ✅ BUG FIX: Store as serialized tensor dict (execution inputs or chunked weights)
-                    # This matches the format expected by deserialize_tensor_from_dict
-                    request[parent_key][sub_key] = {
-                        'data': tensor_bytes,  # ✅ Keep as bytes, not string!
-                        'shape': shape,
-                        'dtype': dtype_str,
-                        'format': 'numpy_binary'
+
+        elif has_serialized_inputs:
+            # EXECUTE_MODEL with serialized inputs - extract tensor data from binary section
+            logger.debug(f"Deserializing EXECUTE_MODEL request with serialized inputs")
+
+            # Reconstruct the inputs dict with deserialized tensors
+            inputs_metadata = metadata['inputs']
+            reconstructed_inputs = {}
+            tensor_keys = inputs_metadata['keys']
+            tensor_metadata = inputs_metadata['tensors']
+
+            for key in tensor_keys:
+                if key in tensor_data:
+                    reconstructed_inputs[key] = {
+                        'data': tensor_data[key],
+                        'shape': tensor_metadata[key]['shape'],
+                        'dtype': tensor_metadata[key]['dtype'],
+                        'format': 'numpy_binary'  # Assume numpy_binary format
                     }
-                else:
-                    # Legacy path - store as raw tensor
-                    tensor = torch.from_numpy(np_array.copy())
-                    request[parent_key][sub_key] = tensor
-            else:
-                # Simple key - store directly
-                # Remove tensor metadata marker
-                if full_key in request and isinstance(request[full_key], dict) and request[full_key].get('_is_tensor'):
-                    del request[full_key]
-                tensor = torch.from_numpy(np_array.copy())
-                request[full_key] = tensor
-        
-        # Clean up metadata markers
-        for key in list(request.keys()):
-            if isinstance(request[key], dict):
-                if request[key].get('_is_tensor') or request[key].get('_is_tensor_dict'):
-                    # Already handled, but clean up if needed
-                    pass
-        
+
+            request = metadata.copy()
+            request['inputs'] = reconstructed_inputs
+        else:
+            request = metadata.copy()
+            if offset < len(data):
+                if not binary_entries_required:
+                    raise ValueError(
+                        f"Unsupported request format. Only binary protocol is supported in Phase 3. "
+                        f"Legacy dict-based and pickle formats have been removed. "
+                        f"Request type: {request_type}, "
+                        f"metadata keys: {list(metadata.keys())}, "
+                        f"unexpected data: {len(data) - offset} bytes after JSON"
+                    )
+
+        # Reconstruct any generic serialized entries (e.g., results)
+        if tensor_data:
+            for key, entry in metadata.items():
+                if not isinstance(entry, dict):
+                    continue
+                if entry.get('_is_binary') and key in tensor_data:
+                    request[key] = {
+                        'data': tensor_data[key],
+                        'shape': entry.get('shape', entry.get('tensors', {}).get(key, {}).get('shape', [])),
+                        'dtype': entry.get('dtype', entry.get('tensors', {}).get(key, {}).get('dtype', 'float32')),
+                        'format': entry.get('format', 'numpy_binary')
+                    }
+                elif entry.get('_is_serialized_dict') and key not in ('inputs',):
+                    sub_entries = {}
+                    tensor_keys = entry.get('keys', [])
+                    tensor_metadata = entry.get('tensors', {})
+                    for tensor_key in tensor_keys:
+                        if tensor_key in tensor_data:
+                            sub_entries[tensor_key] = {
+                                'data': tensor_data[tensor_key],
+                                'shape': tensor_metadata.get(tensor_key, {}).get('shape', []),
+                                'dtype': tensor_metadata.get(tensor_key, {}).get('dtype', 'float32'),
+                                'format': entry.get('format', 'numpy_binary')
+                            }
+                    if sub_entries:
+                        request[key] = sub_entries
+
         return request
-    
+
     @staticmethod
     def serialize_response(response: Dict[str, Any]) -> bytes:
         """Serialize response (same format as request)."""

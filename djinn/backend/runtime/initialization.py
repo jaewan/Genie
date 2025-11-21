@@ -346,6 +346,7 @@ async def _genie_init_async_impl(
                     tcp_fallback=True,
                     control_port=control_port,  # Use free port or configured port
                     data_port=data_port,        # Use free port or configured port
+                    server_address=server_address  # Server address for RPC
                 )
 
                 coordinator = DjinnCoordinator(coordinator_config)

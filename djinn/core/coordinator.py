@@ -68,6 +68,7 @@ class CoordinatorConfig:
 
     # Server configuration
     is_server: bool = False  # True if this coordinator is used by a server
+    server_address: Optional[str] = None  # Server address for client connections (host:port)
 
     def get_network_config(self):
         """Get network configuration, using centralized config as fallback."""
@@ -130,6 +131,14 @@ class DjinnCoordinator:
         # ✅ ADD: Result management (refactored to separate module)
         from .coordinator_result import ResultManager
         self._result_manager = ResultManager()
+        
+        # ✅ ADD: Batching configuration
+        self.batch_window_ms = 10  # Wait up to 10ms to collect batch
+        self.batch_size = 4  # Max batch size
+        self._pending_batch = []  # List of pending requests
+        self._batch_timer = None  # Timer for batch window
+        self._batch_lock = asyncio.Lock()  # Thread-safe batch management
+        self._enable_async_mode = True  # Enable async execution on server
 
         # ✅ ADD: Scheduler integration (CRITICAL for semantic awareness)
         self.scheduler = Scheduler()
@@ -733,69 +742,33 @@ class DjinnCoordinator:
         # ✅ NEW: Try model cache first if model is provided
         if model is not None:
             try:
-                from .enhanced_model_manager import EnhancedModelManager
-                from .model_tracker import get_model_tracker
-                
-                manager = EnhancedModelManager(coordinator=self)
-                tracker = get_model_tracker()
-                
-                # Compute fingerprint
+                from .enhanced_model_manager import EnhancedModelManager, ModelNotRegisteredError
                 from .model_fingerprint import ModelFingerprint
-                fingerprint = ModelFingerprint.compute(model)
-                
-                # Track model if not already tracked
-                if not tracker.is_registered(fingerprint):
-                    tracker.track_model(model, fingerprint)
-                
-                # Try model cache execution
-                if manager.use_model_cache:
-                    try:
-                        # Convert input_data to dict format expected by execute_model
-                        # Assume first input is the main input
-                        inputs_dict = {}
-                        if len(input_data) == 1:
-                            # Single input - use 'x' as key
-                            inputs_dict['x'] = list(input_data.values())[0]
-                        else:
-                            # Multiple inputs - use tensor_id as key
-                            inputs_dict = {k: v for k, v in input_data.items()}
-                        
-                        logger.info(f"🎯 Attempting model cache execution for {fingerprint}")
-                        result = await manager.execute_model(model, inputs_dict)
-                        logger.info(f"✅ Model cache execution successful: {result.shape}")
-                        return result
-                    except Exception as e:
-                        logger.debug(f"Model cache execution failed: {e}, falling back to graph execution")
-                        # Fall through to graph execution
+
+                logging_fingerprint = ModelFingerprint.compute(model)
+                manager = EnhancedModelManager(coordinator=self)
+
+                inputs_dict: Dict[str, torch.Tensor] = {}
+                if len(input_data) == 1:
+                    inputs_dict['x'] = list(input_data.values())[0]
+                else:
+                    inputs_dict = {k: v for k, v in input_data.items()}
+
+                try:
+                    logger.info(f"🎯 Attempting model cache execution for {logging_fingerprint}")
+                    result = await manager.execute_model(model, inputs_dict)
+                    logger.info(f"✅ Model cache execution successful: {result.shape}")
+                    return result
+                except ModelNotRegisteredError:
+                    logger.debug(
+                        f"Model {logging_fingerprint} not registered, "
+                        "falling back to graph subgraph execution"
+                    )
+                except Exception as e:
+                    logger.debug(f"Model cache execution failed: {e}, falling back to graph execution")
             except Exception as e:
                 logger.debug(f"Model cache integration error: {e}, using graph execution")
-                # Fall through to graph execution
         
-        # ✅ NEW: Also try to detect model from input tensors (automatic detection)
-        try:
-            from .model_tracker import get_model_tracker
-            tracker = get_model_tracker()
-            
-            # Check if any input tensor belongs to a registered model
-            detected_fingerprint = None
-            for tensor_id_str, tensor in input_data.items():
-                if isinstance(tensor, torch.Tensor):
-                    fingerprint = tracker.get_model_fingerprint(tensor)
-                    if fingerprint and tracker.is_registered(fingerprint):
-                        detected_fingerprint = fingerprint
-                        logger.debug(f"🎯 Auto-detected registered model {fingerprint} from input tensor")
-                        break
-            
-            # If we detected a model but don't have the instance, we can't use model cache
-            # (we need the model instance to call execute_model)
-            # This is a limitation - we'd need to store model instances in the tracker
-            # For now, we'll just log and use graph execution
-            if detected_fingerprint:
-                logger.debug(f"⚠️  Detected model {detected_fingerprint} but no model instance available, using graph execution")
-        except Exception as e:
-            logger.debug(f"Auto model detection failed: {e}")
-            # Fall through to graph execution
-
         logger.info(f"🚀 Subgraph execution: {len(subgraph.get('operations', []))} ops, "
                    f"{len(input_data)} inputs → {target}")
 
@@ -1389,6 +1362,263 @@ class DjinnCoordinator:
         from .coordinator_transport import MetadataExtractor
         extractor = MetadataExtractor(self.scheduler)
         return extractor._infer_phase(tensor)
+    
+    async def _send_tcp_request(self, server_address: str, msg_type: int, data: bytes) -> bytes:
+        """
+        Send TCP request to server using message-type protocol.
+        
+        Args:
+            server_address: Server address (host:port)
+            msg_type: Message type byte (from MessageType enum)
+            data: Serialized request data
+            
+        Returns:
+            Response data bytes
+        """
+        host, port = server_address.split(':')
+        port = int(port)
+        
+        # Open connection
+        reader, writer = await asyncio.open_connection(host, port)
+        
+        try:
+            import struct
+            
+            # Send message type (1 byte)
+            writer.write(struct.pack('B', msg_type))
+            
+            # Send data length (8 bytes, big-endian)
+            length = len(data)
+            writer.write(struct.pack('>Q', length))
+            
+            # Send data
+            writer.write(data)
+            await writer.drain()
+            
+            logger.debug(f"Sent {length} bytes to {server_address}")
+            
+            # Read response message type (1 byte) - server echoes it back
+            response_msg_type_data = await reader.readexactly(1)
+            response_msg_type = struct.unpack('B', response_msg_type_data)[0]
+            logger.debug(f"Response message type: 0x{response_msg_type:02x}")
+            
+            # Verify it matches request
+            if response_msg_type != msg_type:
+                logger.warning(f"Response message type mismatch: sent 0x{msg_type:02x}, got 0x{response_msg_type:02x}")
+            
+            # Read response length (8 bytes)
+            length_data = await reader.readexactly(8)
+            response_length = struct.unpack('>Q', length_data)[0]
+            
+            logger.debug(f"Expecting {response_length} bytes response")
+            
+            # Sanity check
+            if response_length > 1024 * 1024 * 1024:  # > 1GB is suspicious
+                logger.error(f"❌ Suspicious response length: {response_length} bytes")
+                raise RuntimeError(f"Invalid response length: {response_length}")
+            
+            # Read response data
+            response_data = await reader.readexactly(response_length)
+            logger.debug(f"Read {len(response_data)} bytes response")
+            
+            return response_data
+            
+        finally:
+            writer.close()
+            await writer.wait_closed()
+    
+    async def register_remote_model(self, fingerprint: str, model, model_id: Optional[str] = None):
+        """
+        Register model with remote server.
+        
+        Sends model to server for caching in VMU.
+        Server will load model into GPU memory and keep it ready for execution.
+        
+        Args:
+            fingerprint: Model fingerprint
+            model: PyTorch model
+            model_id: Optional model identifier
+        """
+        logger.info(f"Registering model {fingerprint[:8]} with remote server...")
+        
+        from ..server.transport.protocol import MessageType
+        from ..core.secure_serializer import SecureSerializer
+        
+        # Prepare request with serializable data
+        # Extract model config and architecture info
+        model_class = f"{model.__class__.__module__}.{model.__class__.__name__}"
+        model_config = getattr(model, 'config', None)
+        
+        request = {
+            'fingerprint': fingerprint,
+            'model_id': model_id,
+            'model_class': model_class,
+            'config': model_config.to_dict() if hasattr(model_config, 'to_dict') else None
+        }
+        
+        server_address = self.config.server_address or 'localhost:5556'
+        
+        try:
+            # Use pickle (keep working version while FastSerializer issues are debugged)
+            import pickle
+            serialized = pickle.dumps(request)
+            
+            # Send with REGISTER_MODEL message type
+            response_data = await self._send_tcp_request(
+                server_address, 
+                MessageType.REGISTER_MODEL, 
+                serialized
+            )
+            
+            # Deserialize response
+            response = pickle.loads(response_data)
+            
+            if response.get('status') == 'success':
+                logger.info(f"✅ Model {fingerprint[:8]} registered on server")
+            else:
+                logger.warning(f"Server registration failed: {response.get('message', 'Unknown error')}")
+        except Exception as e:
+            logger.warning(f"Failed to register with server: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+    
+    async def execute_remote_batch(self, batch_requests: List[Dict]) -> List[Any]:
+        """Execute a batch of model requests remotely (higher throughput)."""
+        from ..server.transport.protocol import MessageType
+        import pickle
+        
+        server_address = self.config.server_address or 'localhost:5556'
+        
+        try:
+            request = {'batch': batch_requests}
+            serialized = pickle.dumps(request)
+            
+            logger.debug(f"Sending EXECUTE_BATCH request for {len(batch_requests)} items")
+            response_data = await self._send_tcp_request(
+                server_address,
+                MessageType.EXECUTE_BATCH,
+                serialized
+            )
+            
+            response = pickle.loads(response_data)
+            
+            if response.get('status') == 'success':
+                results = response.get('batch_results', [])
+                logger.info(f"✅ Batch execution successful: {len(results)} results")
+                return results
+            else:
+                error = response.get('message', 'Unknown error')
+                raise RuntimeError(f"Batch execution failed: {error}")
+        
+        except Exception as e:
+            logger.warning(f"Batch execution failed: {e}")
+            raise RuntimeError(f"Remote batch execution failed: {e}")
+    
+    async def execute_remote_model(self, fingerprint: str, inputs: Dict[str, torch.Tensor], 
+                                   profile_id: Optional[str] = None):
+        """
+        Execute registered model on remote server via RPC.
+        
+        Args:
+            fingerprint: Model fingerprint
+            inputs: Input tensors
+            profile_id: Optional profile ID
+            
+        Returns:
+            Output tensor
+        """
+        logger.info(f"Executing model {fingerprint[:8]} on remote server...")
+        
+        from ..server.transport.protocol import MessageType
+        from ..core.secure_serializer import SecureSerializer
+        
+        # Prepare request
+        request = {
+            'fingerprint': fingerprint,
+            'inputs': inputs,
+            'profile_id': profile_id
+        }
+        
+        # Get server address
+        server_address = self.config.server_address or 'localhost:5556'
+        
+        try:
+            # Use pickle for now (FastSerializer needs more integration work)
+            import pickle
+            serialized = pickle.dumps({
+                'fingerprint': fingerprint,
+                'inputs': inputs,
+                'profile_id': profile_id
+            })
+            
+            # Send with EXECUTE_MODEL message type
+            logger.debug(f"Sending EXECUTE_MODEL request to {server_address}")
+            response_data = await self._send_tcp_request(
+                server_address,
+                MessageType.EXECUTE_MODEL,
+                serialized
+            )
+            
+            # Deserialize response
+            response = pickle.loads(response_data)
+            
+            if response.get('status') == 'success':
+                result = response.get('result')
+                metrics = response.get('metrics', {})
+                logger.info(f"✅ Remote execution successful: {metrics.get('duration_ms', 0):.2f}ms")
+                return result
+            
+            elif response.get('status') == 'queued':
+                # Task queued on server, poll for result
+                task_id = response.get('task_id', '')
+                logger.info(f"⏳ Task {task_id} queued, polling for result...")
+                
+                # Poll for result (max 60 attempts, 1s timeout = 60s total)
+                for attempt in range(60):
+                    await asyncio.sleep(1)  # Wait 1 second between polls
+                    
+                    # Query result
+                    query_request = {'task_id': task_id}
+                    query_serialized = pickle.dumps(query_request)
+                    
+                    try:
+                        query_response_data = await self._send_tcp_request(
+                            server_address,
+                            0x0C,  # QUERY_RESULT message type
+                            query_serialized
+                        )
+                        query_response = pickle.loads(query_response_data)
+                        
+                        if query_response.get('status') == 'success':
+                            result = query_response.get('result')
+                            logger.info(f"✅ Result retrieved after {attempt + 1} attempts")
+                            return result
+                        
+                        elif query_response.get('status') == 'pending':
+                            logger.debug(f"🔄 Task still pending (attempt {attempt + 1}/60)...")
+                            continue
+                        
+                        else:
+                            error = query_response.get('message', 'Unknown error')
+                            raise RuntimeError(f"Query failed: {error}")
+                    
+                    except Exception as e:
+                        logger.warning(f"Query attempt {attempt + 1} failed: {e}")
+                        if attempt == 59:  # Last attempt
+                            raise
+                        continue
+                
+                raise RuntimeError("Task polling timeout after 60 seconds")
+            
+            else:
+                error = response.get('message', 'Unknown error')
+                raise RuntimeError(f"Remote execution failed: {error}")
+                
+        except Exception as e:
+            logger.error(f"RPC execution failed: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            raise
     
     async def stop(self):
         """Shutdown coordinator."""

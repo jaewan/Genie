@@ -71,6 +71,7 @@ class RemoteAcceleratorSupport:
 
         # Patch Module.to()
         def patched_to(self, *args, **kwargs):
+            print(f"PATCHED_TO called on {self.__class__.__name__} with args={args} kwargs={kwargs}")
             # Check if this is a remote_accelerator request before parsing
             device_arg = None
             if args and isinstance(args[0], (str, torch.device)):
@@ -171,20 +172,14 @@ class RemoteAcceleratorSupport:
                     buffer_count = len(lazy_buffers)
                     logger.info(f"Converted {param_count} parameters and {buffer_count} buffers to LazyTensors")
 
-                    # ✅ NEW: Auto-register model on device transfer (smart registration)
-                    # We have the model object here, so we know the boundary and user intent
-                    try:
-                        self._auto_register_on_device_transfer()
-                    except Exception as e:
-                        # Don't fail device transfer if auto-registration fails
-                        logger.debug(f"Auto-registration on device transfer failed: {e}")
-
                     # Return self (device conversion complete)
                     return self
 
             # For all other devices, use original implementation
             # Handle the case where PyTorch might reject our custom device string
             try:
+                if 'cuda' in device_str:
+                    logger.info(f"Delegating {self.__class__.__name__}.to({device_str}) to original implementation")
                 return cls._original_module_to(self, *args, **kwargs)
             except RuntimeError as e:
                 if 'remote_accelerator' in str(e):
@@ -196,64 +191,6 @@ class RemoteAcceleratorSupport:
                     # Re-raise for actual errors
                     raise
 
-        # Add auto-registration method to nn.Module
-        def _auto_register_on_device_transfer(self):
-            """Auto-register model when moved to remote device (if safe)."""
-            try:
-                import asyncio
-                import threading
-                from djinn.core.model_fingerprint import ModelFingerprint
-                from djinn.core.enhanced_model_manager import EnhancedModelManager
-                from djinn.core.auto_registration_policy import AutoRegistrationPolicy
-                
-                # Compute fingerprint
-                fingerprint = ModelFingerprint.compute(self)
-                
-                # Check if should auto-register (size/memory checks, but no usage threshold)
-                # Device transfer = explicit user intent, so we can register immediately
-                policy = AutoRegistrationPolicy(
-                    usage_threshold=1,  # No usage requirement (device transfer = intent)
-                    max_size_mb=500,    # Size limit still applies
-                    require_memory_check=True,
-                    enabled=True
-                )
-                
-                if policy.should_auto_register(fingerprint, self, usage_count=1):
-                    logger.info(
-                        f"🚀 Auto-registering model {fingerprint[:16]}... "
-                        f"on device transfer (size/memory checks passed)"
-                    )
-                    
-                    # Start background registration (non-blocking)
-                    # Device transfer is synchronous, so we need to handle async registration
-                    def register_in_background():
-                        """Register model in background thread with its own event loop."""
-                        try:
-                            # Create new event loop for this thread
-                            new_loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(new_loop)
-                            
-                            try:
-                                # Create manager and register
-                                manager = EnhancedModelManager()
-                                new_loop.run_until_complete(
-                                    manager._register_model_async(self, fingerprint)
-                                )
-                            finally:
-                                new_loop.close()
-                        except Exception as e:
-                            logger.debug(f"Background registration failed: {e}")
-                    
-                    # Start registration in background thread (non-blocking)
-                    thread = threading.Thread(target=register_in_background, daemon=True)
-                    thread.start()
-            except Exception as e:
-                logger.debug(f"Auto-registration on device transfer failed: {e}")
-                # Don't raise - device transfer should succeed even if registration fails
-        
-        # Attach method to nn.Module
-        nn.Module._auto_register_on_device_transfer = _auto_register_on_device_transfer
-        
         # Apply the patch
         nn.Module.to = patched_to
         cls._initialized = True

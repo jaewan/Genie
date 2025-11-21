@@ -16,7 +16,7 @@ import json
 import numpy as np
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 import torch
 
@@ -90,6 +90,11 @@ class DjinnServer:
             credit_recovery_rate=1.0  # 1 credit per second recovery
         )
         
+        # Task registry for concurrent request handling
+        self._pending_tasks: Dict[str, asyncio.Task] = {}  # task_id -> Task
+        self._task_results: Dict[str, Any] = {}  # task_id -> result
+        self._task_lock = asyncio.Lock()
+        
         # : Server health reporter for fleet coordination
         self._health_reporter = None
 
@@ -139,11 +144,32 @@ class DjinnServer:
                         logger.warning(f"⚠️  Failed to optimize server TCP socket: {e}")
                 await self._handle_connection(reader, writer)
             
-            self.tcp_server = await asyncio.start_server(
-                optimize_connection,
-                '0.0.0.0',
-                self.data_port
-            )
+            # Try to start TCP server, with port fallback if needed
+            ports_to_try = [self.data_port, 5557, 5558, 5559, 5560]
+            self.tcp_server = None
+            actual_port = None
+
+            for port in ports_to_try:
+                try:
+                    self.tcp_server = await asyncio.start_server(
+                        optimize_connection,
+                        '0.0.0.0',
+                        port
+                    )
+                    actual_port = port
+                    break
+                except OSError as e:
+                    if e.errno == 98:  # Address already in use
+                        logger.warning(f"Port {port} in use, trying next port...")
+                        continue
+                    else:
+                        raise
+
+            if self.tcp_server is None:
+                raise RuntimeError(f"Could not bind to any port in {ports_to_try}")
+
+            # Update data_port to the actual port we're using
+            self.data_port = actual_port
             logger.info(f"✓ TCP server listening on port {self.data_port} (Phase 3: TCP_NODELAY, 16MB buffers)")
 
             # Set up transport for handling operation requests and sending results
@@ -253,56 +279,45 @@ class DjinnServer:
             # Import protocol constants early for validation
             from .transport.protocol import MessageType
             
-            # Validate message type is reasonable before processing
+            # Read the first byte (message type)
             first_byte = await reader.readexactly(1)
-            msg_type = struct.unpack('B', first_byte)[0]
+            msg_type_value = struct.unpack('B', first_byte)[0]
             
             # ✅ CRITICAL: Log first byte received for ALL connections
-            logger.info(f"📥 SERVER: Received first byte from {addr}: 0x{msg_type:02x} ({msg_type})")
-            
-            
-            # ✅ CRITICAL: Log protocol detection decision
-            is_model_cache = MessageType.is_model_cache_protocol(msg_type)
-            logger.info(f"📥 SERVER: Protocol detection for 0x{msg_type:02x}: is_model_cache={is_model_cache}")
-            
-            # ✅ BUFFER CLEANUP: Before processing, ensure reader buffer is clean
-            # This prevents leftover data from previous messages on reused connections
-            # Only do this if connection was possibly reused (check for leftover async buffer)
-            # Note: We've already read first byte, so buffer should be mostly clean
-            # But we log if we detect issues
-            
-            # New protocol: message type
-            if is_model_cache:
-                logger.info(f"🔍 DEBUG: Detected new protocol message type: 0x{msg_type:02x} from {addr}")
-                if msg_type == MessageType.EXECUTE_MODEL:
-                    logger.info(f"🔍 DEBUG: EXECUTE_MODEL message detected! Routing to handler...")
-                elif msg_type == MessageType.REGISTER_MODEL_CHUNK:
-                    logger.info(f"✅ SERVER: REGISTER_MODEL_CHUNK (0x0A) detected from {addr} - routing to handler")
-                # Store msg_type for finally block to use appropriate delay
-                self._last_msg_type = msg_type
-                try:
-                    await self._handle_message_type_protocol(reader, writer, msg_type, addr)
-                except Exception as proto_error:
-                    logger.error(f"Error in message type protocol handler: {proto_error}")
-                    import traceback
-                    logger.error(f"Traceback:\n{traceback.format_exc()}")
-                    # Don't close connection here - let finally block handle it
-                    raise
-                # Don't return here - let finally block close connection after response is sent
-                return
-            
-            # ✅ CRITICAL FIX: REJECT invalid message types instead of falling back
-            # The old protocol is DEPRECATED. All clients must use new protocol.
-            # If first byte is not valid, connection is corrupted or client is outdated.
-            logger.error(
-                f"🚨 PROTOCOL ERROR: First byte 0x{msg_type:02x} from {addr} is NOT a valid model cache protocol message! "
-                f"Connection is likely corrupted or client is using outdated protocol. "
-                f"Valid message types: 0x01-0x02, 0x05-0x0B, 0xFF"
+            logger.info(
+                f"📥 SERVER: Received first byte from {addr}: "
+                f"0x{msg_type_value:02x} ({msg_type_value})"
             )
-            raise ValueError(
-                f"Invalid protocol: first byte 0x{msg_type:02x} is not a recognized message type. "
-                f"Connection must use new message-type-based protocol (0x01-0x0B or 0xFF)."
+            
+            try:
+                msg_type = MessageType(msg_type_value)
+            except ValueError:
+                logger.error(
+                    f"🚨 PROTOCOL ERROR: Unrecognized message type 0x{msg_type_value:02x} "
+                    f"from {addr}. Only message-type-based protocol (0x05-0x0B, 0xFF) is supported."
+                )
+                raise ValueError(
+                    f"Invalid protocol: 0x{msg_type_value:02x} is not a supported message type."
+                )
+
+            logger.info(
+                f"🔍 Detected message type: {msg_type.name} (0x{msg_type_value:02x}) from {addr}"
             )
+
+            # Store msg_type for finally block to use appropriate delay
+            self._last_msg_type = msg_type
+            try:
+                # Special handling for CACHE_QUERY (uses raw JSON protocol, not secure protocol)
+                if msg_type == MessageType.CACHE_QUERY:
+                    await self._handle_cache_query_raw(reader, writer, addr)
+                else:
+                    await self._handle_message_type_protocol(reader, writer, msg_type.value, addr)
+            except Exception as proto_error:
+                logger.error(f"Error in message type protocol handler: {proto_error}")
+                import traceback
+                logger.error(f"Traceback:\n{traceback.format_exc()}")
+                raise
+            return
 
         except Exception as e:
             logger.error(f"Error handling connection from {addr}: {e}")
@@ -493,18 +508,10 @@ class DjinnServer:
                     # For chunks, deserialization can be CPU-intensive (30-40MB of data)
                     # Import MessageType here to avoid scope issues
                     from .transport.protocol import MessageType
-                    if msg_type == MessageType.REGISTER_MODEL_CHUNK and len(request_bytes) > 10 * 1024 * 1024:
-                        # Large chunk - deserialize in thread pool
-                        loop = asyncio.get_event_loop()
-                        request = await loop.run_in_executor(
-                            None,  # Use default thread pool
-                            SecureSerializer.deserialize_request,
-                            request_bytes
-                        )
-                    else:
-                        # Small request - deserialize directly (fast)
-                        request = SecureSerializer.deserialize_request(request_bytes)
-                    logger.info(f"✅ Request deserialized successfully (secure format)")
+                    # Use pickle (FastSerializer needs more work for tensor handling)
+                    import pickle
+                    request = pickle.loads(request_bytes)
+                    logger.info(f"✅ Request deserialized successfully (pickle format)")
                     # Store request for keep-alive decision
                     self._last_request = request
                 except Exception as deserialize_error:
@@ -666,6 +673,12 @@ class DjinnServer:
                     response = await self._handle_init_model(request)
                 elif msg_type == MessageType.WARMUP_GPU:
                     response = await self._handle_warmup_gpu(request)
+                elif msg_type == MessageType.CACHE_QUERY:
+                    response = await self._handle_cache_query(request)
+                elif msg_type == MessageType.QUERY_RESULT:
+                    response = await self._handle_query_result(request)
+                elif msg_type == MessageType.EXECUTE_BATCH:
+                    response = await self._handle_execute_batch(request)
                 elif msg_type == MessageType.REGISTER_MODEL_CHUNKED:
                     logger.info(f"Handling REGISTER_MODEL_CHUNKED message...")
                     response = await self._handle_register_model_chunked(request, reader, writer, addr)
@@ -708,9 +721,11 @@ class DjinnServer:
             if '_request_id' in request:
                 response['_request_id'] = request['_request_id']
             
-            # Send response (message type + length + secure serialized data)
+            # Send response (message type + length + serialized data)
             try:
-                response_bytes = SecureSerializer.serialize_response(response)
+                # Use pickle (FastSerializer needs more work)
+                import pickle
+                response_bytes = pickle.dumps(response)
                 response_len = len(response_bytes)
                 
                 logger.info(f"📤 Writing response: type=0x{msg_type:02x}, length={response_len} bytes ({response_len / (1024*1024):.2f} MB)")
@@ -844,16 +859,48 @@ class DjinnServer:
             }
     
     async def _handle_register_model(self, request: Dict) -> Dict:
-        """Handle model registration request."""
+        """Handle model registration request - v2.3 with ModelCacheV23."""
         try:
-            from .resilient_model_handler import ResilientModelHandler
-            # Use shared handler instance to ensure model cache is shared
-            if self._model_handler is None:
-                self._model_handler = ResilientModelHandler(gpu_id=0)
-                # Use executor's model_cache if available
-                if hasattr(self.executor, 'model_cache') and self.executor.model_cache:
-                    self._model_handler.model_cache = self.executor.model_cache
-            return await self._model_handler._register_with_recovery(request)
+            fingerprint = request.get('fingerprint', '')
+            model_id = request.get('model_id', '')
+            model_class = request.get('model_class', '')
+            config_dict = request.get('config')
+            
+            logger.info(f"📝 Registering model {fingerprint[:8]} (v2.3)...")
+            logger.info(f"   Model class: {model_class}")
+            logger.info(f"   Model ID: {model_id}")
+            
+            # Reconstruct model from config
+            # For HuggingFace models, we can use from_pretrained
+            if model_id and 'transformers' in model_class:
+                logger.info(f"   Loading from HuggingFace: {model_id}")
+                from transformers import AutoModel, AutoModelForCausalLM
+                try:
+                    # Try AutoModelForCausalLM first (for GPT2, etc.)
+                    model = AutoModelForCausalLM.from_pretrained(model_id)
+                except:
+                    # Fallback to AutoModel
+                    model = AutoModel.from_pretrained(model_id)
+                
+                model.eval()
+            else:
+                return {
+                    'status': 'error',
+                    'message': f'Unsupported model class: {model_class}. Only HuggingFace models supported currently.'
+                }
+            
+            # Register with v2.3 model cache
+            from .model_cache_v23 import get_model_cache
+            model_cache = get_model_cache()
+            model_cache.register_model(fingerprint, model, model_id)
+            
+            logger.info(f"✅ Model {fingerprint[:8]} registered in v2.3 cache")
+            
+            return {
+                'status': 'success',
+                'fingerprint': fingerprint
+            }
+            
         except Exception as e:
             logger.error(f"Model registration failed: {e}")
             import traceback
@@ -883,6 +930,149 @@ class DjinnServer:
                 'message': str(e)
             }
     
+    async def _cleanup_task(self, task_id: str) -> None:
+        """Cleanup task after timeout."""
+        await asyncio.sleep(60)
+        async with self._task_lock:
+            self._pending_tasks.pop(task_id, None)
+            self._task_results.pop(task_id, None)
+            logger.debug(f"Cleaned up task {task_id}")
+    
+    async def _handle_query_result(self, request: Dict) -> Dict:
+        """Query result of async execution task."""
+        task_id = request.get('task_id', '')
+        
+        logger.debug(f"Querying result for task {task_id}")
+        
+        async with self._task_lock:
+            # Check if result is ready
+            if task_id in self._task_results:
+                result = self._task_results[task_id]
+                logger.info(f"✅ Result ready for task {task_id}")
+                return result
+            
+            # Check if task is still pending
+            if task_id in self._pending_tasks:
+                task = self._pending_tasks[task_id]
+                if not task.done():
+                    return {
+                        'status': 'pending',
+                        'task_id': task_id,
+                        'message': 'Still executing, try again later'
+                    }
+                
+                # Task finished but result not stored yet
+                try:
+                    result = task.result()
+                    self._task_results[task_id] = result
+                    return result
+                except Exception as e:
+                    return {
+                        'status': 'error',
+                        'task_id': task_id,
+                        'message': str(e)
+                    }
+            
+            # Task not found
+            return {
+                'status': 'error',
+                'task_id': task_id,
+                'message': f'Task {task_id} not found or expired'
+            }
+    
+    async def _handle_execute_batch(self, request: Dict) -> Dict:
+        """Handle batch execution request - execute multiple models/inputs in one pass."""
+        try:
+            # Extract batch requests
+            batch_requests = request.get('batch', [])
+            
+            if not batch_requests:
+                return {'status': 'error', 'message': 'Empty batch'}
+            
+            logger.info(f"📦 Executing batch of {len(batch_requests)} requests")
+            
+            # Group by model fingerprint for efficient execution
+            by_model: Dict[str, List] = {}
+            for i, req in enumerate(batch_requests):
+                fp = req.get('fingerprint', '')
+                if fp not in by_model:
+                    by_model[fp] = []
+                by_model[fp].append((i, req))
+            
+            # Execute each model's batch
+            from .hybrid_executor import get_hybrid_executor
+            from .session_manager import get_session_manager
+            from .model_cache_v23 import get_model_cache
+            
+            results = {}
+            session_mgr = get_session_manager()
+            model_cache = get_model_cache()
+            executor = get_hybrid_executor()
+            
+            for fingerprint, indexed_reqs in by_model.items():
+                # Get model
+                model = model_cache.get_model(fingerprint)
+                if model is None:
+                    for idx, req in indexed_reqs:
+                        results[idx] = {
+                            'status': 'error',
+                            'message': f'Model {fingerprint} not found'
+                        }
+                    continue
+                
+                # Stack inputs for batching
+                import torch
+                batch_inputs = {}
+                for key in indexed_reqs[0][1].get('inputs', {}).keys():
+                    # Stack all values for this key
+                    values = [req[1]['inputs'][key] for _, req in indexed_reqs]
+                    if isinstance(values[0], torch.Tensor):
+                        batch_inputs[key] = torch.cat(values, dim=0)
+                    else:
+                        batch_inputs[key] = values[0]  # Use first value for non-tensors
+                
+                # Execute batch
+                session_id = session_mgr.create_session()
+                batch_output, metrics = await executor.execute_with_lazy_outputs(
+                    model=model,
+                    inputs=batch_inputs,
+                    session_id=session_id,
+                    return_lazy=False
+                )
+                
+                # Split batch output back to individual results
+                batch_size = len(indexed_reqs)
+                for i, (idx, req) in enumerate(indexed_reqs):
+                    # Extract item i from batch output
+                    if isinstance(batch_output, dict):
+                        item_output = {k: v[i] if isinstance(v, torch.Tensor) else v 
+                                      for k, v in batch_output.items()}
+                    elif isinstance(batch_output, torch.Tensor):
+                        item_output = batch_output[i]
+                    else:
+                        item_output = batch_output
+                    
+                    results[idx] = {
+                        'status': 'success',
+                        'result': item_output,
+                        'metrics': {
+                            'duration_ms': metrics.duration_ms / batch_size,  # Amortized
+                            'batch_size': batch_size
+                        }
+                    }
+                
+                logger.info(f"✅ Batch execution complete: {len(indexed_reqs)} items, {metrics.duration_ms:.2f}ms total")
+            
+            return {
+                'status': 'success',
+                'batch_results': [results.get(i, {'status': 'error', 'message': 'Missing result'}) 
+                                 for i in range(len(batch_requests))]
+            }
+        
+        except Exception as e:
+            logger.error(f"Batch execution failed: {e}")
+            return {'status': 'error', 'message': str(e)}
+    
     async def _handle_warmup_gpu(self, request: Dict) -> Dict:
         """Handle GPU warmup request (one-time, server-wide)."""
         try:
@@ -909,18 +1099,130 @@ class DjinnServer:
                 'status': 'error',
                 'message': str(e)
             }
-    
-    async def _handle_execute_model(self, request: Dict) -> Dict:
-        """Handle model execution request."""
+
+    async def _handle_cache_query_raw(self, reader, writer, addr):
+        """Handle CACHE_QUERY with raw JSON protocol (not secure protocol)."""
         try:
-            from .resilient_model_handler import ResilientModelHandler
-            # Use shared handler instance to ensure model cache is shared
-            if self._model_handler is None:
-                self._model_handler = ResilientModelHandler(gpu_id=0)
-                # Use executor's model_cache if available
-                if hasattr(self.executor, 'model_cache') and self.executor.model_cache:
-                    self._model_handler.model_cache = self.executor.model_cache
-            return await self._model_handler._execute_with_recovery(request)
+            logger.info(f"📥 Handling CACHE_QUERY (raw JSON protocol) from {addr}")
+
+            # Read length (8 bytes, big-endian)
+            length_bytes = await asyncio.wait_for(
+                reader.readexactly(8),
+                timeout=10.0
+            )
+            length = int.from_bytes(length_bytes, 'big')
+
+            # Validate length
+            if length > 1024 * 1024:  # 1MB limit for JSON
+                raise ValueError(f"Cache query too large: {length} bytes")
+
+            # Read JSON data
+            json_bytes = await asyncio.wait_for(
+                reader.readexactly(length),
+                timeout=10.0
+            )
+
+            # Parse JSON
+            request = json.loads(json_bytes.decode('utf-8'))
+
+            # Handle the cache query
+            response = await self._handle_cache_query(request)
+
+            # Send response as JSON
+            response_json = json.dumps(response).encode('utf-8')
+            response_length = len(response_json).to_bytes(8, 'big')
+
+            writer.write((0x04).to_bytes(1, 'big'))  # CACHE_QUERY response type
+            writer.write(response_length)
+            writer.write(response_json)
+            await writer.drain()
+
+            logger.info(f"✅ CACHE_QUERY response sent to {addr}")
+
+        except Exception as e:
+            logger.error(f"Cache query failed: {e}")
+            error_response = {
+                'status': 'error',
+                'message': str(e)
+            }
+            try:
+                response_json = json.dumps(error_response).encode('utf-8')
+                response_length = len(response_json).to_bytes(8, 'big')
+
+                writer.write((0x04).to_bytes(1, 'big'))  # CACHE_QUERY response type
+                writer.write(response_length)
+                writer.write(response_json)
+                await writer.drain()
+            except Exception as send_error:
+                logger.error(f"Failed to send error response: {send_error}")
+
+    async def _handle_cache_query(self, request: Dict) -> Dict:
+        """Handle cache query request - check which tensor identifiers are cached."""
+        try:
+            identifiers = request.get('identifiers', [])
+            # For now, return empty list (no cached tensors)
+            # TODO: Implement actual cache checking logic
+            cached_identifiers = []
+            return {
+                'status': 'success',
+                'cached_identifiers': cached_identifiers
+            }
+        except Exception as e:
+            logger.error(f"Cache query failed: {e}")
+            return {
+                'status': 'error',
+                'message': str(e)
+            }
+
+    async def _execute_model_impl(self, request: Dict) -> Dict:
+        """Internal implementation of model execution (non-blocking)."""
+        try:
+            fingerprint = request.get('fingerprint', '')
+            inputs = request.get('inputs', {})
+            profile_id = request.get('profile_id')
+            
+            logger.info(f"🚀 Executing model {fingerprint[:8]} via HybridExecutor (v2.3)...")
+            
+            # Get v2.3 components
+            from .hybrid_executor import get_hybrid_executor
+            from .session_manager import get_session_manager
+            from .model_cache_v23 import get_model_cache
+            
+            # Get or create session
+            session_mgr = get_session_manager()
+            session_id = session_mgr.create_session()
+            
+            # Get model from cache
+            model_cache = get_model_cache()
+            model = model_cache.get_model(fingerprint)
+            
+            if model is None:
+                return {
+                    'status': 'error',
+                    'message': f'Model {fingerprint} not found in cache. Register it first.'
+                }
+            
+            # Execute via HybridExecutor
+            executor = get_hybrid_executor()
+            result, metrics = await executor.execute_with_lazy_outputs(
+                model=model,
+                inputs=inputs,
+                session_id=session_id,
+                return_lazy=False  # Return concrete tensors over network
+            )
+            
+            logger.info(f"✅ Execution complete: {metrics.duration_ms:.2f}ms")
+            
+            # Return result
+            return {
+                'status': 'success',
+                'result': result,
+                'metrics': {
+                    'duration_ms': metrics.duration_ms,
+                    'memory_peak_mb': metrics.memory_peak_mb
+                }
+            }
+            
         except Exception as e:
             logger.error(f"Model execution failed: {e}")
             import traceback
@@ -929,6 +1231,58 @@ class DjinnServer:
                 'status': 'error',
                 'message': str(e)
             }
+    
+    async def _handle_execute_model(self, request: Dict) -> Dict:
+        """Handle model execution request - uses HybridExecutor (v2.3) with async execution."""
+        import uuid
+        
+        # Check if client supports async mode (opt-in via request flag)
+        async_mode = request.get('_async_mode', False)
+        
+        if not async_mode:
+            # Blocking mode for backward compatibility (default)
+            return await self._execute_model_impl(request)
+        
+        # Async mode: queue execution and return immediately
+        task_id = str(uuid.uuid4())[:8]
+        
+        # Create async task for execution (don't await)
+        task = asyncio.create_task(self._execute_model_impl(request))
+        
+        # Store task
+        async with self._task_lock:
+            self._pending_tasks[task_id] = task
+        
+        # Add callback to store result when done
+        def store_result(fut):
+            try:
+                result = fut.result()
+                # Schedule storing result
+                asyncio.create_task(self._store_result_async(task_id, result))
+            except Exception as e:
+                logger.error(f"Task {task_id} failed: {e}")
+                asyncio.create_task(self._store_result_async(
+                    task_id,
+                    {'status': 'error', 'message': str(e)}
+                ))
+        
+        task.add_done_callback(store_result)
+        
+        # Return immediately with task_id
+        logger.info(f"📋 Task {task_id} queued for async execution (non-blocking)")
+        return {
+            'status': 'queued',
+            'task_id': task_id,
+            'message': 'Execution queued, poll with QUERY_RESULT for status'
+        }
+    
+    async def _store_result_async(self, task_id: str, result: Any) -> None:
+        """Store result asynchronously and schedule cleanup."""
+        async with self._task_lock:
+            self._task_results[task_id] = result
+            logger.info(f"✅ Result stored for task {task_id}")
+            # Schedule cleanup after 60s
+            asyncio.create_task(self._cleanup_task(task_id))
     
     async def _handle_register_model_chunked(
         self, 

@@ -17,8 +17,15 @@ except RuntimeError:
     # Already set, ignore
     pass
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.ERROR)
 logger = logging.getLogger(__name__)
+
+# Reduce verbosity for Djinn components during end-to-end testing
+logging.getLogger('djinn').setLevel(logging.ERROR)
+logging.getLogger('djinn.server').setLevel(logging.ERROR)
+logging.getLogger('djinn.core').setLevel(logging.ERROR)
+logging.getLogger('djinn.frontend').setLevel(logging.ERROR)
+logging.getLogger('djinn.backend').setLevel(logging.ERROR)
 
 
 class RemoteServerManager:
@@ -47,18 +54,9 @@ class RemoteServerManager:
             True if server started successfully, False otherwise
         """
         try:
-            # First, check if port is available
-            if not self._is_port_available(self.host, self.port):
-                logger.warning(f"Port {self.port} is in use, trying next port...")
-                # Try alternative ports
-                for alt_port in [5557, 5558, 5559, 5560]:
-                    if self._is_port_available(self.host, alt_port):
-                        self.port = alt_port
-                        logger.info(f"Using alternative port: {alt_port}")
-                        break
-                else:
-                    logger.error("No available ports found")
-                    return False
+            # Don't check port availability - let the server handle port conflicts
+            # The server will automatically fall back to alternative ports if needed
+            logger.info(f"Starting server on port {self.port} (server will handle port conflicts)")
             
             # Spawn server in daemon process using 'spawn' context (CUDA-safe)
             ctx = mp.get_context('spawn')
@@ -131,19 +129,28 @@ class RemoteServerManager:
         start_time = time.time()
         attempt = 0
         
+        # Try connecting to the expected port and fallback ports
+        ports_to_try = [self.port, 5557, 5558, 5559, 5560]
+
         while attempt < max_attempts and (time.time() - start_time < self.timeout):
             attempt += 1
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(1)
-                result = sock.connect_ex((self.host, self.port))
-                sock.close()
-                if result == 0:
-                    logger.info(f"✓ Server connection successful on attempt {attempt}")
-                    time.sleep(0.2)  # Extra delay to ensure server is fully ready
-                    return True
-            except Exception as e:
-                logger.debug(f"Connection attempt {attempt} failed: {e}")
+            for port in ports_to_try:
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(1)
+                    result = sock.connect_ex((self.host, port))
+                    sock.close()
+                    if result == 0:
+                        # Update self.port to the actual port the server is using
+                        if port != self.port:
+                            logger.info(f"Server is using port {port} instead of {self.port}")
+                            self.port = port
+                        logger.info(f"✓ Server connection successful on attempt {attempt} (port {port})")
+                        time.sleep(0.2)  # Extra delay to ensure server is fully ready
+                        return True
+                except Exception as e:
+                    logger.debug(f"Connection attempt {attempt} failed on port {port}: {e}")
+                    continue
             
             time.sleep(check_interval)
         

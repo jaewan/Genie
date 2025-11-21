@@ -732,7 +732,6 @@ class MemoryAwareModelCache:
             else:
                 # Other types (e.g., lists, scalars)
                 gpu_inputs[key] = value
-        
         # Ensure all inputs are on GPU before timing starts
         # This synchronization ensures all async transfers complete
         if self.device.type == 'cuda':

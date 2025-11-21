@@ -240,6 +240,11 @@ class FactoryInterceptor:
             should_create_lazy = self._is_remote_device(device) or is_capturing()
             if should_create_lazy:
                 from .lazy_tensor import LazyTensor
+                
+                # DEBUG
+                import traceback
+                print(f"🔴 CREATING LAZY TENSOR via {func_name}, device={device}, capturing={is_capturing()}")
+                print("".join(traceback.format_stack()[-5:-1]))
 
                 # ✅ TRIGGER ASYNC INIT: First Djinn API call
                 # This is one of the earliest points where Djinn code is invoked

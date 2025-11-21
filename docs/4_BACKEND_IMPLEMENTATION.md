@@ -1,8 +1,8 @@
-# Djinn Backend Implementation
+# Djinn Backend Implementation (v2.3)
 
-**Status**: ✅ Production Ready
-**Last Updated**: November 6, 2025
-**Focus**: Network transport, remote execution, GPU cache, result handling
+**Status**: ✅ Production Ready (v2.3.10)
+**Last Updated**: November 21, 2025
+**Focus**: Model cache execution, phase-aware memory, distributed GC, semantic hint application
 
 ---
 
@@ -23,21 +23,21 @@
 
 ## §1. Overview
 
-### §1.1 Backend Responsibilities
+### §1.1 Backend Responsibilities (v2.3)
 
-The backend translates the scheduler's execution plan into **concrete execution** on remote GPUs:
+The backend implements a **Distributed Tensor Operating System** that executes models through cached model instances with semantic hint application:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    BACKEND ARCHITECTURE                          │
+│                BACKEND ARCHITECTURE (v2.3)                       │
 ├─────────────────────────────────────────────────────────────────┤
-│  1. Server Orchestration: Coordinate execution across GPUs       │
-│  2. Network Transport: Move data between client and server      │
-│  3. Serialization: Convert tensors to wire format               │
-│  4. Remote Execution: Execute operations on remote GPU          │
-│  5. GPU Cache: Persistent weight storage (LRU)                  │
-│  6. Result Handling: Return results to client                   │
-│  7. Fault Tolerance: Recover from failures                      │
+│  1. Session Manager: Distributed GC with heartbeat monitoring    │
+│  2. Unified VMU: Watermark-based memory management (zero fragmentation) │
+│  3. Meta-Simulator: Cached memory planning via meta-device tracing │
+│  4. Hybrid Executor: Slab-based execution with output skeletonization │
+│  5. Model Cache: Direct model.forward() execution (no graph reconstruction) │
+│  6. Phase-Aware Memory: Dynamic budgets based on execution phase │
+│  7. Semantic Hint Application: Scheduler hints drive execution optimization │
 └─────────────────────────────────────────────────────────────────┘
 ```
 

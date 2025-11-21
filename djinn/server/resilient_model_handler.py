@@ -15,9 +15,11 @@ import logging
 import traceback
 from collections import defaultdict
 from enum import Enum
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import torch
+
+from .profile_registry_client import ProfileRegistryClient
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +63,9 @@ class ResilientModelHandler:
         # Retry configuration
         self.max_retries = 3
         self.timeout_seconds = 300.0  # ✅ FIX: Increased from 30s to 5min for model execution
+        
+        # Phase 0: Profile registry client (no-op for now)
+        self.profile_registry_client = ProfileRegistryClient()
         
         logger.info(f"ResilientModelHandler initialized (gpu_id={gpu_id})")
     
@@ -268,13 +273,16 @@ class ResilientModelHandler:
             logger.info(f"🔍 [DIAGNOSTIC] Starting model cache execution (fingerprint: {request['fingerprint'][:16]}...)")
             
             with record_phase('model_cache_request_handling'):
+                # Deserialize inputs before execution
+                deserialized_inputs = self._deserialize_inputs(request['inputs'])
+
                 # Execute directly - GPU operations release GIL, so they don't block the event loop
                 # No need for thread pool overhead!
                 # NOTE: For multi-tenancy support later, we may need to reintroduce thread pool
                 # to isolate concurrent requests and prevent one slow request from blocking others.
                 result = self.model_cache.execute(
                     fingerprint=request['fingerprint'],
-                    inputs=request['inputs'],
+                    inputs=deserialized_inputs,
                     hints=request.get('hints', {})
                 )
             
@@ -285,28 +293,53 @@ class ResilientModelHandler:
             serialize_start = time.perf_counter()
             with record_phase('model_cache_result_serialization'):
                 serialized_result = self._serialize_tensor(result)
-            
+
             serialize_time = (time.perf_counter() - serialize_start) * 1000
             logger.info(f"🔍 [DIAGNOSTIC] Result serialization: {serialize_time:.1f}ms")
             
             # Get server-side phases
             server_phases = server_profiler.get_phase_dict()
-            
+
             # Get model cache stats (including phase detection and OOM events)
             cache_stats = self.model_cache.get_stats()
-            
-            return {
-                'status': 'success',
-                'result': serialized_result,
-                'execution_path': 'model_cache',
-                'memory_status': self.model_cache.get_memory_status(),
-                'server_phases': server_phases,  # Include server-side profiling
-                'cache_stats': {  # Include cache statistics for monitoring
+            memory_status = self.model_cache.get_memory_status()
+
+            # Build telemetry payload (Phase 0 logging)
+            telemetry = {
+                'profile_id': request.get('profile_id'),
+                'fingerprint': request['fingerprint'],
+                'execution_time_ms': execute_time,
+                'input_shapes': self._extract_input_shapes(request.get('inputs', {})),
+                'memory_status': memory_status,
+                'cache_stats': {
                     'oom_events': cache_stats.get('oom_events', 0),
                     'phase_detections': cache_stats.get('phase_detections', {}),
                     'phase_switches': cache_stats.get('phase_switches', 0),
                     'evictions': cache_stats.get('evictions', 0),
-                }
+                },
+                'server_phases': server_phases,
+            }
+
+            # Log telemetry summary at INFO, full payload at DEBUG
+            logger.info(
+                f"📡 TELEMETRY: profile_id={telemetry.get('profile_id')}, "
+                f"exec_time={telemetry['execution_time_ms']:.1f}ms, "
+                f"fingerprint={telemetry['fingerprint'][:16]}..."
+            )
+            logger.debug(f"📡 TELEMETRY (full payload): {telemetry}")
+            self.profile_registry_client.record_telemetry(telemetry)
+            
+            # ✅ PHASE 1: Shadow mode - query registry and log what we WOULD have done
+            self._run_shadow_mode_analysis(request, telemetry)
+
+            return {
+                'status': 'success',
+                'result': serialized_result,
+                'execution_path': 'model_cache',
+                'memory_status': memory_status,
+                'server_phases': server_phases,  # Include server-side profiling
+                'cache_stats': telemetry['cache_stats'],
+                'telemetry': telemetry
             }
         except Exception as e:
             logger.error(f"Model cache execution failed: {e}")
@@ -394,6 +427,88 @@ class ResilientModelHandler:
             'dtype': str(tensor.dtype),
             'format': 'numpy_binary',  # Format marker
         }
+
+    def _run_shadow_mode_analysis(self, request: Dict, telemetry: Dict) -> None:
+        """
+        Phase 1 Shadow Mode: Query registry and log what we WOULD have done.
+        
+        This runs after v1.0 execution completes and logs decisions without
+        affecting production traffic.
+        """
+        try:
+            fingerprint = request['fingerprint']
+            input_shapes = telemetry.get('input_shapes', {})
+            
+            # Query registry for profile
+            profile_dict = self.profile_registry_client.get_profile(
+                model_fingerprint=fingerprint,
+                input_shapes=input_shapes
+            )
+            
+            if profile_dict:
+                # Profile found - log what we would have done
+                logger.info(
+                    f"🔮 SHADOW MODE: Profile {profile_dict['profile_id']} found for {fingerprint[:16]}... "
+                    f"(phase={profile_dict['execution_phase']}, v{profile_dict['version']})"
+                )
+                
+                # Compare actual vs predicted
+                actual_phase = telemetry.get('cache_stats', {}).get('phase_detections', {})
+                predicted_phase = profile_dict['execution_phase']
+                
+                if actual_phase:
+                    # Get most common phase from actual detections
+                    most_common_phase = max(actual_phase.items(), key=lambda x: x[1])[0] if actual_phase else 'unknown'
+                    
+                    if most_common_phase != predicted_phase:
+                        logger.warning(
+                            f"🔮 SHADOW MODE: Phase mismatch! "
+                            f"Predicted={predicted_phase}, Actual={most_common_phase}"
+                        )
+                    else:
+                        logger.info(
+                            f"🔮 SHADOW MODE: Phase prediction correct! "
+                            f"({predicted_phase})"
+                        )
+                
+                # Log resource budget decisions
+                if profile_dict.get('resource_budget'):
+                    budget = profile_dict['resource_budget']
+                    logger.info(
+                        f"🔮 SHADOW MODE: Would use resource budget: "
+                        f"activations={budget['activations_fraction']:.1%}, "
+                        f"weights={budget['weights_fraction']:.1%}, "
+                        f"kv_cache={budget['kv_cache_fraction']:.1%}"
+                    )
+                
+                # Log optimization directives
+                if profile_dict.get('optimization_directives'):
+                    directives = profile_dict['optimization_directives']
+                    logger.info(
+                        f"🔮 SHADOW MODE: Would apply optimizations: {', '.join(directives)}"
+                    )
+            else:
+                # No profile found
+                logger.info(
+                    f"🔮 SHADOW MODE: No profile found for {fingerprint[:16]}... "
+                    f"(would use default v1.0 behavior)"
+                )
+        
+        except Exception as e:
+            # Shadow mode should never affect production
+            logger.debug(f"Shadow mode analysis failed (non-critical): {e}")
+    
+    def _extract_input_shapes(self, inputs: Dict[str, Any]) -> Dict[str, Optional[list]]:
+        """Extract input shapes for telemetry (handles serialized inputs)."""
+        shapes: Dict[str, Optional[list]] = {}
+        for key, value in inputs.items():
+            if isinstance(value, dict) and 'shape' in value:
+                shapes[key] = value['shape']
+            elif hasattr(value, 'shape'):
+                shapes[key] = list(value.shape)
+            else:
+                shapes[key] = None
+        return shapes
     
     def reset_circuit_breaker(self):
         """Reset circuit breaker (for testing or manual recovery)."""
@@ -401,6 +516,63 @@ class ResilientModelHandler:
         self.error_counts.clear()
         logger.info("Circuit breaker reset")
     
+    def _deserialize_inputs(self, inputs: Dict) -> Dict:
+        """
+        Deserialize inputs from network format to tensors.
+
+        This mirrors the deserialization logic in MemoryAwareModelCache.
+        """
+        logger.info(f"🔄 _deserialize_inputs called with: {list(inputs.keys()) if inputs else 'EMPTY'}")
+
+        deserialized = {}
+
+        for key, value in inputs.items():
+            if isinstance(value, dict) and 'data' in value:
+                # This is a serialized tensor from _serialize_inputs
+                logger.info(f"🔄 Deserializing tensor: {key}")
+                deserialized[key] = self._deserialize_tensor(value)
+            else:
+                # Pass through other values (scalars, etc.)
+                logger.info(f"🔄 Passing through non-tensor: {key} = {value}")
+                deserialized[key] = value
+
+        logger.info(f"🔄 Deserialized result keys: {list(deserialized.keys()) if deserialized else 'EMPTY'}")
+        return deserialized
+
+    def _deserialize_tensor(self, tensor_dict: Dict) -> torch.Tensor:
+        """Deserialize a single tensor from dict format."""
+        import numpy as np
+
+        # Handle binary numpy format (from _serialize_inputs)
+        if isinstance(tensor_dict.get('data'), bytes):
+            # Binary format - use frombuffer to reconstruct numpy array
+            dtype_str = tensor_dict.get('dtype', 'float32')
+            if dtype_str.startswith('torch.'):
+                # Convert 'torch.float32' -> 'float32'
+                dtype_str = dtype_str.replace('torch.', '')
+
+            # Map torch dtypes to numpy dtypes
+            dtype_map = {
+                'float32': np.float32,
+                'float16': np.float16,
+                'int64': np.int64,
+                'int32': np.int32,
+                'bool': np.bool_,
+            }
+            numpy_dtype = dtype_map.get(dtype_str, np.float32)
+
+            # Reconstruct numpy array from bytes
+            shape = tensor_dict['shape']
+            data_bytes = tensor_dict['data']
+            np_array = np.frombuffer(data_bytes, dtype=numpy_dtype).reshape(shape)
+
+            # Convert to torch tensor
+            tensor = torch.from_numpy(np_array)
+            return tensor
+        else:
+            # Legacy format or other types
+            raise ValueError(f"Unsupported tensor format: {tensor_dict}")
+
     def get_stats(self) -> Dict:
         """Get handler statistics."""
         return {
