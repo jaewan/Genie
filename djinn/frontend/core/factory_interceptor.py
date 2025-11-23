@@ -20,17 +20,18 @@ Example:
 import torch
 import functools
 import logging
-import threading
 from typing import Any, Callable, Dict, Optional
+
+from ...common.async_local import AsyncLocal
 
 logger = logging.getLogger(__name__)
 
 # Import MetadataPlaceholder at module level to avoid per-call import overhead
 from ...core.metadata import MetadataPlaceholder
 
-# Thread-local storage to track when we're inside a LazyTensor factory method
+# Async-aware storage to track when we're inside a LazyTensor factory method
 # This prevents infinite recursion when factory interceptor calls LazyTensor methods
-_in_lazy_factory = threading.local()
+_in_lazy_factory = AsyncLocal("lazy_factory_state")
 
 # Module-level import (avoids hot path import)
 # Note: Executor is in djinn.server.executor, not djinn.frontend.core.executor

@@ -1363,7 +1363,7 @@ class DjinnCoordinator:
         extractor = MetadataExtractor(self.scheduler)
         return extractor._infer_phase(tensor)
     
-    async def _send_tcp_request(self, server_address: str, msg_type: int, data: bytes) -> bytes:
+    async def _send_tcp_request(self, server_address: str, msg_type: int, data: bytes) -> tuple[int, bytes]:
         """
         Send TCP request to server using message-type protocol.
         
@@ -1397,14 +1397,10 @@ class DjinnCoordinator:
             
             logger.debug(f"Sent {length} bytes to {server_address}")
             
-            # Read response message type (1 byte) - server echoes it back
+            # Read response message type (1 byte)
             response_msg_type_data = await reader.readexactly(1)
             response_msg_type = struct.unpack('B', response_msg_type_data)[0]
             logger.debug(f"Response message type: 0x{response_msg_type:02x}")
-            
-            # Verify it matches request
-            if response_msg_type != msg_type:
-                logger.warning(f"Response message type mismatch: sent 0x{msg_type:02x}, got 0x{response_msg_type:02x}")
             
             # Read response length (8 bytes)
             length_data = await reader.readexactly(8)
@@ -1421,7 +1417,7 @@ class DjinnCoordinator:
             response_data = await reader.readexactly(response_length)
             logger.debug(f"Read {len(response_data)} bytes response")
             
-            return response_data
+            return response_msg_type, response_data
             
         finally:
             writer.close()
@@ -1444,48 +1440,93 @@ class DjinnCoordinator:
         from ..server.transport.protocol import MessageType
         from ..core.secure_serializer import SecureSerializer
         
-        # Prepare request with serializable data
-        # Extract model config and architecture info
         model_class = f"{model.__class__.__module__}.{model.__class__.__name__}"
         model_config = getattr(model, 'config', None)
+        serialized_config = (
+            model_config.to_dict() if hasattr(model_config, 'to_dict') else None
+        )
+        resolved_model_id = (
+            model_id
+            or getattr(getattr(model, "config", None), "_name_or_path", None)
+            or getattr(model, "model_id", None)
+        )
+        if not resolved_model_id:
+            raise ValueError(
+                "Model ID is required for remote registration. "
+                "Provide model_id when calling register_model."
+            )
         
         request = {
+            'type': 'REGISTER_MODEL',
             'fingerprint': fingerprint,
-            'model_id': model_id,
+            'model_id': resolved_model_id,
             'model_class': model_class,
-            'config': model_config.to_dict() if hasattr(model_config, 'to_dict') else None
+            'config': serialized_config,
+            '_request_id': str(uuid.uuid4()),
         }
         
         server_address = self.config.server_address or 'localhost:5556'
         
         try:
-            # Use pickle (keep working version while FastSerializer issues are debugged)
-            import pickle
-            serialized = pickle.dumps(request)
-            
-            # Send with REGISTER_MODEL message type
-            response_data = await self._send_tcp_request(
-                server_address, 
-                MessageType.REGISTER_MODEL, 
+            serialized = SecureSerializer.serialize_request(request)
+            response_msg_type, response_data = await self._send_tcp_request(
+                server_address,
+                MessageType.REGISTER_MODEL,
                 serialized
             )
             
-            # Deserialize response
-            response = pickle.loads(response_data)
+            if response_msg_type == MessageType.ERROR:
+                error = SecureSerializer.deserialize_response(response_data)
+                raise RuntimeError(error.get('message', 'Unknown error'))
             
+            response = SecureSerializer.deserialize_response(response_data)
             if response.get('status') == 'success':
                 logger.info(f"✅ Model {fingerprint[:8]} registered on server")
             else:
-                logger.warning(f"Server registration failed: {response.get('message', 'Unknown error')}")
+                raise RuntimeError(response.get('message', 'Unknown error'))
         except Exception as e:
             logger.warning(f"Failed to register with server: {e}")
             import traceback
             logger.debug(traceback.format_exc())
     
+    async def warmup_remote_gpu(self) -> Dict[str, Any]:
+        """
+        Request GPU warmup on the remote server (one-time shared operation).
+        """
+        from ..server.transport.protocol import MessageType
+        from ..core.secure_serializer import SecureSerializer
+        
+        server_address = self.config.server_address or 'localhost:5556'
+        request = {'type': 'WARMUP_GPU'}
+        
+        logger.info("Requesting remote GPU warmup...")
+        try:
+            serialized = SecureSerializer.serialize_request(request)
+            msg_type, response_data = await self._send_tcp_request(
+                server_address,
+                MessageType.WARMUP_GPU,
+                serialized
+            )
+            
+            if msg_type == MessageType.ERROR:
+                error = SecureSerializer.deserialize_response(response_data)
+                raise RuntimeError(error.get('message', 'Unknown error'))
+            
+            response = SecureSerializer.deserialize_response(response_data)
+            if response.get('status') == 'success':
+                logger.info("✅ Remote GPU warmup complete")
+            else:
+                logger.warning(f"⚠️  Remote GPU warmup reported: {response.get('message', 'Unknown error')}")
+            return response
+        except Exception as e:
+            logger.warning(f"⚠️  Remote GPU warmup failed: {e}")
+            return {'status': 'error', 'message': str(e)}
+    
     async def execute_remote_batch(self, batch_requests: List[Dict]) -> List[Any]:
         """Execute a batch of model requests remotely (higher throughput)."""
         from ..server.transport.protocol import MessageType
         import pickle
+        from ..core.secure_serializer import SecureSerializer
         
         server_address = self.config.server_address or 'localhost:5556'
         
@@ -1494,11 +1535,15 @@ class DjinnCoordinator:
             serialized = pickle.dumps(request)
             
             logger.debug(f"Sending EXECUTE_BATCH request for {len(batch_requests)} items")
-            response_data = await self._send_tcp_request(
+            response_msg_type, response_data = await self._send_tcp_request(
                 server_address,
                 MessageType.EXECUTE_BATCH,
                 serialized
             )
+            
+            if response_msg_type == MessageType.ERROR:
+                error = SecureSerializer.deserialize_response(response_data)
+                raise RuntimeError(error.get('message', 'Unknown error'))
             
             response = pickle.loads(response_data)
             
@@ -1515,14 +1560,19 @@ class DjinnCoordinator:
             raise RuntimeError(f"Remote batch execution failed: {e}")
     
     async def execute_remote_model(self, fingerprint: str, inputs: Dict[str, torch.Tensor], 
-                                   profile_id: Optional[str] = None):
+                                   profile_id: Optional[str] = None,
+                                   qos_class: Optional[str] = None,
+                                   deadline_ms: Optional[int] = None,
+                                   return_metrics: bool = False):
         """
         Execute registered model on remote server via RPC.
         
         Args:
             fingerprint: Model fingerprint
             inputs: Input tensors
-            profile_id: Optional profile ID
+            profile_id: Optional profile ID for tracing
+            qos_class: Optional QoS hint ("realtime", "interactive", "batch")
+            deadline_ms: Optional latency target used for QoS heuristics
             
         Returns:
             Output tensor
@@ -1536,83 +1586,55 @@ class DjinnCoordinator:
         request = {
             'fingerprint': fingerprint,
             'inputs': inputs,
-            'profile_id': profile_id
+            'profile_id': profile_id,
+            'qos_class': qos_class,
+            'deadline_ms': deadline_ms
         }
         
         # Get server address
         server_address = self.config.server_address or 'localhost:5556'
         
         try:
-            # Use pickle for now (FastSerializer needs more integration work)
-            import pickle
-            serialized = pickle.dumps({
-                'fingerprint': fingerprint,
-                'inputs': inputs,
-                'profile_id': profile_id
-            })
-            
+            # Use binary protocol (2-3x faster than pickle)
+            from .model_execution_serializer import ModelExecutionSerializer
+            serialized = ModelExecutionSerializer.serialize_execute_request(
+                fingerprint=fingerprint,
+                inputs=inputs,
+                profile_id=profile_id,
+                qos_class=qos_class,
+                deadline_ms=deadline_ms
+            )
+
             # Send with EXECUTE_MODEL message type
             logger.debug(f"Sending EXECUTE_MODEL request to {server_address}")
-            response_data = await self._send_tcp_request(
+            response_msg_type, response_data = await self._send_tcp_request(
                 server_address,
                 MessageType.EXECUTE_MODEL,
                 serialized
             )
             
-            # Deserialize response
-            response = pickle.loads(response_data)
+            if response_msg_type == MessageType.ERROR:
+                error_response = SecureSerializer.deserialize_response(response_data)
+                raise RuntimeError(error_response.get('message', 'Unknown error'))
             
-            if response.get('status') == 'success':
-                result = response.get('result')
-                metrics = response.get('metrics', {})
+            # Deserialize response using binary protocol
+            try:
+                result, metrics, status = ModelExecutionSerializer.deserialize_execute_response(response_data)
+            except Exception:
+                logger.error(f"⚠️  Failed to parse EXECUTE_MODEL response ({len(response_data)} bytes)")
+                logger.error(f"Response head: {response_data[:32].hex()}")
+                raise
+
+            if status == 'success':
                 logger.info(f"✅ Remote execution successful: {metrics.get('duration_ms', 0):.2f}ms")
+                if return_metrics:
+                    return result, metrics
                 return result
-            
-            elif response.get('status') == 'queued':
-                # Task queued on server, poll for result
-                task_id = response.get('task_id', '')
-                logger.info(f"⏳ Task {task_id} queued, polling for result...")
-                
-                # Poll for result (max 60 attempts, 1s timeout = 60s total)
-                for attempt in range(60):
-                    await asyncio.sleep(1)  # Wait 1 second between polls
-                    
-                    # Query result
-                    query_request = {'task_id': task_id}
-                    query_serialized = pickle.dumps(query_request)
-                    
-                    try:
-                        query_response_data = await self._send_tcp_request(
-                            server_address,
-                            0x0C,  # QUERY_RESULT message type
-                            query_serialized
-                        )
-                        query_response = pickle.loads(query_response_data)
-                        
-                        if query_response.get('status') == 'success':
-                            result = query_response.get('result')
-                            logger.info(f"✅ Result retrieved after {attempt + 1} attempts")
-                            return result
-                        
-                        elif query_response.get('status') == 'pending':
-                            logger.debug(f"🔄 Task still pending (attempt {attempt + 1}/60)...")
-                            continue
-                        
-                        else:
-                            error = query_response.get('message', 'Unknown error')
-                            raise RuntimeError(f"Query failed: {error}")
-                    
-                    except Exception as e:
-                        logger.warning(f"Query attempt {attempt + 1} failed: {e}")
-                        if attempt == 59:  # Last attempt
-                            raise
-                        continue
-                
-                raise RuntimeError("Task polling timeout after 60 seconds")
-            
+
+            elif status == 'queued':
+                raise RuntimeError("Remote execution queued; async polling not implemented")
             else:
-                error = response.get('message', 'Unknown error')
-                raise RuntimeError(f"Remote execution failed: {error}")
+                raise RuntimeError(f"Remote execution failed with status: {status}")
                 
         except Exception as e:
             logger.error(f"RPC execution failed: {e}")

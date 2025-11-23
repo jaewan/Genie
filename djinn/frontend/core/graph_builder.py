@@ -10,10 +10,10 @@ This provides the "single source of truth" for computation graphs in Djinn.
 """
 
 import torch
-import threading
 from typing import Optional, Any
 import logging
 
+from ...common.async_local import AsyncLocal
 from ...core.graph_interface import Graph, LazyDAGAdapter
 from .lazy_tensor import LazyTensor
 
@@ -52,8 +52,8 @@ class GraphBuilder:
     OPTIMIZATION: Instrumented to identify bottlenecks in graph construction.
     """
 
-    # Thread-local storage for per-thread builders
-    _thread_local = threading.local()
+    # Async-aware storage for per-context builders
+    _thread_local = AsyncLocal("lazy_graph_builder")
 
     def __init__(self):
         # Only LazyTensor DAG - FX was removed (architectural mismatch)

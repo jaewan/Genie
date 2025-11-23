@@ -368,15 +368,12 @@ async def _genie_init_async_impl(
                 # ✅ NEW: Warm up GPU on server (one-time, benefits all clients)
                 logger.info("[6/7] Warming up GPU on server...")
                 try:
-                    from ...core.enhanced_model_manager import EnhancedModelManager
-                    manager = EnhancedModelManager(server_address=server_address)
-                    warmup_response = await manager._send_request({'type': 'WARMUP_GPU'})
+                    warmup_response = await coordinator.warmup_remote_gpu()
                     if warmup_response.get('status') == 'success':
-                        already_warmed = warmup_response.get('already_warmed', False)
-                        if already_warmed:
-                            logger.info(f"  ✓ GPU already warmed up (shared across all clients)")
+                        if warmup_response.get('already_warmed'):
+                            logger.info("  ✓ GPU already warmed up (shared across clients)")
                         else:
-                            logger.info(f"  ✓ GPU warmed up successfully (one-time, shared across all clients)")
+                            logger.info("  ✓ GPU warmed up successfully (one-time, shared)")
                     else:
                         logger.warning(f"  ⚠️  GPU warmup failed: {warmup_response.get('message', 'Unknown error')}")
                 except Exception as e:

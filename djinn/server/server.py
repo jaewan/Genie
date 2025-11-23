@@ -15,6 +15,7 @@ import struct
 import json
 import numpy as np
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Any
 
@@ -24,6 +25,8 @@ from ..core.coordinator import DjinnCoordinator, CoordinatorConfig
 from .optimizations.optimization_executor import OptimizationExecutor
 from .capability_provider import CapabilityProvider
 from ..core.metadata_types import ResultMetadata, ErrorMetadata, create_result_metadata, create_error_metadata
+from ..backend.runtime.unified_vmu import get_vmu
+from .qos import BasicQosScheduler, QoSClass
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +101,37 @@ class DjinnServer:
         # : Server health reporter for fleet coordination
         self._health_reporter = None
 
+        # QoS scheduler (initialized based on config)
+        self.qos_scheduler: Optional[BasicQosScheduler] = None
+        self._default_qos_class: QoSClass = QoSClass.INTERACTIVE
+        self._configure_qos_scheduler()
+
+    def _configure_qos_scheduler(self) -> None:
+        """Initialize the QoS scheduler if enabled in config."""
+        qos_cfg = getattr(self._central_config, 'server', None)
+        default_cls = QoSClass.from_string(
+            getattr(qos_cfg, 'qos_default_class', None) if qos_cfg else None
+        )
+        self._default_qos_class = default_cls or QoSClass.INTERACTIVE
+
+        if not qos_cfg or not getattr(qos_cfg, 'enable_qos', False):
+            logger.info("QoS scheduler disabled via configuration")
+            self.qos_scheduler = None
+            return
+
+        try:
+            self.qos_scheduler = BasicQosScheduler(
+                max_concurrency=max(1, qos_cfg.qos_max_concurrency),
+                class_shares=qos_cfg.qos_class_shares,
+            )
+            logger.info(
+                "QoS scheduler enabled (max_concurrency=%d)",
+                qos_cfg.qos_max_concurrency,
+            )
+        except Exception as qos_error:
+            logger.error(f"Failed to initialize QoS scheduler: {qos_error}")
+            self.qos_scheduler = None
+
     async def start(self) -> bool:
         """Start the Djinn server."""
         try:
@@ -107,6 +141,15 @@ class DjinnServer:
             logger.info("Discovering capabilities...")
             self.capabilities = CapabilityProvider.discover()
             logger.info(f"✓ Found {self.capabilities.gpu_count} GPUs")
+
+            # Initialize global server state so warmup + diagnostics know which GPU to use
+            try:
+                from .server_state import ServerState
+                server_state = ServerState.get_instance()
+                preferred_gpu = self.capabilities.gpu_indices[0] if self.capabilities.gpu_indices else 0
+                server_state.initialize(gpu_id=preferred_gpu)
+            except Exception as init_err:
+                logger.warning(f"⚠️  Failed to initialize server state GPU context: {init_err}")
 
             # 2. Start TCP server for listening to incoming operation requests
             logger.info("Starting TCP server for operation requests...")
@@ -504,16 +547,35 @@ class DjinnServer:
                 
                 logger.info(f"Deserializing request (msg_type=0x{msg_type:02x})...")
                 try:
-                    # ✅ OPTIMIZATION: Deserialize in thread pool for large payloads (non-blocking)
-                    # For chunks, deserialization can be CPU-intensive (30-40MB of data)
-                    # Import MessageType here to avoid scope issues
-                    from .transport.protocol import MessageType
-                    # Use pickle (FastSerializer needs more work for tensor handling)
-                    import pickle
-                    request = pickle.loads(request_bytes)
-                    logger.info(f"✅ Request deserialized successfully (pickle format)")
-                    # Store request for keep-alive decision
-                    self._last_request = request
+                    # ✅ FIRST: Try binary protocol detection (v2.3 execute_model)
+                    # Check if this looks like binary protocol (starts with version byte)
+                    if len(request_bytes) >= 1 and request_bytes[0] == 0x02:  # Protocol version
+                        logger.info("🔍 Detected binary protocol message (v2.3)")
+                        try:
+                            from djinn.core.model_execution_serializer import ModelExecutionSerializer
+                            fingerprint, inputs, profile_id, exec_options = ModelExecutionSerializer.deserialize_execute_request(request_bytes)
+                            request = {
+                                'fingerprint': fingerprint,
+                                'inputs': inputs,
+                                'profile_id': profile_id
+                            }
+                            self._normalize_qos_metadata(request, exec_options)
+                            self._ensure_request_id(request)
+                            logger.info("✅ Binary protocol request deserialized successfully")
+                            # Store request for keep-alive decision
+                            self._last_request = request
+                        except Exception as binary_error:
+                            logger.error(f"Binary protocol deserialization failed: {binary_error}")
+                            raise binary_error
+                    else:
+                        # ✅ SECOND: Try secure JSON protocol (v2.0+)
+                        from djinn.core.secure_serializer import SecureSerializer
+                        request = SecureSerializer.deserialize_request(request_bytes)
+                        self._normalize_qos_metadata(request)
+                        self._ensure_request_id(request)
+                        logger.info("✅ Request deserialized successfully (secure JSON format)")
+                        # Store request for keep-alive decision
+                        self._last_request = request
                 except Exception as deserialize_error:
                     logger.error(f"Failed to deserialize request: {deserialize_error}")
                     # ✅ IMPROVEMENT: Check if pickle fallback is allowed
@@ -723,9 +785,23 @@ class DjinnServer:
             
             # Send response (message type + length + serialized data)
             try:
-                # Use pickle (FastSerializer needs more work)
-                import pickle
-                response_bytes = pickle.dumps(response)
+                # Use binary protocol for EXECUTE_MODEL responses (2-3x faster)
+                if msg_type == MessageType.EXECUTE_MODEL:
+                    from djinn.core.model_execution_serializer import ModelExecutionSerializer
+                    # Extract result, metrics, status from response dict
+                    result = response.get('result')
+                    metrics = response.get('metrics', {})
+                    status = response.get('status', 'success')
+                    response_bytes = ModelExecutionSerializer.serialize_execute_response(
+                        result=result,
+                        metrics=metrics,
+                        status=status
+                    )
+                    logger.info("✅ Response serialized using binary protocol")
+                else:
+                    # Use secure JSON protocol for other message types
+                    from djinn.core.secure_serializer import SecureSerializer
+                    response_bytes = SecureSerializer.serialize_response(response)
                 response_len = len(response_bytes)
                 
                 logger.info(f"📤 Writing response: type=0x{msg_type:02x}, length={response_len} bytes ({response_len / (1024*1024):.2f} MB)")
@@ -890,8 +966,8 @@ class DjinnServer:
                 }
             
             # Register with v2.3 model cache
-            from .model_cache_v23 import get_model_cache
-            model_cache = get_model_cache()
+            from .model_cache_v23 import get_model_cache_v23
+            model_cache = get_model_cache_v23()
             model_cache.register_model(fingerprint, model, model_id)
             
             logger.info(f"✅ Model {fingerprint[:8]} registered in v2.3 cache")
@@ -1002,11 +1078,11 @@ class DjinnServer:
             # Execute each model's batch
             from .hybrid_executor import get_hybrid_executor
             from .session_manager import get_session_manager
-            from .model_cache_v23 import get_model_cache
+            from .model_cache_v23 import get_model_cache_v23
             
             results = {}
             session_mgr = get_session_manager()
-            model_cache = get_model_cache()
+            model_cache = get_model_cache_v23()
             executor = get_hybrid_executor()
             
             for fingerprint, indexed_reqs in by_model.items():
@@ -1174,6 +1250,63 @@ class DjinnServer:
                 'message': str(e)
             }
 
+    def _normalize_qos_metadata(self, request: Dict, extras: Optional[Dict[str, Any]] = None) -> None:
+        """Normalize QoS hints provided by client metadata."""
+        extras = extras or {}
+        raw_qos = extras.get('qos_class') or request.get('_qos_class') or request.get('qos_class')
+        if raw_qos:
+            request['_qos_class'] = str(raw_qos).strip().lower()
+
+        deadline = extras.get('deadline_ms')
+        if deadline is None:
+            deadline = request.get('_deadline_ms', request.get('deadline_ms'))
+        if deadline is not None:
+            try:
+                request['_deadline_ms'] = int(deadline)
+            except (TypeError, ValueError):
+                pass
+
+    def _ensure_request_id(self, request: Dict) -> None:
+        """Attach a request identifier if the client did not supply one."""
+        if '_request_id' not in request:
+            request['_request_id'] = uuid.uuid4().hex[:12]
+
+    def _classify_qos(self, request: Dict) -> QoSClass:
+        """Derive QoS class from request metadata with deadline heuristics."""
+        explicit = QoSClass.from_string(request.get('_qos_class'))
+        if explicit:
+            return explicit
+
+        deadline = request.get('_deadline_ms')
+        if isinstance(deadline, (int, float)):
+            if deadline <= 25:
+                return QoSClass.REALTIME
+            if deadline <= 250:
+                return QoSClass.INTERACTIVE
+            return QoSClass.BATCH
+
+        return self._default_qos_class
+
+    async def _run_with_qos(self, request: Dict) -> Dict:
+        """Execute request via QoS scheduler if enabled."""
+        qos_class = self._classify_qos(request)
+        request['_resolved_qos_class'] = qos_class.value
+
+        if not self.qos_scheduler:
+            return await self._execute_model_impl(request)
+
+        metadata = {
+            'request_id': request.get('_request_id'),
+            'fingerprint': request.get('fingerprint'),
+            'deadline_ms': request.get('_deadline_ms')
+        }
+
+        return await self.qos_scheduler.run(
+            qos_class,
+            lambda: self._execute_model_impl(request),
+            metadata=metadata
+        )
+
     async def _execute_model_impl(self, request: Dict) -> Dict:
         """Internal implementation of model execution (non-blocking)."""
         try:
@@ -1186,14 +1319,14 @@ class DjinnServer:
             # Get v2.3 components
             from .hybrid_executor import get_hybrid_executor
             from .session_manager import get_session_manager
-            from .model_cache_v23 import get_model_cache
+            from .model_cache_v23 import get_model_cache_v23
             
             # Get or create session
             session_mgr = get_session_manager()
             session_id = session_mgr.create_session()
             
             # Get model from cache
-            model_cache = get_model_cache()
+            model_cache = get_model_cache_v23()
             model = model_cache.get_model(fingerprint)
             
             if model is None:
@@ -1204,23 +1337,33 @@ class DjinnServer:
             
             # Execute via HybridExecutor
             executor = get_hybrid_executor()
-            result, metrics = await executor.execute_with_lazy_outputs(
+            execution_result, execution_metrics = await executor.execute_with_lazy_outputs(
                 model=model,
                 inputs=inputs,
                 session_id=session_id,
                 return_lazy=False  # Return concrete tensors over network
             )
             
-            logger.info(f"✅ Execution complete: {metrics.duration_ms:.2f}ms")
+            logger.info(f"✅ Execution complete: {execution_metrics.duration_ms:.2f}ms")
             
-            # Return result
+            result_payload = self._sanitize_result_payload(execution_result)
+            vmu_stats = get_vmu().get_stats()
+            response_metrics = {
+                'duration_ms': getattr(execution_metrics, 'duration_ms', 0.0),
+                'memory_peak_mb': getattr(execution_metrics, 'memory_peak_mb', 0.0),
+                'executor': 'hybrid_v23',
+                'session_id': session_id,
+                'vmu_persistent_mb': vmu_stats.get('persistent_allocated_mb', 0.0),
+                'vmu_volatile_mb': vmu_stats.get('volatile_allocated_mb', 0.0),
+                'vmu_total_mb': vmu_stats.get('vmu_total_allocated_mb', 0.0),
+                'plan_summary': getattr(execution_metrics, 'plan_summary', None),
+                'qos_class': request.get('_resolved_qos_class', self._default_qos_class.value),
+            }
+            
             return {
                 'status': 'success',
-                'result': result,
-                'metrics': {
-                    'duration_ms': metrics.duration_ms,
-                    'memory_peak_mb': metrics.memory_peak_mb
-                }
+                'result': result_payload,
+                'metrics': response_metrics
             }
             
         except Exception as e:
@@ -1232,22 +1375,55 @@ class DjinnServer:
                 'message': str(e)
             }
     
+    def _sanitize_result_payload(self, result):
+        """
+        Convert execution result into a serialization-friendly structure.
+        
+        Preference order:
+            1. Direct tensor
+            2. Dict containing tensors (e.g., {'logits': ...})
+            3. Attributes on common output objects (e.g., HuggingFace)
+            4. First tensor found in list/tuple structures
+        """
+        if torch.is_tensor(result):
+            return result
+        
+        if isinstance(result, dict):
+            tensor_items = {k: v for k, v in result.items() if torch.is_tensor(v)}
+            if tensor_items:
+                return tensor_items
+            if 'logits' in result and torch.is_tensor(result['logits']):
+                return result['logits']
+        
+        logits = getattr(result, 'logits', None)
+        if torch.is_tensor(logits):
+            return logits
+        
+        if isinstance(result, (list, tuple)):
+            for item in result:
+                if torch.is_tensor(item):
+                    return item
+                if isinstance(item, dict):
+                    tensor_items = {k: v for k, v in item.items() if torch.is_tensor(v)}
+                    if tensor_items:
+                        return tensor_items
+        
+        return result
+    
     async def _handle_execute_model(self, request: Dict) -> Dict:
         """Handle model execution request - uses HybridExecutor (v2.3) with async execution."""
-        import uuid
-        
         # Check if client supports async mode (opt-in via request flag)
         async_mode = request.get('_async_mode', False)
         
         if not async_mode:
             # Blocking mode for backward compatibility (default)
-            return await self._execute_model_impl(request)
+            return await self._run_with_qos(request)
         
         # Async mode: queue execution and return immediately
         task_id = str(uuid.uuid4())[:8]
         
         # Create async task for execution (don't await)
-        task = asyncio.create_task(self._execute_model_impl(request))
+        task = asyncio.create_task(self._run_with_qos(request))
         
         # Store task
         async with self._task_lock:

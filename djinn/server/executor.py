@@ -13,6 +13,7 @@ from .optimizations.batch_compiler import get_batch_compiler, get_batch_compiler
 from ..frontend.core.universal_dispatcher import get_universal_dispatcher
 from ..frontend.core.interception_control import disable_interception, InterceptionContext
 from .type_utils import is_tensor_fast
+from ..common.async_local import AsyncLocal
 
 # Constants
 LAZY_TENSOR_CLASS_NAME = 'LazyTensor'
@@ -76,9 +77,9 @@ _executor_lock = threading.Lock()  # Protects executor creation and access
 
 logger = logging.getLogger(__name__)
 
-# Thread-local state to track when we're inside executor materialization
+# Async-aware state to track when we're inside executor materialization
 # This tells the factory interceptor not to intercept tensor creation
-_in_executor = threading.local()
+_in_executor = AsyncLocal("executor_state")
 
 
 class SimpleExecutor:

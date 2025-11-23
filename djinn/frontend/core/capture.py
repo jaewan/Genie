@@ -29,18 +29,17 @@ Example:
     ...     z = torch.randn(10)  # Back to outer
 """
 import logging
-import threading
 from contextlib import contextmanager
 from typing import Optional
 
+from ...common.async_local import AsyncLocal
 from ...core.graph_interface import Graph
 from .graph_builder import get_global_builder
 
 logger = logging.getLogger(__name__)
 
-# Thread-local state for capture context
-# This signals to factory interceptor that we're in capture mode
-_capture_context = threading.local()
+# Async-aware state for capture context
+_capture_context = AsyncLocal("capture_context")
 
 
 class CaptureContext:
@@ -52,9 +51,9 @@ class CaptureContext:
     operations are recorded in a computation graph for later analysis,
     scheduling, and execution.
 
-    **Thread Safety:** Each thread has its own capture state via thread-local
-    storage. Capture contexts don't interfere across threads, and nested
-    contexts work correctly within each thread.
+    **Context Safety:** Each asyncio task (and OS thread) maintains its own
+    capture state via AsyncLocal storage. Capture contexts don't interfere
+    across tasks, and nested contexts work correctly within each scope.
 
     **Graph State Management:** Properly saves and restores graph builder state
     to handle nested capture contexts. Each context gets a fresh graph capture

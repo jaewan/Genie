@@ -113,6 +113,7 @@ class EnhancedModelManager:
         # Cache key: (fingerprint, hints_hash) -> (server_address, expires_at)
         self._server_address_cache: Dict[tuple, tuple] = {}  # (fingerprint, hints_hash) -> (address, expires_at)
         self._cache_lock = asyncio.Lock()
+        self._last_execution_metrics: Dict[str, Any] = {}
     
     def _optimize_tcp_socket(self, sock) -> None:
         """
@@ -248,6 +249,7 @@ class EnhancedModelManager:
             inputs: Input tensors dict
             model_id: Optional explicit model identifier
             profile_id: Optional profile identifier (Phase 0 inert placeholder)
+            hints: Optional execution hints (e.g., {'qos_class': 'realtime', 'deadline_ms': 50})
         
         Returns:
             Output tensor
@@ -305,11 +307,16 @@ class EnhancedModelManager:
         if self.coordinator:
             try:
                 logger.info(f"🌐 Executing model {fingerprint[:8]} remotely...")
-                result = await self.coordinator.execute_remote_model(
+                qos_hints = hints or {}
+                result, metrics = await self.coordinator.execute_remote_model(
                     fingerprint=fingerprint,
                     inputs=inputs,
-                    profile_id=profile_id
+                    profile_id=profile_id,
+                    qos_class=qos_hints.get('qos_class'),
+                    deadline_ms=qos_hints.get('deadline_ms'),
+                    return_metrics=True
                 )
+                self._last_execution_metrics = metrics or {}
                 return result
             except Exception as e:
                 logger.warning(f"Remote execution failed: {e}, falling back to local")
@@ -321,6 +328,11 @@ class EnhancedModelManager:
             f"Cannot execute model {fingerprint}: no coordinator available. "
             "Ensure Djinn server is running and client is connected."
         )
+
+    @property
+    def last_execution_metrics(self) -> Dict[str, Any]:
+        """Return metrics from the most recent remote execution (if available)."""
+        return self._last_execution_metrics
 
 
 # Global instance

@@ -60,6 +60,7 @@ class MemoryPlan:
     allocations: Dict[str, Tuple[int, int]]  # tensor_name -> (offset, size)
     kv_cache_allocation: Optional[Tuple[int, int]] = None  # Special handling
     base_offset: int = 0
+    semantic_summary: Optional[Dict[str, Any]] = None
     
     def get_allocation(self, tensor_name: str) -> Optional[Tuple[int, int]]:
         """Get allocation (offset, size) for tensor by name."""
@@ -229,7 +230,13 @@ class MetaSimulator:
                 input_bucket_key=input_bucket,
                 peak_memory_bytes=peak_memory,
                 allocations=allocations,
-                base_offset=vmu.persistent_watermark if vmu else 0
+                base_offset=0,  # Stack Segment starts at 0
+                semantic_summary=self._build_semantic_summary(
+                    inputs=inputs,
+                    allocations=allocations,
+                    fingerprint=fingerprint,
+                    input_bucket=input_bucket
+                )
             )
 
             logger.info(
@@ -247,8 +254,58 @@ class MetaSimulator:
                 input_bucket_key=input_bucket,
                 peak_memory_bytes=1024*1024,  # 1MB minimum
                 allocations={},
-                base_offset=vmu.persistent_watermark if vmu else 0
+                base_offset=0,  # Stack Segment starts at 0
+                semantic_summary={
+                    'phase_hint': 'unknown',
+                    'lifecycle_breakdown': {'persistent_bytes': 0, 'ephemeral_bytes': 0},
+                    'input_shapes': {k: tuple(v.shape) for k, v in inputs.items() if hasattr(v, 'shape')},
+                    'cache_key': input_bucket,
+                }
             )
+
+    def _build_semantic_summary(
+        self,
+        inputs: Dict[str, torch.Tensor],
+        allocations: Dict[str, Tuple[int, int]],
+        fingerprint: str,
+        input_bucket: str,
+    ) -> Dict[str, Any]:
+        """Create a lightweight semantic summary for query-specific caching."""
+        lifecycle_breakdown = {'persistent_bytes': 0, 'ephemeral_bytes': 0}
+        for name, (_, size) in allocations.items():
+            if name.startswith('input_'):
+                lifecycle_breakdown['ephemeral_bytes'] += size
+            else:
+                lifecycle_breakdown['persistent_bytes'] += size
+
+        input_shapes = {
+            name: tuple(tensor.shape)
+            for name, tensor in inputs.items()
+            if hasattr(tensor, 'shape')
+        }
+
+        summary = {
+            'phase_hint': self._detect_phase_hint(input_shapes),
+            'lifecycle_breakdown': lifecycle_breakdown,
+            'input_shapes': input_shapes,
+            'cache_key': input_bucket,
+            'fingerprint': fingerprint,
+        }
+        return summary
+
+    def _detect_phase_hint(self, input_shapes: Dict[str, Tuple[int, ...]]) -> str:
+        """
+        Heuristic phase detection based on input sequence length.
+
+        If any tensor has seq_len > 1 we treat it as prefill, seq_len == 1 => decode.
+        """
+        for shape in input_shapes.values():
+            if len(shape) >= 2:
+                if shape[1] > 1:
+                    return 'prefill'
+                if shape[1] == 1:
+                    return 'decode'
+        return 'unknown'
     
     def _create_meta_model(self, model: nn.Module) -> nn.Module:
         """Create a meta device version of model."""

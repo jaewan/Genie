@@ -42,6 +42,8 @@ Key Innovations:
 """
 
 import logging
+import contextlib
+import asyncio
 import torch
 import torch.nn as nn
 from typing import Dict, Any, List, Optional, Tuple, Union
@@ -61,6 +63,7 @@ class ExecutionMetrics:
     activations_count: int
     output_refs_count: int
     success: bool
+    plan_summary: Optional[Dict[str, Any]] = None
 
 
 class HybridExecutor:
@@ -123,148 +126,69 @@ class HybridExecutor:
         
         try:
             logger.info("🚀 Hybrid execution starting (lazy output mode)")
-            
-            # CRITICAL: Acquire stream lock for exclusive GPU access
-            # Only one execution per GPU at a time
-            lock_start = time.perf_counter()
+
+            loop = asyncio.get_running_loop()
+
+            plan_start = time.perf_counter()
             with self.vmu.lock:
-                timing_breakdown['lock_acquire'] = (time.perf_counter() - lock_start) * 1000
-                logger.debug("Step 1: Acquired stream lock (exclusive GPU access)")
-                
-                # Step 2: Get memory plan
-                plan_start = time.perf_counter()
-                logger.debug("Step 2: Computing memory plan")
-                if self.meta_simulator:
-                    plan = self.meta_simulator.get_plan(model, inputs, self.vmu)
-                else:
-                    plan = None
-                timing_breakdown['planning'] = (time.perf_counter() - plan_start) * 1000
-                
-                # Step 3: GPU Device Placement (CRITICAL OPTIMIZATION)
-                placement_start = time.perf_counter()
-                logger.debug("Step 3: Placing model and inputs on GPU")
-                
-                # Get or cache GPU model
-                if torch.cuda.is_available():
-                    # Use model ID for caching (based on object id)
-                    model_id = id(model)
-                    
-                    if model_id not in self.model_cache:
-                        # First time seeing this model - move to GPU and cache
-                        logger.debug(f"First execution for model {model_id}, moving to GPU...")
-                        model_device = next(model.parameters()).device if list(model.parameters()) else None
-                        if model_device is None or model_device.type != 'cuda':
-                            logger.info(f"Moving model from {model_device} to {self.vmu.device}...")
-                            
-                            # WORKAROUND: Manually move parameters if .to() is patched/broken
-                            gpu_model = model
-                            for param in gpu_model.parameters():
-                                param.data = param.data.to(self.vmu.device)
-                            for buffer in gpu_model.buffers():
-                                buffer.data = buffer.data.to(self.vmu.device)
-                            
-                            # Also call .to() for metadata
-                            gpu_model = gpu_model.to(self.vmu.device)
-                            
-                            logger.info(f"✅ Moved model to {self.vmu.device} and cached. New device: {next(gpu_model.parameters()).device}")
-                        else:
-                            gpu_model = model
-                            logger.debug(f"Model already on GPU: {model_device}")
-                        
-                        # Ensure model is in eval mode
-                        gpu_model.eval()
-                        logger.debug(f"Model set to eval mode")
-                        
-                        self.model_cache[model_id] = gpu_model
-                    else:
-                        # Use cached GPU model
-                        gpu_model = self.model_cache[model_id]
-                        logger.debug(f"Using cached GPU model {model_id}")
-                    
-                    # Move inputs to GPU
-                    gpu_inputs = {}
-                    for key, value in inputs.items():
-                        if isinstance(value, torch.Tensor):
-                            if value.device.type != 'cuda':
-                                gpu_inputs[key] = value.to(self.vmu.device)
-                            else:
-                                gpu_inputs[key] = value
-                        else:
-                            gpu_inputs[key] = value
-                    num_gpu_tensors = len([v for v in gpu_inputs.values() if isinstance(v, torch.Tensor) and v.device.type == 'cuda'])
-                    logger.debug(f"Inputs on GPU: {num_gpu_tensors}/{len([v for v in gpu_inputs.values() if isinstance(v, torch.Tensor)])}")
-                else:
-                    gpu_model = model
-                    gpu_inputs = inputs
-                    logger.warning("CUDA not available, running on CPU")
-                
-                timing_breakdown['placement'] = (time.perf_counter() - placement_start) * 1000
-                
-                # Execute model forward pass on compute stream
+                plan = self.meta_simulator.get_plan(model, inputs, self.vmu) if self.meta_simulator else None
+            timing_breakdown['planning'] = (time.perf_counter() - plan_start) * 1000
+
+            placement_start = time.perf_counter()
+            gpu_model = self._ensure_model_on_gpu(model)
+            gpu_inputs = self._move_inputs_to_gpu(inputs)
+            timing_breakdown['placement'] = (time.perf_counter() - placement_start) * 1000
+
+            exec_stream = torch.cuda.Stream() if torch.cuda.is_available() else None
+            event = torch.cuda.Event() if torch.cuda.is_available() else None
+
+            execution_output = None
+            with torch.cuda.stream(exec_stream) if exec_stream else contextlib.nullcontext():
                 exec_start = time.perf_counter()
-                logger.debug("Step 4: Executing forward pass on GPU")
-                
-                # DEBUG: Check device
-                first_param = next(gpu_model.parameters())
-                logger.info(f"DEBUG: Model type: {type(gpu_model)}")
-                logger.info(f"DEBUG: Execution device: {first_param.device}, VMU device: {self.vmu.device}, available={torch.cuda.is_available()}")
-                
                 with torch.no_grad():
-                    # Execute directly without custom streams for now (optimization opportunity)
-                    # Custom streams can add overhead if not used correctly
-                    output = gpu_model(**gpu_inputs)
-                    
-                    # Synchronize to ensure execution completes before timing
-                    if torch.cuda.is_available():
-                        torch.cuda.synchronize()
-                
+                    execution_output = gpu_model(**gpu_inputs)
                 timing_breakdown['execution'] = (time.perf_counter() - exec_start) * 1000
-                
-                # Step 5: Skeletonize outputs (preserve structure)
+
                 skel_start = time.perf_counter()
-                logger.debug("Step 5: Skeletonizing outputs")
-                
                 if return_lazy:
-                    # Skeletonize: convert tensors to RemoteRefStubs while preserving structure
-                    skeleton = self._skeletonize(output, session_id)
-                    logger.info(f"✅ Output skeletonized")
+                    prepared_output = self._skeletonize(execution_output, session_id)
                 else:
-                    skeleton = output
-                
+                    prepared_output = self._materialize_to_cpu(execution_output)
                 timing_breakdown['skeletonization'] = (time.perf_counter() - skel_start) * 1000
-                
-                # Step 6: Cleanup and reset volatile memory
-                cleanup_start = time.perf_counter()
-                logger.debug("Step 6: Resetting volatile memory")
-                self.vmu.reset_volatile()
-                timing_breakdown['cleanup'] = (time.perf_counter() - cleanup_start) * 1000
-            
-            # Stream lock released here
-            
-            # Compute metrics
+
+                if event:
+                    event.record(exec_stream)
+
+            if event:
+                await loop.run_in_executor(None, event.synchronize)
+                torch.cuda.current_stream().wait_event(event)
+
+            cleanup_start = time.perf_counter()
+            with self.vmu.lock:
+                self.vmu.reset_stack()
+            timing_breakdown['cleanup'] = (time.perf_counter() - cleanup_start) * 1000
+
             duration_ms = (time.perf_counter() - start_time) * 1000
-            stats = self.vmu.get_memory_stats()
+            stats = self.vmu.get_stats()
             
             metrics = ExecutionMetrics(
                 duration_ms=duration_ms,
                 memory_peak_mb=stats.get('max_current_offset', 0) / 1024**2,
                 memory_persistent_mb=stats.get('persistent_allocated_bytes', 0) / 1024**2,
                 memory_volatile_mb=stats.get('volatile_allocated_bytes', 0) / 1024**2,
-                activations_count=self._count_activations(output),
-                output_refs_count=1 if return_lazy else 1,  # Skeleton = 1 object
-                success=True
+                activations_count=self._count_activations(execution_output),
+                output_refs_count=1,
+                success=True,
+                plan_summary=plan.semantic_summary if plan else None
             )
-            
-            # Get VMU stats
+
             vmu_stats = self.vmu.get_stats()
-            
             logger.info(
                 f"✅ Execution complete: {metrics.duration_ms:.1f}ms, "
                 f"peak memory {metrics.memory_peak_mb:.1f}MB"
             )
             logger.info(
                 f"   Timing breakdown: "
-                f"lock={timing_breakdown.get('lock_acquire', 0):.1f}ms, "
                 f"plan={timing_breakdown.get('planning', 0):.1f}ms, "
                 f"placement={timing_breakdown.get('placement', 0):.1f}ms, "
                 f"exec={timing_breakdown.get('execution', 0):.1f}ms, "
@@ -272,13 +196,13 @@ class HybridExecutor:
                 f"cleanup={timing_breakdown.get('cleanup', 0):.1f}ms"
             )
             logger.info(
-                f"   VMU usage: {vmu_stats['total_used_mb']:.1f}MB / "
-                f"{vmu_stats['slab_capacity_mb']:.1f}MB "
-                f"({vmu_stats['utilization_percent']:.1f}%), "
-                f"persistent={vmu_stats['persistent_used_mb']:.1f}MB"
+                f"   VMU usage: {vmu_stats['vmu_total_allocated_mb']:.1f}MB / "
+                f"{vmu_stats['vmu_total_capacity_mb']:.1f}MB "
+                f"({vmu_stats['vmu_utilization_percent']:.1f}%), "
+                f"persistent={vmu_stats['persistent_allocated_mb']:.1f}MB"
             )
             
-            return skeleton, metrics
+            return prepared_output, metrics
         
         except Exception as e:
             logger.error(f"❌ Execution failed: {e}")
@@ -290,7 +214,8 @@ class HybridExecutor:
                 memory_volatile_mb=0,
                 activations_count=0,
                 output_refs_count=0,
-                success=False
+                success=False,
+                plan_summary=None
             )
             
             raise
@@ -374,6 +299,54 @@ class HybridExecutor:
             return len(output)
         else:
             return 0
+    
+    def _ensure_model_on_gpu(self, model: nn.Module) -> nn.Module:
+        if not torch.cuda.is_available():
+            return model
+        model_id = id(model)
+        if model_id in self.model_cache:
+            return self.model_cache[model_id]
+        gpu_model = model
+        model_device = next(model.parameters()).device if list(model.parameters()) else None
+        if model_device is None or model_device.type != 'cuda':
+            logger.info(f"Moving model from {model_device} to {self.vmu.device}...")
+            for param in gpu_model.parameters():
+                param.data = param.data.to(self.vmu.device)
+            for buffer in gpu_model.buffers():
+                buffer.data = buffer.data.to(self.vmu.device)
+            gpu_model = gpu_model.to(self.vmu.device)
+        gpu_model.eval()
+        self.model_cache[model_id] = gpu_model
+        return gpu_model
+
+    def _move_inputs_to_gpu(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        if not torch.cuda.is_available():
+            return inputs
+        gpu_inputs: Dict[str, Any] = {}
+        for key, value in inputs.items():
+            if isinstance(value, torch.Tensor):
+                gpu_inputs[key] = value.to(self.vmu.device, non_blocking=True)
+            else:
+                gpu_inputs[key] = value
+        return gpu_inputs
+
+    def _materialize_to_cpu(self, output: Any) -> Any:
+        if not torch.cuda.is_available():
+            return output
+
+        def _to_cpu(t: torch.Tensor) -> torch.Tensor:
+            if t.device.type == 'cpu':
+                return t
+            return t.to('cpu', non_blocking=True)
+
+        if isinstance(output, torch.Tensor):
+            return _to_cpu(output)
+        if isinstance(output, dict):
+            return {k: self._materialize_to_cpu(v) for k, v in output.items()}
+        if isinstance(output, (list, tuple)):
+            converted = [self._materialize_to_cpu(v) for v in output]
+            return type(output)(converted)
+        return output
     
     def execute_graph_on_slab(self,
                              operations: List[Tuple[str, List, Dict]],

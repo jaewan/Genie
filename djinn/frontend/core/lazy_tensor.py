@@ -8,6 +8,7 @@ import torch
 from functools import lru_cache
 import time
 
+from ...common.async_local import AsyncLocal
 logger = logging.getLogger(__name__)
 
 # Import interception control for cleaner recursion handling
@@ -35,6 +36,74 @@ from .shape_inference import ShapeInference
 
 # ✅ Phase 7A: Import transformer operation classifier
 from .transformer_operations import classify_transformer_op, should_execute_transformer_op_remotely
+
+# ============================================================================
+# SRG ENHANCEMENT: Semantic Rich Graph Enrichment (<0.1ms overhead)
+# ============================================================================
+
+class PhaseDetector:
+    """
+    Incremental phase detector for transformer workloads.
+
+    Detects prefill vs decode phases during LazyTensor construction,
+    not after. This avoids expensive graph traversal.
+    """
+    def __init__(self):
+        self.attention_ops_count = 0
+        self.input_seq_length = None
+        self.phase = None  # Lazy evaluation
+
+    def observe_operation(self, op_name: str, input_shapes: List[torch.Size]):
+        """
+        Called during LazyTensor construction to observe operations.
+
+        Args:
+            op_name: Operation name (e.g., 'aten::matmul', 'attention')
+            input_shapes: Shapes of input tensors
+        """
+        # Look for attention operations
+        if any(keyword in op_name.lower() for keyword in ['attention', 'attn', 'self_attention']):
+            self.attention_ops_count += 1
+
+            # Extract sequence length from input shapes
+            # Typical attention input: [batch, seq_len, hidden] or [batch, num_heads, seq_len, seq_len]
+            if input_shapes:
+                for shape in input_shapes:
+                    if len(shape) >= 2:  # At least [batch, seq_len, ...]
+                        seq_len = shape[1]  # Second dimension is usually sequence length
+                        if self.input_seq_length is None:
+                            self.input_seq_length = seq_len
+                            break
+
+    def get_phase(self) -> str:
+        """
+        Get detected phase (lazy evaluation).
+
+        Returns:
+            'prefill', 'decode', or 'unknown'
+        """
+        if self.phase is None:
+            if self.input_seq_length is not None:
+                # Heuristic: prefill typically has seq_len > 1, decode has seq_len = 1
+                # This is a simple heuristic - can be made more sophisticated
+                self.phase = 'prefill' if self.input_seq_length > 1 else 'decode'
+            else:
+                self.phase = 'unknown'
+        return self.phase
+
+    def reset(self):
+        """Reset detector for next inference."""
+        self.attention_ops_count = 0
+        self.input_seq_length = None
+        self.phase = None
+
+
+# Thread-local phase detector (global instance)
+_phase_detector = PhaseDetector()
+
+_fake_mode_local = AsyncLocal("lazy_tensor_fake_mode")
+_shape_cache_local = AsyncLocal("lazy_tensor_shape_cache")
+
 
 # ============================================================================
 # PHASE 2 FIX: Minimal Tensor Wrapper for detach() Edge Case
@@ -192,32 +261,26 @@ def _call_with_timeout(fn, timeout_seconds=0.5):
 # ============================================================================
 
 def _get_thread_local_fake_mode():
-    """Get thread-local FakeTensorMode for reuse."""
-    if not hasattr(_get_thread_local_fake_mode, '_thread_local'):
-        _get_thread_local_fake_mode._thread_local = threading.local()
-
-    tls = _get_thread_local_fake_mode._thread_local
-    if not hasattr(tls, 'fake_mode'):
+    """Get async-local FakeTensorMode for reuse."""
+    fake_mode = getattr(_fake_mode_local, 'fake_mode', None)
+    if fake_mode is None:
         from torch._subclasses.fake_tensor import FakeTensorMode
-        tls.fake_mode = FakeTensorMode()
-
-    return tls.fake_mode
+        fake_mode = FakeTensorMode()
+        _fake_mode_local.fake_mode = fake_mode
+    return fake_mode
 
 
 def _get_thread_local_shape_cache() -> Dict[str, Optional[torch.Size]]:
     """
-    Get thread-local bounded shape cache.
+    Get async-local bounded shape cache.
 
-    Each thread gets its own bounded LRU cache to avoid race conditions
+    Each async context gets its own bounded LRU cache to avoid race conditions
     and prevent memory leaks in long-running applications.
 
     See: peer_review.md Phase 1.1 - Thread Safety
     """
-    if not hasattr(_get_thread_local_shape_cache, '_thread_local'):
-        _get_thread_local_shape_cache._thread_local = threading.local()
-
-    tls = _get_thread_local_shape_cache._thread_local
-    if not hasattr(tls, 'shape_cache'):
+    cache = getattr(_shape_cache_local, 'shape_cache', None)
+    if cache is None:
         # ✅ FIX: Bounded LRU cache to prevent memory leaks
         from functools import lru_cache
 
@@ -226,9 +289,10 @@ def _get_thread_local_shape_cache() -> Dict[str, Optional[torch.Size]]:
             """Bounded cache function for shape inference."""
             return None  # This will be overridden
 
-        tls.shape_cache = _bounded_shape_cache
+        cache = _bounded_shape_cache
+        _shape_cache_local.shape_cache = cache
 
-    return tls.shape_cache
+    return cache
 
 
 # ============================================================================
@@ -722,6 +786,11 @@ class LazyTensor(torch.Tensor):
                 final_metadata = None
         object.__setattr__(self, '_metadata', final_metadata or {})
 
+        # SRG ENHANCEMENT: Initialize semantic metadata (lazy evaluation)
+        object.__setattr__(self, '_semantic_class', None)  # Lazy: OperationClassifier result
+        object.__setattr__(self, '_lifecycle', None)       # Lazy: 'ephemeral' or 'persistent'
+        object.__setattr__(self, '_compute_cost', None)    # Lazy: Estimated FLOPs
+
         # Original device is already stored in __new__
 
         # Register with thread-local graph builder
@@ -731,6 +800,42 @@ class LazyTensor(torch.Tensor):
             builder.add_operation(self)
         except RuntimeError:
             # Graph builder not initialized yet - skip for now
+            pass
+
+        # SRG ENHANCEMENT: Observe operation for incremental phase detection
+        try:
+            # Extract input shapes for phase detection
+            input_shapes = []
+            for inp in self._inputs:
+                if hasattr(inp, 'shape') and isinstance(inp.shape, torch.Size):
+                    input_shapes.append(inp.shape)
+
+            # Observe operation
+            _phase_detector.observe_operation(self._operation, input_shapes)
+        except Exception:
+            # Phase detection is best-effort, don't fail if it breaks
+            pass
+
+        # SRG ENHANCEMENT: Automatically enrich with semantic metadata
+        try:
+            from .srg_enrichment import enrich_lazy_tensor_with_srg
+            enrich_lazy_tensor_with_srg(self)
+        except Exception as e:
+            # SRG enrichment is best-effort, don't fail if it breaks
+            pass
+
+        # SRG ENHANCEMENT: Observe operation for incremental phase detection
+        try:
+            # Extract input shapes for phase detection
+            input_shapes = []
+            for inp in self._inputs:
+                if hasattr(inp, 'shape') and isinstance(inp.shape, torch.Size):
+                    input_shapes.append(inp.shape)
+
+            # Observe operation
+            _phase_detector.observe_operation(self._operation, input_shapes)
+        except Exception:
+            # Phase detection is best-effort, don't fail if it breaks
             pass
 
     @classmethod

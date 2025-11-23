@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Dict, List, Set, Tuple, Optional
-import threading
 import warnings
 from torch import fx
+
+from ..common.async_local import AsyncLocal
 
 
 @dataclass
@@ -192,7 +193,7 @@ class ComputationGraph:
 class GraphBuilder:
 	"""Thread-local graph builder."""
 
-	_thread_local = threading.local()
+	_thread_local = AsyncLocal("legacy_graph_builder")
 
 	def __init__(self) -> None:
 		self._nodes: Dict[str, ComputationNode] = {}

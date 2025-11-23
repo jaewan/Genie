@@ -4,9 +4,9 @@ Interception control with single source of truth.
 This module provides thread-safe control over when Djinn should intercept operations.
 """
 
-import threading
 from enum import Enum
 
+from ...common.async_local import AsyncLocal
 
 class InterceptionContext(Enum):
     """What we're doing when interception is disabled."""
@@ -17,7 +17,7 @@ class InterceptionContext(Enum):
     PROPERTY_ACCESS = "property_access"  # Accessing tensor metadata
 
 
-_interception_context = threading.local()
+_interception_context = AsyncLocal("interception_context")
 
 
 def should_intercept(device=None, context_override=None):

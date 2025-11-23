@@ -7,11 +7,15 @@ device is requested. This bridges PyTorch's device model with Djinn's
 LazyTensor-based computation graph capture.
 """
 
+import os
 import torch
 import torch.nn as nn
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+_ENABLE_PRIVATEUSE1 = os.environ.get("DJINN_ENABLE_PRIVATEUSE1_DEVICE", "").lower() in {"1", "true", "yes"}
 
 
 def _register_device_python_fallback():
@@ -22,27 +26,27 @@ def _register_device_python_fallback():
     as a valid device type. This allows PyTorch functions to accept
     device='remote_accelerator:0' without validation errors.
     """
-    try:
-        # Register remote_accelerator using PyTorch's PrivateUse1 backend
-        # This makes PyTorch recognize 'remote_accelerator' as a valid device
-        if hasattr(torch.utils, 'rename_privateuse1_backend'):
+    if _ENABLE_PRIVATEUSE1 and hasattr(torch.utils, 'rename_privateuse1_backend'):
+        try:
             torch.utils.rename_privateuse1_backend("remote_accelerator")
+            torch.utils.generate_methods_for_privateuse1_backend(
+                for_tensor=True, for_module=True, for_packed_sequence=True, for_storage=False
+            )
             logger.info("✅ Registered remote_accelerator device via PrivateUse1 backend")
-        else:
-            # PyTorch version doesn't support rename_privateuse1_backend
-            logger.warning("⚠️  PyTorch version doesn't support PrivateUse1 backend renaming")
-            logger.info("✅ Python device fallback initialized (no registration needed)")
-        
-        # ✅ FIX: Device string mapping happens in LazyTensor constructor
-        # PyTorch's device validation is handled by PrivateUse1 backend registration above
-        # The ModuleNotFoundError for torch.remote_accelerator is expected and harmless
-        # since we use string-based device handling in LazyTensor, not module imports
-        
-        return True
-    except Exception as e:
-        logger.warning(f"⚠️  Failed to register device backend: {e}")
-        logger.info("✅ Python device fallback initialized (will work around validation)")
-        return False
+            return True
+        except Exception as e:
+            logger.warning(f"⚠️  PrivateUse1 backend registration failed: {e}")
+            logger.warning(
+                "   Falling back to internal device shim (pin_memory will remain available). "
+                "Set DJINN_ENABLE_PRIVATEUSE1_DEVICE=1 only if you provide a custom backend implementation."
+            )
+            return False
+
+    logger.info(
+        "ℹ️  Skipping PrivateUse1 backend rename (ensures pinned memory works out of the box). "
+        "Set DJINN_ENABLE_PRIVATEUSE1_DEVICE=1 to opt into official backend registration."
+    )
+    return False
 
 
 class RemoteAcceleratorSupport:

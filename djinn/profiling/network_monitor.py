@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from collections import defaultdict
 import time
 
+from ..common.async_local import AsyncLocal
+
 logger = logging.getLogger(__name__)
 
 
@@ -106,8 +108,8 @@ class NetworkMonitor:
         self._original_sendall = socket.socket.sendall
         self._monitoring_active = False
         
-        # Device context (thread-local to handle multi-threaded scenarios)
-        self._context = threading.local()
+        # Device context (async-aware to handle multi-threaded + async scenarios)
+        self._context = AsyncLocal("network_monitor_context")
     
     def start_monitoring(self):
         """Enable network monitoring by monkey-patching socket operations."""

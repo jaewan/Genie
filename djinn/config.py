@@ -158,6 +158,13 @@ class RuntimeConfig:
         )
 
 
+DEFAULT_QOS_SHARES = {
+    'realtime': 0.3,
+    'interactive': 0.5,
+    'batch': 0.2,
+}
+
+
 @dataclass
 class ServerConfig:
     """Server-specific configuration."""
@@ -173,9 +180,32 @@ class ServerConfig:
     enable_load_balancing: bool = True
     load_balance_threshold: float = 0.7  # 70% utilization
 
+    # QoS scheduling (Phase 1)
+    enable_qos: bool = True
+    qos_max_concurrency: int = 4
+    qos_class_shares: Dict[str, float] = field(default_factory=lambda: dict(DEFAULT_QOS_SHARES))
+    qos_default_class: str = 'interactive'
+
+    @staticmethod
+    def _parse_qos_shares(value: Optional[str]) -> Optional[Dict[str, float]]:
+        if not value:
+            return None
+        shares: Dict[str, float] = {}
+        for token in value.split(','):
+            token = token.strip()
+            if not token or '=' not in token:
+                continue
+            name, weight = token.split('=', 1)
+            try:
+                shares[name.strip().lower()] = float(weight.strip())
+            except ValueError:
+                continue
+        return shares or None
+
     @classmethod
     def from_env(cls) -> 'ServerConfig':
         """Load server config from environment variables."""
+        shares_override = cls._parse_qos_shares(os.getenv('GENIE_QOS_CLASS_SHARES'))
         return cls(
             node_id=os.getenv('GENIE_NODE_ID', 'genie-server-0'),
             max_concurrent_transfers=int(os.getenv('GENIE_MAX_TRANSFERS', 32)),
@@ -183,7 +213,11 @@ class ServerConfig:
             enable_resource_discovery=os.getenv('GENIE_RESOURCE_DISCOVERY', 'true').lower() == 'true',
             resource_check_interval=float(os.getenv('GENIE_RESOURCE_CHECK_INTERVAL', 60.0)),
             enable_load_balancing=os.getenv('GENIE_LOAD_BALANCING', 'true').lower() == 'true',
-            load_balance_threshold=float(os.getenv('GENIE_LOAD_THRESHOLD', 0.7))
+            load_balance_threshold=float(os.getenv('GENIE_LOAD_THRESHOLD', 0.7)),
+            enable_qos=os.getenv('GENIE_ENABLE_QOS', 'true').lower() == 'true',
+            qos_max_concurrency=int(os.getenv('GENIE_QOS_MAX_CONCURRENCY', 4)),
+            qos_class_shares=shares_override or dict(DEFAULT_QOS_SHARES),
+            qos_default_class=os.getenv('GENIE_QOS_DEFAULT_CLASS', 'interactive').lower()
         )
 
 
@@ -430,7 +464,11 @@ class DjinnConfig:
                 'enable_resource_discovery': self.server.enable_resource_discovery,
                 'resource_check_interval': self.server.resource_check_interval,
                 'enable_load_balancing': self.server.enable_load_balancing,
-                'load_balance_threshold': self.server.load_balance_threshold
+                'load_balance_threshold': self.server.load_balance_threshold,
+                'enable_qos': self.server.enable_qos,
+                'qos_max_concurrency': self.server.qos_max_concurrency,
+                'qos_class_shares': self.server.qos_class_shares,
+                'qos_default_class': self.server.qos_default_class,
             },
             'logging': {
                 'level': self.logging.level.value,

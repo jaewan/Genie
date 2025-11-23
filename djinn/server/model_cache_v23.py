@@ -38,8 +38,8 @@ class ModelCacheV23:
     
     def register_model(self, fingerprint: str, model: nn.Module, model_id: Optional[str] = None):
         """
-        Register model in cache with VMU-backed memory.
-        
+        Register model in cache using Text Segment for weights.
+
         Args:
             fingerprint: Model fingerprint
             model: PyTorch model
@@ -49,33 +49,60 @@ class ModelCacheV23:
             if fingerprint in self.models:
                 logger.debug(f"Model {fingerprint[:8]} already in cache")
                 return
-            
-            # Move model to GPU if not already there
+
+            # Use Text Segment for model weight storage
+            model_id = model_id or fingerprint
+
+            # Extract state dict for Text Segment loading
+            state_dict = model.state_dict()
+
+            # Load weights into Text Segment (shared, read-only)
+            success = self.vmu.load_model_to_text(model_id, state_dict)
+            if success:
+                logger.info(f"✅ Model {model_id} weights loaded into Text Segment")
+            else:
+                logger.info(f"ℹ️  Model {model_id} weights already in Text Segment (shared)")
+
+            # Replace model parameters with Text Segment views
+            if model_id in self.vmu.text_segment.loaded_models:
+                model_data = self.vmu.text_segment.loaded_models[model_id]
+                param_views = model_data['param_views']
+
+                # Replace each parameter with VMU-backed view
+                with torch.no_grad():
+                    for param_name, param in model.named_parameters():
+                        if param_name in param_views:
+                            # Replace parameter data with VMU view
+                            param.data = param_views[param_name]
+                            logger.debug(f"Replaced {param_name} with VMU-backed view")
+                        else:
+                            logger.warning(f"Parameter {param_name} not found in VMU param_views")
+
+                logger.info(f"✅ Model {model_id} parameters now backed by Text Segment")
+            else:
+                logger.error(f"Model {model_id} not found in Text Segment after loading")
+                return
+
+            # Verify model is on correct device
             if torch.cuda.is_available():
                 model_device = next(model.parameters()).device if list(model.parameters()) else None
-                if model_device is None or model_device.type != 'cuda':
-                    logger.info(f"Moving model {fingerprint[:8]} to GPU with VMU backing...")
-                    
-                    # First move to GPU using default allocator
-                    model = model.to(self.vmu.device)
-                    logger.info(f"✅ Model on GPU: {next(model.parameters()).device}")
-                    
-                    # Now move parameters to VMU slab
-                    from djinn.backend.runtime.vmu_allocator import move_model_to_vmu
-                    vmu_stats = move_model_to_vmu(model, self.vmu, verbose=False)
-                    
-                    logger.info(
-                        f"✅ Model {fingerprint[:8]} backed by VMU: "
-                        f"{vmu_stats['total_bytes'] / 1024**2:.2f}MB in slab"
-                    )
-            
+                if model_device != self.vmu.device:
+                    logger.warning(f"Model parameters not on expected device: {model_device} vs {self.vmu.device}")
+                else:
+                    logger.info(f"✅ Model parameters on VMU device: {model_device}")
+
             # Set to eval mode
             model.eval()
-            
-            # Store in cache
+
+            # Store in cache (model object points to Text Segment weights)
             self.models[fingerprint] = model
-            
-            logger.info(f"✅ Model {fingerprint[:8]} cached on GPU with VMU backing")
+
+            # Log memory usage
+            text_stats = self.vmu.text_segment.get_stats()
+            logger.info(
+                f"✅ Model {fingerprint[:8]} cached with Text Segment backing: "
+                f"{text_stats['loaded_bytes'] / 1024**2:.1f}MB total weights"
+            )
     
     def get_model(self, fingerprint: str) -> Optional[nn.Module]:
         """
@@ -101,8 +128,8 @@ class ModelCacheV23:
 _global_cache: Optional[ModelCacheV23] = None
 
 
-def get_model_cache() -> ModelCacheV23:
-    """Get or create global model cache."""
+def get_model_cache_v23() -> ModelCacheV23:
+    """Get or create global model cache v2.3."""
     global _global_cache
     if _global_cache is None:
         _global_cache = ModelCacheV23()

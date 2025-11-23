@@ -1,9 +1,10 @@
 """Module context tracking for semantic metadata enrichment."""
 
-import threading
 from typing import Optional, List, Dict, Any
 import torch.nn as nn
 from dataclasses import dataclass, field
+
+from ...common.async_local import AsyncLocal
 
 
 @dataclass 
@@ -23,7 +24,7 @@ class ModuleContextTracker:
     which nn.Module is currently executing, enabling rich semantic metadata.
     """
     
-    _thread_local = threading.local()
+    _thread_local = AsyncLocal("module_context_tracker")
     
     def __init__(self):
         self._module_hooks = {}

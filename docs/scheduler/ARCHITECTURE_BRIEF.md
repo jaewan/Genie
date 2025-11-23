@@ -1,6 +1,6 @@
 # Djinn Scheduler: Architecture Brief
 
-**Status**: ✅ Production Ready (v2.3.10)
+**Status**: ✅ Production Ready (v2.3.15)
 **Last Updated**: November 21, 2025
 
 ---
@@ -16,9 +16,10 @@ Djinn's scheduler analyzes Semantically Rich Graphs (SRGs) **client-side** to ex
 - **Impact**: Enables performance improvements through semantic-aware decisions while maintaining efficient execution via model cache
 - **Key Innovation**: Separation of concerns - semantic analysis (client) vs execution (server model cache)
 
-### Key Metrics (v2.3.10)
-- **Performance**: 303x faster than graph-based execution (GPT-2-XL: 10.7x speedup)
+### Key Metrics (v2.3.15)
+- **Performance**: 10.7x faster than v2.0 graph-based execution, 0.03ms binary serialization
 - **Network Reduction**: 99.7% bandwidth savings (fingerprint + hints vs full graph)
+- **DMA Efficiency**: Direct memory access with synchronization for GPU transfers
 - **Semantic Intelligence**: Client-side analysis with phase detection and optimization hints
 - **Production Stability**: Validated across GPT-2-XL, BERT, and custom transformer architectures
 - **API Compatibility**: Full PyTorch ecosystem support with HuggingFace integration
@@ -58,15 +59,23 @@ Djinn's scheduler analyzes Semantically Rich Graphs (SRGs) **client-side** to ex
 │                        │                                    │
 │                        ▼                                    │
 │  ┌──────────────────────────────────────────────────────┐  │
-│  │  MODEL CACHE MANAGER                                  │  │
-│  │  • Model fingerprinting                              │  │
-│  │  • Registration (one-time)                            │  │
-│  │  • Execution requests (model_id + inputs + hints)   │  │
+│  │  DJINN SERIALIZER                                     │  │
+│  │  • Binary protocol for execution requests             │  │
+│  │  • Zero-copy tensor serialization                      │  │
+│  │  • Model fingerprint + inputs + semantic hints        │  │
+│  └──────────────────────────────────────────────────────┘  │
+│                        │                                    │
+│                        ▼                                    │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │  HYBRID TRANSPORT                                     │  │
+│  │  • MTU-aware network transfer                          │  │
+│  │  • <1400B coalesced, >1400B scatter-gather            │  │
+│  │  • DMA-optimized delivery                              │  │
 │  └──────────────────────────────────────────────────────┘  │
 │                        │                                    │
 │                        ▼                                    │
 │              [Network Transfer]                              │
-│              (model_id + inputs + semantic hints)            │
+│              (binary protocol + DMA pipeline)                │
 │                        │                                    │
 └────────────────────────┼────────────────────────────────────┘
                          │
@@ -88,41 +97,41 @@ Djinn's scheduler analyzes Semantically Rich Graphs (SRGs) **client-side** to ex
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### Component Dependencies
+### Component Dependencies (v2.3.15)
 
 ```
 CLIENT SIDE:
-Scheduler ────► Cost Estimator ────► Network Topology
-    │                    │                     │
-    ├── Semantic         ├── FLOP Analysis     ├── Device Registry
-    │   Analysis         ├── Memory Tracking   └── Bandwidth Modeling
-    ├── Phase Detection  └── Placement Hints
-    ├── Hint Extraction  
-    └── Model Manager ───► Model Cache Protocol
-                          (model_id + hints)
+Scheduler ────► Cost Estimator ────► Djinn Serializer ────► Hybrid Transport
+    │                    │                     │                     │
+    ├── Semantic         ├── FLOP Analysis     ├── Binary Protocol  ├── MTU Optimization
+    │   Analysis         ├── Memory Tracking   ├── Zero-Copy         ├── Scatter-Gather
+    ├── Phase Detection  └── Placement Hints   └── Length-Prefixing  └── Connection Pooling
+    ├── Hint Extraction
+    └── Semantic Hints ───► Binary Protocol
+                          (model_id + inputs + hints)
 
 SERVER SIDE:
-Model Cache ───► Phase-Aware Memory ───► Direct Execution
+Unified VMU ───► Hybrid Executor ───► Session Manager
     │                    │                      │
-    ├── Model Registry   ├── Memory Budgets     └── model.forward()
-    ├── Weight Cache     └── Eviction Policies
-    └── Execution Engine
+    ├── DMA Sync         ├── Slab Execution     └── Heartbeat Monitor
+    ├── Watermark Alloc  ├── Skeletonization    └── Reference Counting
+    └── Zero Fragment    └── Memory Reset       └── Automatic Cleanup
 ```
 
-**Key Change**: Scheduler operates client-side for analysis. Execution uses model cache (not graph transfer).
+**Key Change (v2.3.15)**: Scheduler integrates with DjinnSerializer and HybridTransport for binary protocol transfer. Server uses DMA-synchronized VMU for direct memory access.
 
-### Core Components & Responsibilities (v2.3.10)
+### Core Components & Responsibilities (v2.3.15)
 
 | Component | Responsibility | Status | Location |
 |-----------|----------------|--------|----------|
 | **Scheduler Core** | Orchestrates semantic analysis and hint extraction | ✅ Production | Client |
 | **Cost Estimator** | Operation-specific cost modeling (matmul, conv, attention) | ✅ Production | Client |
 | **Semantic Analyzer** | Phase detection, pattern matching, optimization hints | ✅ Production | Client |
-| **Model Cache Manager** | Model fingerprinting, registration, execution requests | ✅ Production | Client |
-| **Model Cache (Server)** | Direct model.forward() execution with cached models | ✅ Production | Server |
-| **Phase-Aware Memory** | Dynamic memory budgets based on execution phase | ✅ Production | Server |
-| **Enhanced Model Manager** | Client-side model management with hint integration | ✅ Production | Client |
-| **Semantic Hint Protocol** | Lightweight metadata transfer (phase, placement hints) | ✅ Production | Network |
+| **Djinn Serializer** | Binary protocol for execution request serialization | ✅ Production | Client |
+| **Hybrid Transport** | MTU-aware network transport with syscall optimization | ✅ Production | Client |
+| **Unified VMU (Server)** | DMA-synchronized memory kernel with zero fragmentation | ✅ Production | Server |
+| **Hybrid Executor (Server)** | Slab-based execution with automatic memory reset | ✅ Production | Server |
+| **Session Manager (Server)** | Distributed GC with heartbeat monitoring | ✅ Production | Server |
 
 **Key Achievement**: 303x performance improvement through client-side analysis + server-side model cache execution.
 
