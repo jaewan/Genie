@@ -26,6 +26,7 @@ class MessageType(IntEnum):
     REGISTER_MODEL_FINALIZE = 0x0B
     QUERY_RESULT = 0x0C  # ✅ NEW: Query result of async task
     EXECUTE_BATCH = 0x0D  # ✅ NEW: Execute batch of models
+    EXECUTE_STAGE = 0x0E  # Stage-level execution (encoder/decoder)
 
     # Error response
     ERROR = 0xFF

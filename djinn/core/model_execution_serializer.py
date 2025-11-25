@@ -64,7 +64,8 @@ class ModelExecutionSerializer:
         inputs: Dict[str, torch.Tensor],
         profile_id: Optional[str] = None,
         qos_class: Optional[str] = None,
-        deadline_ms: Optional[int] = None
+        deadline_ms: Optional[int] = None,
+        extra_metadata: Optional[Dict[str, Any]] = None,
     ) -> bytes:
         """
         Serialize EXECUTE_MODEL request to binary protocol.
@@ -90,6 +91,8 @@ class ModelExecutionSerializer:
             metadata['qos_class'] = qos_class
         if deadline_ms is not None:
             metadata['deadline_ms'] = deadline_ms
+        if extra_metadata:
+            metadata.update(extra_metadata)
         metadata_json = json.dumps(metadata).encode('utf-8')
 
         # Serialize tensors to numpy format (zero-copy for CPU tensors)
@@ -198,7 +201,16 @@ class ModelExecutionSerializer:
 
         extras = {
             'qos_class': metadata.get('qos_class'),
-            'deadline_ms': metadata.get('deadline_ms')
+            'deadline_ms': metadata.get('deadline_ms'),
+            'stage': metadata.get('stage'),
+            'stage_options': metadata.get('stage_options'),
+            'session_id': metadata.get('session_id'),
+            'state_handle': metadata.get('state_handle'),
+            # Phase 3: Extract semantic hints from metadata
+            'execution_phase': metadata.get('execution_phase'),
+            'priority': metadata.get('priority'),
+            'kv_cache_size_mb': metadata.get('kv_cache_size_mb'),
+            'expected_tokens': metadata.get('expected_tokens'),
         }
 
         return fingerprint, inputs, profile_id, extras
@@ -207,7 +219,8 @@ class ModelExecutionSerializer:
     def serialize_execute_response(
         result: Any,
         metrics: Optional[Dict[str, float]] = None,
-        status: str = 'success'
+        status: str = 'success',
+        message: Optional[str] = None,
     ) -> bytes:
         """
         Serialize EXECUTE_MODEL response to binary protocol.
@@ -246,6 +259,8 @@ class ModelExecutionSerializer:
             'metrics': metrics or {},
             'result_structure': result_structure
         }
+        if message:
+            metadata['message'] = message
         metadata_json = json.dumps(metadata).encode('utf-8')
 
         # Serialize result data
@@ -304,7 +319,7 @@ class ModelExecutionSerializer:
         return header + metadata_json + bytes(result_data)
 
     @staticmethod
-    def deserialize_execute_response(data: bytes) -> Tuple[Any, Dict[str, float], str]:
+    def deserialize_execute_response(data: bytes) -> Tuple[Any, Dict[str, float], str, Optional[str]]:
         """
         Deserialize EXECUTE_MODEL response from binary protocol.
 
@@ -335,6 +350,7 @@ class ModelExecutionSerializer:
 
         status = metadata['status']
         metrics = metadata.get('metrics', {})
+        message = metadata.get('message')
 
         # Parse result
         if result_type == RESULT_TYPE_TENSOR:
@@ -425,7 +441,7 @@ class ModelExecutionSerializer:
         else:
             raise ValueError(f"Unsupported result type: {result_type}")
 
-        return result, metrics, status
+        return result, metrics, status, message
 
     @staticmethod
     def _build_header(metadata_len: int, tensor_count: int) -> bytes:

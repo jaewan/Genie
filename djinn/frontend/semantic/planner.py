@@ -3,7 +3,8 @@ from __future__ import annotations
 from typing import List, Dict, Any
 from uuid import uuid4
 
-from djinn.core.graph import ComputationGraph
+from djinn.core.graph_interface import Graph as DjinnGraph
+from djinn.core.computation_graph_adapter import ComputationGraphAdapter
 from .workload import ExecutionPlan, PlanFragment, WorkloadProfile
 
 
@@ -18,7 +19,7 @@ class Planner:
     def __init__(self) -> None:
         pass
 
-    def generate_plan(self, graph: ComputationGraph, profile: WorkloadProfile) -> ExecutionPlan:
+    def generate_plan(self, graph: DjinnGraph, profile: WorkloadProfile) -> ExecutionPlan:
         fragment = self._build_whole_graph_fragment(graph)
         placement: Dict[str, Any] = {fragment.fragment_id: self._choose_placement(profile)}
         transfers: List[Dict[str, Any]] = []
@@ -34,12 +35,16 @@ class Planner:
             feature_flags=feature_flags,
         )
 
-    def _build_whole_graph_fragment(self, graph: ComputationGraph) -> PlanFragment:
+    def _build_whole_graph_fragment(self, graph: DjinnGraph) -> PlanFragment:
         fragment_id = f"frag_{uuid4().hex[:8]}"
-        inputs = list(graph.entry_points)
-        # Outputs are nodes with no outgoing edges
-        with_outgoing = {src for src, _ in graph.edges}
-        outputs = [nid for nid in graph.nodes.keys() if nid not in with_outgoing]
+        # ✅ PHASE 3: Use unified Graph interface
+        # Entry points are root nodes (no inputs)
+        inputs = [node.id for node in graph.get_roots()]
+        # Outputs are leaf nodes (no outputs)
+        outputs = [node.id for node in graph.get_leaves()]
+        # For backward compatibility, store graph reference
+        # (PlanFragment may expect ComputationGraph, adapter handles this)
+        subgraph = graph
         return PlanFragment(
             fragment_id=fragment_id,
             subgraph=graph,

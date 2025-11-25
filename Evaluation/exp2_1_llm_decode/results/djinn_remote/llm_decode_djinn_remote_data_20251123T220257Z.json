@@ -1,0 +1,59 @@
+{
+  "baseline": "djinn_remote_data",
+  "model_id": "sshleifer/tiny-gpt2",
+  "prompt_tokens": 8,
+  "new_tokens": 2,
+  "batch_size": 1,
+  "runs": [
+    {
+      "total_ms": 327.3105602711439,
+      "per_token_ms": 163.65528013557196,
+      "tokens_generated": 2,
+      "throughput_tokens_per_s": 6.110404743260348,
+      "host_to_device_mb": 0.0002593994140625,
+      "device_to_host_mb": 3.2591590881347656,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "stairs stairs",
+      "run_id": 1
+    }
+  ],
+  "aggregates": {
+    "total_ms": {
+      "mean": 327.3105602711439,
+      "median": 327.3105602711439,
+      "p95": 327.3105602711439,
+      "min": 327.3105602711439,
+      "max": 327.3105602711439
+    },
+    "per_token_ms": {
+      "mean": 163.65528013557196,
+      "median": 163.65528013557196,
+      "p95": 163.65528013557196,
+      "min": 163.65528013557196,
+      "max": 163.65528013557196
+    },
+    "throughput_tokens_per_s": {
+      "mean": 6.110404743260348,
+      "median": 6.110404743260348,
+      "p95": 6.110404743260348,
+      "min": 6.110404743260348,
+      "max": 6.110404743260348
+    }
+  },
+  "device": "Djinn remote (localhost:5556)",
+  "dtype": "float16",
+  "backend": "djinn",
+  "djinn_server": "localhost:5556",
+  "seed": 42,
+  "library_versions": {
+    "torch": "2.9.0+cu128",
+    "transformers": "4.57.1"
+  },
+  "meta": {
+    "prompt_file": null,
+    "prompt_text": null,
+    "sample_gpu": false
+  }
+}

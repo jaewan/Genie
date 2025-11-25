@@ -1,0 +1,111 @@
+{
+  "baseline": "partially_aware",
+  "model_id": "gpt2",
+  "prompt_tokens": 32,
+  "new_tokens": 20,
+  "batch_size": 1,
+  "runs": [
+    {
+      "total_ms": 594.7199212387204,
+      "per_token_ms": 29.73599606193602,
+      "tokens_generated": 20,
+      "throughput_tokens_per_s": 33.629275371073376,
+      "host_to_device_mb": 0.012664794921875,
+      "device_to_host_mb": 159.12364959716797,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The KV cache is a single-threaded, multi-threaded, multi-threaded",
+      "run_id": 1
+    },
+    {
+      "total_ms": 606.3045747578144,
+      "per_token_ms": 30.31522873789072,
+      "tokens_generated": 20,
+      "throughput_tokens_per_s": 32.986721249776004,
+      "host_to_device_mb": 0.012664794921875,
+      "device_to_host_mb": 159.12364959716797,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The KV cache is a single-threaded, multi-threaded, multi-threaded",
+      "run_id": 2
+    },
+    {
+      "total_ms": 612.6845935359597,
+      "per_token_ms": 30.634229676797986,
+      "tokens_generated": 20,
+      "throughput_tokens_per_s": 32.643223301201154,
+      "host_to_device_mb": 0.012664794921875,
+      "device_to_host_mb": 159.12364959716797,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The KV cache is a single-threaded, multi-threaded, multi-threaded",
+      "run_id": 3
+    },
+    {
+      "total_ms": 587.6327389851213,
+      "per_token_ms": 29.381636949256063,
+      "tokens_generated": 20,
+      "throughput_tokens_per_s": 34.03486339876376,
+      "host_to_device_mb": 0.012664794921875,
+      "device_to_host_mb": 159.12364959716797,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The KV cache is a single-threaded, multi-threaded, multi-threaded",
+      "run_id": 4
+    },
+    {
+      "total_ms": 611.9846450164914,
+      "per_token_ms": 30.59923225082457,
+      "tokens_generated": 20,
+      "throughput_tokens_per_s": 32.68055851215197,
+      "host_to_device_mb": 0.012664794921875,
+      "device_to_host_mb": 159.12364959716797,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The KV cache is a single-threaded, multi-threaded, multi-threaded",
+      "run_id": 5
+    }
+  ],
+  "aggregates": {
+    "total_ms": {
+      "mean": 602.6652947068214,
+      "median": 606.3045747578144,
+      "p95": 612.5446038320661,
+      "min": 587.6327389851213,
+      "max": 612.6845935359597
+    },
+    "per_token_ms": {
+      "mean": 30.133264735341072,
+      "median": 30.31522873789072,
+      "p95": 30.627230191603303,
+      "min": 29.381636949256063,
+      "max": 30.634229676797986
+    },
+    "throughput_tokens_per_s": {
+      "mean": 33.19492836659325,
+      "median": 32.986721249776004,
+      "p95": 33.953745793225686,
+      "min": 32.643223301201154,
+      "max": 34.03486339876376
+    }
+  },
+  "device": "Djinn remote (localhost:5556)",
+  "dtype": "float16",
+  "backend": "djinn",
+  "djinn_server": "localhost:5556",
+  "seed": 42,
+  "library_versions": {
+    "torch": "2.9.0+cu128",
+    "transformers": "4.57.1"
+  },
+  "meta": {
+    "prompt_file": null,
+    "prompt_text": null,
+    "sample_gpu": false
+  }
+}

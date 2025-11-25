@@ -1,0 +1,59 @@
+{
+  "baseline": "remote_test",
+  "model_id": "sshleifer/tiny-gpt2",
+  "prompt_tokens": 72,
+  "new_tokens": 5,
+  "batch_size": 1,
+  "runs": [
+    {
+      "total_ms": 745.3722562640905,
+      "per_token_ms": 149.0744512528181,
+      "tokens_generated": 5,
+      "throughput_tokens_per_s": 6.7080575618157505,
+      "host_to_device_mb": 0.005645751953125,
+      "device_to_host_mb": 70.93463897705078,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "stairs stairs stairs stairs stairs",
+      "run_id": 1
+    }
+  ],
+  "aggregates": {
+    "total_ms": {
+      "mean": 745.3722562640905,
+      "median": 745.3722562640905,
+      "p95": 745.3722562640905,
+      "min": 745.3722562640905,
+      "max": 745.3722562640905
+    },
+    "per_token_ms": {
+      "mean": 149.0744512528181,
+      "median": 149.0744512528181,
+      "p95": 149.0744512528181,
+      "min": 149.0744512528181,
+      "max": 149.0744512528181
+    },
+    "throughput_tokens_per_s": {
+      "mean": 6.7080575618157505,
+      "median": 6.7080575618157505,
+      "p95": 6.7080575618157505,
+      "min": 6.7080575618157505,
+      "max": 6.7080575618157505
+    }
+  },
+  "device": "Djinn remote (localhost:5556)",
+  "dtype": "float16",
+  "backend": "djinn",
+  "djinn_server": "localhost:5556",
+  "seed": 42,
+  "library_versions": {
+    "torch": "2.9.0+cu128",
+    "transformers": "4.57.1"
+  },
+  "meta": {
+    "prompt_file": null,
+    "prompt_text": "Hello world",
+    "sample_gpu": false
+  }
+}

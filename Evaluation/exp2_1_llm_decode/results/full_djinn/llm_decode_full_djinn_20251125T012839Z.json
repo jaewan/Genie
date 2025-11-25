@@ -1,0 +1,85 @@
+{
+  "baseline": "full_djinn",
+  "model_id": "gpt2",
+  "prompt_tokens": 32,
+  "new_tokens": 10,
+  "batch_size": 1,
+  "runs": [
+    {
+      "total_ms": 153.93369179219007,
+      "per_token_ms": 15.393369179219007,
+      "tokens_generated": 10,
+      "throughput_tokens_per_s": 64.96303625004956,
+      "host_to_device_mb": 0.0006256103515625,
+      "device_to_host_mb": 7.860324859619141,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The",
+      "run_id": 1
+    },
+    {
+      "total_ms": 159.89343635737896,
+      "per_token_ms": 15.989343635737896,
+      "tokens_generated": 10,
+      "throughput_tokens_per_s": 62.54165416552139,
+      "host_to_device_mb": 0.0006256103515625,
+      "device_to_host_mb": 7.860324859619141,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The",
+      "run_id": 2
+    },
+    {
+      "total_ms": 161.8202179670334,
+      "per_token_ms": 16.18202179670334,
+      "tokens_generated": 10,
+      "throughput_tokens_per_s": 61.7969752212127,
+      "host_to_device_mb": 0.0006256103515625,
+      "device_to_host_mb": 7.860324859619141,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The",
+      "run_id": 3
+    }
+  ],
+  "aggregates": {
+    "total_ms": {
+      "mean": 158.54911537220082,
+      "median": 159.89343635737896,
+      "p95": 161.62753980606794,
+      "min": 153.93369179219007,
+      "max": 161.8202179670334
+    },
+    "per_token_ms": {
+      "mean": 15.854911537220081,
+      "median": 15.989343635737896,
+      "p95": 16.162753980606794,
+      "min": 15.393369179219007,
+      "max": 16.18202179670334
+    },
+    "throughput_tokens_per_s": {
+      "mean": 63.10055521226121,
+      "median": 62.54165416552139,
+      "p95": 64.72089804159674,
+      "min": 61.7969752212127,
+      "max": 64.96303625004956
+    }
+  },
+  "device": "Djinn remote (localhost:5556)",
+  "dtype": "float16",
+  "backend": "djinn",
+  "djinn_server": "localhost:5556",
+  "seed": 42,
+  "library_versions": {
+    "torch": "2.9.0+cu128",
+    "transformers": "4.57.1"
+  },
+  "meta": {
+    "prompt_file": null,
+    "prompt_text": null,
+    "sample_gpu": false
+  }
+}

@@ -1,0 +1,221 @@
+{
+  "runs": [
+    {
+      "workload": "llama7b_decode",
+      "model_id": "meta-llama/Llama-2-7b-hf",
+      "workload_type": "llm",
+      "config_name": "full_djinn",
+      "config": {
+        "transport": "network",
+        "qos_class": "interactive",
+        "deadline_ms": null,
+        "enable_vmu": true,
+        "description": "Reference system (all semantic features on).",
+        "enable_phase_detection": true,
+        "enable_stateful_caching": true,
+        "enable_kv_persistence": true,
+        "enable_plan_cache": true,
+        "enable_skeletonization": true
+      }
+    },
+    {
+      "workload": "llama7b_decode",
+      "model_id": "meta-llama/Llama-2-7b-hf",
+      "workload_type": "llm",
+      "config_name": "no_skeletonization",
+      "config": {
+        "transport": "network",
+        "qos_class": "interactive",
+        "deadline_ms": null,
+        "enable_vmu": true,
+        "description": "Materialize full tensors back to host.",
+        "enable_phase_detection": true,
+        "enable_stateful_caching": true,
+        "enable_kv_persistence": true,
+        "enable_plan_cache": true,
+        "enable_skeletonization": false
+      }
+    },
+    {
+      "workload": "llama7b_decode",
+      "model_id": "meta-llama/Llama-2-7b-hf",
+      "workload_type": "llm",
+      "config_name": "no_stateful_caching",
+      "config": {
+        "transport": "network",
+        "qos_class": "interactive",
+        "deadline_ms": null,
+        "enable_vmu": true,
+        "description": "Disable KV cache persistence.",
+        "enable_phase_detection": true,
+        "enable_stateful_caching": false,
+        "enable_kv_persistence": false,
+        "enable_plan_cache": true,
+        "enable_skeletonization": true
+      }
+    },
+    {
+      "workload": "llama7b_decode",
+      "model_id": "meta-llama/Llama-2-7b-hf",
+      "workload_type": "llm",
+      "config_name": "no_phase_detection",
+      "config": {
+        "transport": "network",
+        "qos_class": "interactive",
+        "deadline_ms": null,
+        "enable_vmu": true,
+        "description": "Disable phase detection (prefill/decode treated uniformly).",
+        "enable_phase_detection": false,
+        "enable_stateful_caching": true,
+        "enable_kv_persistence": true,
+        "enable_plan_cache": true,
+        "enable_skeletonization": true
+      }
+    },
+    {
+      "workload": "llama7b_decode",
+      "model_id": "meta-llama/Llama-2-7b-hf",
+      "workload_type": "llm",
+      "config_name": "no_vmu",
+      "config": {
+        "transport": "network",
+        "qos_class": "interactive",
+        "deadline_ms": null,
+        "enable_vmu": false,
+        "description": "VMU disabled; fall back to cudaMalloc.",
+        "enable_phase_detection": true,
+        "enable_stateful_caching": true,
+        "enable_kv_persistence": true,
+        "enable_plan_cache": true,
+        "enable_skeletonization": true
+      }
+    },
+    {
+      "workload": "llama7b_decode",
+      "model_id": "meta-llama/Llama-2-7b-hf",
+      "workload_type": "llm",
+      "config_name": "no_plan_cache",
+      "config": {
+        "transport": "network",
+        "qos_class": "interactive",
+        "deadline_ms": null,
+        "enable_vmu": true,
+        "description": "Always recompute plans.",
+        "enable_phase_detection": true,
+        "enable_stateful_caching": true,
+        "enable_kv_persistence": true,
+        "enable_plan_cache": false,
+        "enable_skeletonization": true
+      }
+    },
+    {
+      "workload": "resnet50_batch",
+      "model_id": "resnet50",
+      "workload_type": "vision",
+      "config_name": "full_djinn",
+      "config": {
+        "transport": "network",
+        "qos_class": "interactive",
+        "deadline_ms": null,
+        "enable_vmu": true,
+        "description": "Reference system (all semantic features on).",
+        "enable_phase_detection": true,
+        "enable_stateful_caching": true,
+        "enable_kv_persistence": true,
+        "enable_plan_cache": true,
+        "enable_skeletonization": true
+      }
+    },
+    {
+      "workload": "resnet50_batch",
+      "model_id": "resnet50",
+      "workload_type": "vision",
+      "config_name": "no_skeletonization",
+      "config": {
+        "transport": "network",
+        "qos_class": "interactive",
+        "deadline_ms": null,
+        "enable_vmu": true,
+        "description": "Materialize full tensors back to host.",
+        "enable_phase_detection": true,
+        "enable_stateful_caching": true,
+        "enable_kv_persistence": true,
+        "enable_plan_cache": true,
+        "enable_skeletonization": false
+      }
+    },
+    {
+      "workload": "resnet50_batch",
+      "model_id": "resnet50",
+      "workload_type": "vision",
+      "config_name": "no_stateful_caching",
+      "config": {
+        "transport": "network",
+        "qos_class": "interactive",
+        "deadline_ms": null,
+        "enable_vmu": true,
+        "description": "Disable KV cache persistence.",
+        "enable_phase_detection": true,
+        "enable_stateful_caching": false,
+        "enable_kv_persistence": false,
+        "enable_plan_cache": true,
+        "enable_skeletonization": true
+      }
+    },
+    {
+      "workload": "resnet50_batch",
+      "model_id": "resnet50",
+      "workload_type": "vision",
+      "config_name": "no_phase_detection",
+      "config": {
+        "transport": "network",
+        "qos_class": "interactive",
+        "deadline_ms": null,
+        "enable_vmu": true,
+        "description": "Disable phase detection (prefill/decode treated uniformly).",
+        "enable_phase_detection": false,
+        "enable_stateful_caching": true,
+        "enable_kv_persistence": true,
+        "enable_plan_cache": true,
+        "enable_skeletonization": true
+      }
+    },
+    {
+      "workload": "resnet50_batch",
+      "model_id": "resnet50",
+      "workload_type": "vision",
+      "config_name": "no_vmu",
+      "config": {
+        "transport": "network",
+        "qos_class": "interactive",
+        "deadline_ms": null,
+        "enable_vmu": false,
+        "description": "VMU disabled; fall back to cudaMalloc.",
+        "enable_phase_detection": true,
+        "enable_stateful_caching": true,
+        "enable_kv_persistence": true,
+        "enable_plan_cache": true,
+        "enable_skeletonization": true
+      }
+    },
+    {
+      "workload": "resnet50_batch",
+      "model_id": "resnet50",
+      "workload_type": "vision",
+      "config_name": "no_plan_cache",
+      "config": {
+        "transport": "network",
+        "qos_class": "interactive",
+        "deadline_ms": null,
+        "enable_vmu": true,
+        "description": "Always recompute plans.",
+        "enable_phase_detection": true,
+        "enable_stateful_caching": true,
+        "enable_kv_persistence": true,
+        "enable_plan_cache": false,
+        "enable_skeletonization": true
+      }
+    }
+  ],
+  "run_count": 12
+}

@@ -68,15 +68,27 @@ class ModelCacheV23:
                 model_data = self.vmu.text_segment.loaded_models[model_id]
                 param_views = model_data['param_views']
 
-                # Replace each parameter with VMU-backed view
+            # Replace each parameter/buffer with VMU-backed view
+                named_params = dict(model.named_parameters())
+                named_buffers = dict(model.named_buffers())
                 with torch.no_grad():
-                    for param_name, param in model.named_parameters():
-                        if param_name in param_views:
-                            # Replace parameter data with VMU view
-                            param.data = param_views[param_name]
-                            logger.debug(f"Replaced {param_name} with VMU-backed view")
+                    for name, view in param_views.items():
+                        target = None
+                        if name in named_params:
+                            target = named_params[name]
+                        elif name in named_buffers:
+                            target = named_buffers[name]
+                        if target is not None:
+                            target.data = view
+                            logger.debug(f"Replaced {name} with VMU-backed view")
                         else:
-                            logger.warning(f"Parameter {param_name} not found in VMU param_views")
+                            logger.warning(f"State dict key {name} not found in parameters or buffers")
+
+                # Move any remaining buffers to VMU device (non-persistent buffers)
+                for buf_name, buffer in named_buffers.items():
+                    if buffer.device != self.vmu.device:
+                        buffer.data = buffer.to(self.vmu.device)
+                        logger.debug(f"Moved buffer {buf_name} to {self.vmu.device}")
 
                 logger.info(f"✅ Model {model_id} parameters now backed by Text Segment")
             else:

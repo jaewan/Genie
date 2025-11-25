@@ -53,6 +53,7 @@ class BasicQosScheduler:
         self,
         max_concurrency: int,
         class_shares: Optional[Dict[str, float]] = None,
+        escalation_delay_ms: float = 800.0,
     ):
         if max_concurrency <= 0:
             raise ValueError("max_concurrency must be positive")
@@ -66,6 +67,7 @@ class BasicQosScheduler:
         self._lock = asyncio.Lock()
 
         self._class_limits = self._compute_class_limits(max_concurrency, class_shares)
+        self._escalation_delay_ms = max(0.0, float(escalation_delay_ms))
         logger.info(
             "BasicQoSScheduler initialized: total_slots=%d, limits=%s",
             self._max_concurrency,
@@ -148,11 +150,24 @@ class BasicQosScheduler:
             asyncio.create_task(self._execute_work(next_class, work))
 
     def _pick_next_class_locked(self) -> Optional[QoSClass]:
+        now = time.time()
         for qos in QoSClass:
+            queue = self._queues[qos]
+            if not queue:
+                continue
+            work = queue[0]
+            wait_ms = (now - work.enqueued_at) * 1000.0
+            if self._inflight_per_class[qos] < self._class_limits[qos]:
+                return qos
             if (
-                self._queues[qos]
-                and self._inflight_per_class[qos] < self._class_limits[qos]
+                wait_ms >= self._escalation_delay_ms
+                and self._inflight_total < self._max_concurrency
             ):
+                logger.debug(
+                    "QoS[%s] escalation triggered after %.1fms wait",
+                    qos.value,
+                    wait_ms,
+                )
                 return qos
         # If all classes hit their per-class limits but we still have capacity,
         # relax per-class limit and schedule highest priority waiting request.
@@ -163,25 +178,42 @@ class BasicQosScheduler:
         return None
 
     async def _execute_work(self, qos_class: QoSClass, work: ScheduledWork) -> None:
+        execution_start = None
         try:
+            queue_latency_ms = (time.time() - work.enqueued_at) * 1000.0
             logger.debug(
-                "QoS[%s] starting request_id=%s",
+                "QoS[%s] starting request_id=%s queue_latency=%.1fms",
                 qos_class.value,
                 work.metadata.get('request_id'),
+                queue_latency_ms,
             )
+            # PHASE 1.5 FIX: Store queue latency in request dict if available
+            request_ref = work.metadata.get('_request_ref')
+            if request_ref is not None:
+                request_ref['_queue_latency_ms'] = queue_latency_ms
+            # Also store in metadata for logging
+            work.metadata['_queue_latency_ms'] = queue_latency_ms
+            execution_start = time.time()
             result = await work.coro_factory()
+            # PHASE 1.5 FIX: Ensure queue latency is in result metrics if it's a dict
+            if isinstance(result, dict) and 'metrics' in result:
+                result['metrics']['queue_latency_ms'] = queue_latency_ms
             if not work.future.cancelled():
                 work.future.set_result(result)
         except Exception as exc:
             if not work.future.cancelled():
                 work.future.set_exception(exc)
         finally:
-            latency_ms = (time.time() - work.enqueued_at) * 1000.0
+            total_latency_ms = (time.time() - work.enqueued_at) * 1000.0
+            execution_time_ms = (time.time() - execution_start) * 1000.0 if execution_start else 0.0
             logger.info(
-                "QoS[%s] completed request_id=%s queue_latency=%.1fms",
+                "QoS[%s] completed request_id=%s total_latency=%.1fms "
+                "(queue=%.1fms, execution=%.1fms)",
                 qos_class.value,
                 work.metadata.get('request_id'),
-                latency_ms,
+                total_latency_ms,
+                queue_latency_ms,
+                execution_time_ms,
             )
             async with self._lock:
                 self._inflight_total = max(0, self._inflight_total - 1)

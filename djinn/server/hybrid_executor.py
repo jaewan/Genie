@@ -2,6 +2,10 @@
 Hybrid Executor: Unified execution with lazy output references
 
 Implements the v2.3 architecture feature: "Hybrid Executor with Lazy Output"
+"""
+from __future__ import annotations
+
+"""
 
 Execution Flow:
 ┌─────────────────────────────────────┐
@@ -49,6 +53,9 @@ import torch.nn as nn
 from typing import Dict, Any, List, Optional, Tuple, Union
 import time
 from dataclasses import dataclass
+from enum import Enum
+
+from .optimizations.phase_executor import PhaseAwareExecutor, ExecutionPhase
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +71,20 @@ class ExecutionMetrics:
     output_refs_count: int
     success: bool
     plan_summary: Optional[Dict[str, Any]] = None
+
+
+class StageType(Enum):
+    ENCODER = "encoder"
+    DECODER = "decoder"
+
+
+@dataclass
+class StageExecutionResult:
+    """Result wrapper for partial stage execution."""
+
+    stage: StageType
+    state_handle: Optional['StageHandle'] = None  # Forward reference to avoid circular import
+    outputs: Optional[Any] = None
 
 
 class HybridExecutor:
@@ -94,13 +115,26 @@ class HybridExecutor:
         # Model cache: avoid moving models to GPU repeatedly
         self.model_cache = {}  # {model_id: gpu_model}
         
+        total_gpu_mb = 24000
+        if torch.cuda.is_available():
+            try:
+                props = torch.cuda.get_device_properties(0)
+                total_gpu_mb = props.total_memory / (1024 * 1024)
+            except Exception:
+                pass
+        self.phase_executor = PhaseAwareExecutor(
+            total_gpu_memory_mb=total_gpu_mb,
+            enable_profiling=False
+        )
+        
         logger.info("✅ HybridExecutor initialized")
     
     async def execute_with_lazy_outputs(self,
                                         model: nn.Module,
                                         inputs: Dict[str, torch.Tensor],
                                         session_id: Optional[str] = None,
-                                        return_lazy: bool = True) -> Union[torch.Tensor, List]:
+                                        return_lazy: bool = True,
+                                        execution_phase: Optional[str] = None) -> Union[torch.Tensor, List]:
         """
         Execute model with lazy output references and stream locking.
         
@@ -125,18 +159,22 @@ class HybridExecutor:
         timing_breakdown = {}
         
         try:
-            logger.info("🚀 Hybrid execution starting (lazy output mode)")
+            phase_enum = self._resolve_phase(execution_phase, inputs)
+            phase_label = phase_enum.value if phase_enum else "unknown"
+            logger.info(f"🚀 Hybrid execution starting (phase={phase_label})")
+
+            prepared_inputs = self._prepare_inputs_for_phase(phase_enum, inputs)
 
             loop = asyncio.get_running_loop()
 
             plan_start = time.perf_counter()
             with self.vmu.lock:
-                plan = self.meta_simulator.get_plan(model, inputs, self.vmu) if self.meta_simulator else None
+                plan = self.meta_simulator.get_plan(model, prepared_inputs, self.vmu) if self.meta_simulator else None
             timing_breakdown['planning'] = (time.perf_counter() - plan_start) * 1000
 
             placement_start = time.perf_counter()
             gpu_model = self._ensure_model_on_gpu(model)
-            gpu_inputs = self._move_inputs_to_gpu(inputs)
+            gpu_inputs = self._move_inputs_to_gpu(prepared_inputs)
             timing_breakdown['placement'] = (time.perf_counter() - placement_start) * 1000
 
             exec_stream = torch.cuda.Stream() if torch.cuda.is_available() else None
@@ -219,7 +257,102 @@ class HybridExecutor:
             )
             
             raise
-    
+
+    async def _execute_encoder_stage(
+        self,
+        model: nn.Module,
+        encoder_inputs: Dict[str, torch.Tensor],
+        session_id: str,
+        state_options: Dict[str, Any],
+    ) -> StageExecutionResult:
+        from .state_cache import get_state_cache
+        state_cache = get_state_cache()
+        state_id = state_options.get('state_id') or self._generate_stage_state_id("enc")
+
+        encoder_module = self._resolve_submodule(model, 'encoder')
+        gpu_inputs = self._move_inputs_to_gpu(encoder_inputs)
+
+        logger.info(
+            f"🔷 Executing encoder stage for session {session_id} (state={state_id})"
+        )
+        with torch.no_grad():
+            encoder_outputs = encoder_module(**gpu_inputs)
+
+        handle = state_cache.store_encoder_state(
+            session_id=session_id,
+            state_id=state_id,
+            encoder_outputs=encoder_outputs,
+            stage=StageType.ENCODER.value,
+            handle_metadata=state_options.get('handle_metadata'),
+        )
+
+        return StageExecutionResult(
+            stage=StageType.ENCODER,
+            state_handle=handle,
+        )
+
+    async def _execute_decoder_stage(
+        self,
+        model: nn.Module,
+        decoder_inputs: Dict[str, torch.Tensor],
+        session_id: str,
+        state_handle: 'StageHandle',
+        state_options: Optional[Dict[str, Any]] = None,
+    ) -> StageExecutionResult:
+        from .state_cache import get_state_cache, StageHandle
+        state_cache = get_state_cache()
+        if state_handle.stage and state_handle.stage != StageType.ENCODER.value:
+            raise ValueError(
+                f"Decoder stage requires encoder state, got {state_handle.stage}"
+            )
+
+        encoder_view = state_cache.get_state_by_handle(state_handle)
+        decoder_module = self._resolve_submodule(model, 'decoder')
+        gpu_inputs = self._move_inputs_to_gpu(decoder_inputs)
+        decoder_kwargs = dict(gpu_inputs)
+        # Map decoder_input_ids to input_ids for Whisper decoder
+        if 'decoder_input_ids' in decoder_kwargs and 'input_ids' not in decoder_kwargs:
+            decoder_kwargs['input_ids'] = decoder_kwargs.pop('decoder_input_ids')
+        decoder_kwargs.setdefault('encoder_hidden_states', encoder_view.last_hidden_state)
+
+        logger.info(
+            f"🔷 Executing decoder stage for session {session_id} "
+            f"(state={state_handle.state_id})"
+        )
+        with torch.no_grad():
+            decoder_outputs = decoder_module(**decoder_kwargs)
+
+        hidden = getattr(decoder_outputs, 'last_hidden_state', decoder_outputs)
+        logits = self._apply_lm_head(model, hidden)
+
+        return StageExecutionResult(
+            stage=StageType.DECODER,
+            outputs=logits,
+        )
+
+    def _resolve_submodule(self, model: nn.Module, name: str) -> nn.Module:
+        """Resolve nested encoder/decoder modules."""
+        if hasattr(model, 'model') and hasattr(model.model, name):
+            return getattr(model.model, name)
+        if hasattr(model, name):
+            return getattr(model, name)
+        raise RuntimeError(
+            f"Model does not expose submodule '{name}' required for stage execution"
+        )
+
+    def _generate_stage_state_id(self, prefix: str) -> str:
+        import uuid
+
+        return f"{prefix}_{uuid.uuid4().hex[:12]}"
+
+    def _apply_lm_head(self, model: nn.Module, decoder_hidden: Any) -> Any:
+        """Apply model-specific LM head if available."""
+        if hasattr(model, 'lm_head'):
+            return model.lm_head(decoder_hidden)
+        if hasattr(model, 'generator'):
+            return model.generator(decoder_hidden)
+        return decoder_hidden
+
     def _skeletonize(self, obj: Any, session_id: Optional[str] = None) -> Any:
         """
         Convert tensor outputs to RemoteRefStubs while preserving structure.
@@ -238,9 +371,6 @@ class HybridExecutor:
         Returns:
             Same structure but with RemoteRefStubs instead of tensors
         """
-        from .session_manager import get_session_manager
-        from ..core.remote_ref_stub import RemoteRefStub, store_tensor
-        
         if isinstance(obj, torch.Tensor):
             # Generate unique reference ID
             ref_id = self._generate_tensor_id()
@@ -322,13 +452,18 @@ class HybridExecutor:
     def _move_inputs_to_gpu(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         if not torch.cuda.is_available():
             return inputs
-        gpu_inputs: Dict[str, Any] = {}
-        for key, value in inputs.items():
+
+        def _move(value: Any) -> Any:
             if isinstance(value, torch.Tensor):
-                gpu_inputs[key] = value.to(self.vmu.device, non_blocking=True)
-            else:
-                gpu_inputs[key] = value
-        return gpu_inputs
+                return value.to(self.vmu.device, non_blocking=True)
+            if isinstance(value, (list, tuple)):
+                converted = [_move(elem) for elem in value]
+                return type(value)(converted)
+            if isinstance(value, dict):
+                return {k: _move(v) for k, v in value.items()}
+            return value
+
+        return {key: _move(value) for key, value in inputs.items()}
 
     def _materialize_to_cpu(self, output: Any) -> Any:
         if not torch.cuda.is_available():
@@ -429,6 +564,70 @@ class HybridExecutor:
         except Exception as e:
             logger.error(f"Operation execution failed: {op_name}: {e}")
             raise
+
+    def _resolve_phase(self, execution_phase: Optional[str], inputs: Dict[str, Any]) -> Optional[ExecutionPhase]:
+        """Resolve execution phase from explicit hint or heuristics."""
+        if execution_phase:
+            try:
+                return ExecutionPhase(execution_phase)
+            except ValueError:
+                pass
+        if self.phase_executor:
+            try:
+                return self.phase_executor._detect_phase(None, inputs)
+            except Exception:
+                pass
+        return None
+
+    def _prepare_inputs_for_phase(self, phase: Optional[ExecutionPhase], inputs: Dict[str, Any]) -> Dict[str, Any]:
+        if phase != ExecutionPhase.LLM_DECODE:
+            return inputs
+        prepared: Dict[str, Any] = {}
+        for key, value in inputs.items():
+            if key in ('input_ids', 'attention_mask') and isinstance(value, torch.Tensor) and value.ndim == 2:
+                prepared[key] = value[:, -1:]
+            else:
+                prepared[key] = value
+        logger.debug("Decode phase detected: trimming inputs to last token for incremental compute")
+        return prepared
+
+    async def execute_stage(
+        self,
+        model: nn.Module,
+        stage: StageType,
+        inputs: Dict[str, torch.Tensor],
+        session_id: str,
+        *,
+        state_handle: Optional['StageHandle'] = None,
+        state_options: Optional[Dict[str, Any]] = None,
+    ) -> StageExecutionResult:
+        """
+        Execute a semantic stage (encoder/decoder) with optional cached state.
+        """
+        if not session_id:
+            raise ValueError("session_id is required for stage execution")
+
+        stage_options = state_options or {}
+
+        if stage == StageType.ENCODER:
+            return await self._execute_encoder_stage(
+                model=model,
+                encoder_inputs=inputs,
+                session_id=session_id,
+                state_options=stage_options,
+            )
+        if stage == StageType.DECODER:
+            if state_handle is None:
+                raise ValueError("state_handle required for decoder stage execution")
+            return await self._execute_decoder_stage(
+                model=model,
+                decoder_inputs=inputs,
+                session_id=session_id,
+                state_handle=state_handle,
+                state_options=stage_options,
+            )
+
+        raise ValueError(f"Unsupported stage type: {stage}")
 
 
 # Global executor instance

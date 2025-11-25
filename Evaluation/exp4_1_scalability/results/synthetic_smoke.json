@@ -1,0 +1,109 @@
+{
+  "metadata": {
+    "model": "llama-7b",
+    "driver": "synthetic",
+    "timestamp": "2025-11-23T15:25:55.639940+00:00",
+    "duration_s": 10.0,
+    "config_path": "Evaluation/exp4_1_scalability/configs/load_sweep.yaml"
+  },
+  "results": [
+    {
+      "concurrency": 1,
+      "requests_total": 10,
+      "tokens_per_request": 50,
+      "latency_ms": {
+        "p50": 15.242194269617476,
+        "p90": 17.462934022063042,
+        "p99": 18.40640608499745
+      },
+      "throughput_tokens_per_s": 50.0,
+      "gpu_util_pct": 5.375,
+      "efficiency_pct": 6.25,
+      "notes": null
+    },
+    {
+      "concurrency": 2,
+      "requests_total": 20,
+      "tokens_per_request": 50,
+      "latency_ms": {
+        "p50": 14.89475330677957,
+        "p90": 16.934438330716834,
+        "p99": 17.93924259255375
+      },
+      "throughput_tokens_per_s": 100.0,
+      "gpu_util_pct": 10.75,
+      "efficiency_pct": 12.5,
+      "notes": null
+    },
+    {
+      "concurrency": 4,
+      "requests_total": 40,
+      "tokens_per_request": 50,
+      "latency_ms": {
+        "p50": 15.272535608273365,
+        "p90": 16.988614741495873,
+        "p99": 17.72144403996176
+      },
+      "throughput_tokens_per_s": 200.0,
+      "gpu_util_pct": 21.5,
+      "efficiency_pct": 25.0,
+      "notes": null
+    },
+    {
+      "concurrency": 8,
+      "requests_total": 80,
+      "tokens_per_request": 50,
+      "latency_ms": {
+        "p50": 14.728454507951353,
+        "p90": 17.078389141473,
+        "p99": 17.863303184907355
+      },
+      "throughput_tokens_per_s": 400.0,
+      "gpu_util_pct": 43.0,
+      "efficiency_pct": 50.0,
+      "notes": null
+    },
+    {
+      "concurrency": 16,
+      "requests_total": 160,
+      "tokens_per_request": 50,
+      "latency_ms": {
+        "p50": 14.823480011938857,
+        "p90": 16.850560465392924,
+        "p99": 18.996205079226367
+      },
+      "throughput_tokens_per_s": 800.0,
+      "gpu_util_pct": 86.0,
+      "efficiency_pct": 100.0,
+      "notes": null
+    },
+    {
+      "concurrency": 32,
+      "requests_total": 320,
+      "tokens_per_request": 50,
+      "latency_ms": {
+        "p50": 37.07079206043505,
+        "p90": 40.28170986224938,
+        "p99": 42.73484771476085
+      },
+      "throughput_tokens_per_s": 880.0000000000001,
+      "gpu_util_pct": 86.0,
+      "efficiency_pct": 100.0,
+      "notes": "Queue saturation region"
+    },
+    {
+      "concurrency": 64,
+      "requests_total": 640,
+      "tokens_per_request": 50,
+      "latency_ms": {
+        "p50": 80.44242688341217,
+        "p90": 86.03224077138282,
+        "p99": 92.02309499068107
+      },
+      "throughput_tokens_per_s": 960.0,
+      "gpu_util_pct": 86.0,
+      "efficiency_pct": 100.0,
+      "notes": "Queue saturation region"
+    }
+  ]
+}

@@ -1,0 +1,176 @@
+{
+  "baseline": "semantic_blind",
+  "model_id": "gpt2-xl",
+  "prompt_tokens": 72,
+  "new_tokens": 50,
+  "batch_size": 1,
+  "runs": [
+    {
+      "total_ms": 6025.838563218713,
+      "per_token_ms": 120.51677126437426,
+      "tokens_generated": 50,
+      "throughput_tokens_per_s": 8.29760032158784,
+      "host_to_device_mb": 0.0736236572265625,
+      "device_to_host_mb": 925.0260353088379,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The KV cache is a key component of the KV cache. It is a cache that is used to store the KV data. The KV cache is a key component of the KV cache. It is a cache that is used to",
+      "run_id": 1
+    },
+    {
+      "total_ms": 6066.300184465945,
+      "per_token_ms": 121.3260036893189,
+      "tokens_generated": 50,
+      "throughput_tokens_per_s": 8.242256149478996,
+      "host_to_device_mb": 0.0736236572265625,
+      "device_to_host_mb": 925.0260353088379,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The KV cache is a key component of the KV cache. It is a cache that is used to store the KV data. The KV cache is a key component of the KV cache. It is a cache that is used to",
+      "run_id": 2
+    },
+    {
+      "total_ms": 6036.942747421563,
+      "per_token_ms": 120.73885494843125,
+      "tokens_generated": 50,
+      "throughput_tokens_per_s": 8.282337946861512,
+      "host_to_device_mb": 0.0736236572265625,
+      "device_to_host_mb": 925.0260353088379,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The KV cache is a key component of the KV cache. It is a cache that is used to store the KV data. The KV cache is a key component of the KV cache. It is a cache that is used to",
+      "run_id": 3
+    },
+    {
+      "total_ms": 6037.9546247422695,
+      "per_token_ms": 120.75909249484539,
+      "tokens_generated": 50,
+      "throughput_tokens_per_s": 8.280949942073182,
+      "host_to_device_mb": 0.0736236572265625,
+      "device_to_host_mb": 925.0260353088379,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The KV cache is a key component of the KV cache. It is a cache that is used to store the KV data. The KV cache is a key component of the KV cache. It is a cache that is used to",
+      "run_id": 4
+    },
+    {
+      "total_ms": 6029.113137163222,
+      "per_token_ms": 120.58226274326444,
+      "tokens_generated": 50,
+      "throughput_tokens_per_s": 8.293093671074427,
+      "host_to_device_mb": 0.0736236572265625,
+      "device_to_host_mb": 925.0260353088379,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The KV cache is a key component of the KV cache. It is a cache that is used to store the KV data. The KV cache is a key component of the KV cache. It is a cache that is used to",
+      "run_id": 5
+    },
+    {
+      "total_ms": 6053.8040064275265,
+      "per_token_ms": 121.07608012855053,
+      "tokens_generated": 50,
+      "throughput_tokens_per_s": 8.259269699995793,
+      "host_to_device_mb": 0.0736236572265625,
+      "device_to_host_mb": 925.0260353088379,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The KV cache is a key component of the KV cache. It is a cache that is used to store the KV data. The KV cache is a key component of the KV cache. It is a cache that is used to",
+      "run_id": 6
+    },
+    {
+      "total_ms": 6001.94398779422,
+      "per_token_ms": 120.03887975588441,
+      "tokens_generated": 50,
+      "throughput_tokens_per_s": 8.330634224791481,
+      "host_to_device_mb": 0.0736236572265625,
+      "device_to_host_mb": 925.0260353088379,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The KV cache is a key component of the KV cache. It is a cache that is used to store the KV data. The KV cache is a key component of the KV cache. It is a cache that is used to",
+      "run_id": 7
+    },
+    {
+      "total_ms": 6009.1365007683635,
+      "per_token_ms": 120.18273001536727,
+      "tokens_generated": 50,
+      "throughput_tokens_per_s": 8.320663042619636,
+      "host_to_device_mb": 0.0736236572265625,
+      "device_to_host_mb": 925.0260353088379,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The KV cache is a key component of the KV cache. It is a cache that is used to store the KV data. The KV cache is a key component of the KV cache. It is a cache that is used to",
+      "run_id": 8
+    },
+    {
+      "total_ms": 6056.105763651431,
+      "per_token_ms": 121.12211527302861,
+      "tokens_generated": 50,
+      "throughput_tokens_per_s": 8.256130581486627,
+      "host_to_device_mb": 0.0736236572265625,
+      "device_to_host_mb": 925.0260353088379,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The KV cache is a key component of the KV cache. It is a cache that is used to store the KV data. The KV cache is a key component of the KV cache. It is a cache that is used to",
+      "run_id": 9
+    },
+    {
+      "total_ms": 6051.039724610746,
+      "per_token_ms": 121.02079449221492,
+      "tokens_generated": 50,
+      "throughput_tokens_per_s": 8.263042762162073,
+      "host_to_device_mb": 0.0736236572265625,
+      "device_to_host_mb": 925.0260353088379,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The KV cache is a key component of the KV cache. It is a cache that is used to store the KV data. The KV cache is a key component of the KV cache. It is a cache that is used to",
+      "run_id": 10
+    }
+  ],
+  "aggregates": {
+    "total_ms": {
+      "mean": 6036.8179240264,
+      "median": 6037.448686081916,
+      "p95": 6061.712695099413,
+      "min": 6001.94398779422,
+      "max": 6066.300184465945
+    },
+    "per_token_ms": {
+      "mean": 120.736358480528,
+      "median": 120.74897372163832,
+      "p95": 121.23425390198827,
+      "min": 120.03887975588441,
+      "max": 121.3260036893189
+    },
+    "throughput_tokens_per_s": {
+      "mean": 8.282597834213156,
+      "median": 8.281643944467348,
+      "p95": 8.326147192814151,
+      "min": 8.242256149478996,
+      "max": 8.330634224791481
+    }
+  },
+  "device": "Djinn remote (localhost:5556)",
+  "dtype": "float16",
+  "backend": "djinn",
+  "djinn_server": "localhost:5556",
+  "seed": 42,
+  "library_versions": {
+    "torch": "2.9.0+cu128",
+    "transformers": "4.57.1"
+  },
+  "meta": {
+    "prompt_file": null,
+    "prompt_text": null,
+    "sample_gpu": false
+  }
+}

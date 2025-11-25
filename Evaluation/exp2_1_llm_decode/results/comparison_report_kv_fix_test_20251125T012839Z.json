@@ -1,0 +1,61 @@
+{
+  "experiment": "exp2_1_llm_decode",
+  "model_id": "gpt2",
+  "prompt_tokens": 32,
+  "new_tokens": 10,
+  "batch_size": 1,
+  "runs_per_baseline": 3,
+  "baselines": {
+    "native_pytorch": {
+      "mean_latency_ms": 76.30340941250324,
+      "p95_latency_ms": 76.54767697677016,
+      "mean_per_token_ms": 7.630340941250324,
+      "p95_per_token_ms": 7.654767697677016,
+      "mean_throughput_tps": 131.05666109767284,
+      "result_file": "Evaluation/exp2_1_llm_decode/results/native_pytorch/llm_decode_native_pytorch_20251125T012806Z.json",
+      "data_transfer_mb": 0.0005645751953125
+    },
+    "semantic_blind": {
+      "mean_latency_ms": 419.4603590294719,
+      "p95_latency_ms": 451.65657941251993,
+      "mean_per_token_ms": 41.94603590294719,
+      "p95_per_token_ms": 45.16565794125199,
+      "mean_throughput_tps": 23.932976588550886,
+      "result_file": "Evaluation/exp2_1_llm_decode/results/semantic_blind/llm_decode_semantic_blind_20251125T012820Z.json",
+      "data_transfer_mb": 69.98163223266602
+    },
+    "partially_aware": {
+      "mean_latency_ms": 354.16023650517064,
+      "p95_latency_ms": 356.43416307866573,
+      "mean_per_token_ms": 35.41602365051707,
+      "p95_per_token_ms": 35.64341630786657,
+      "mean_throughput_tps": 28.236601219163088,
+      "result_file": "Evaluation/exp2_1_llm_decode/results/partially_aware/llm_decode_partially_aware_20251125T012829Z.json",
+      "data_transfer_mb": 69.98163223266602
+    },
+    "full_djinn": {
+      "mean_latency_ms": 158.54911537220082,
+      "p95_latency_ms": 161.62753980606794,
+      "mean_per_token_ms": 15.854911537220081,
+      "p95_per_token_ms": 16.162753980606794,
+      "mean_throughput_tps": 63.10055521226121,
+      "result_file": "Evaluation/exp2_1_llm_decode/results/full_djinn/llm_decode_full_djinn_20251125T012839Z.json",
+      "data_transfer_mb": 7.860950469970703
+    }
+  },
+  "comparisons": {
+    "full_djinn_vs_native": {
+      "latency_overhead_pct": 107.78772088029478,
+      "throughput_ratio": 0.48147537625145315
+    },
+    "full_djinn_vs_semantic_blind": {
+      "speedup": 2.645617782507148,
+      "data_savings_pct": 88.76712328767124,
+      "throughput_improvement": 2.636552748831393
+    },
+    "full_djinn_vs_partially_aware": {
+      "speedup": 2.233757253541052,
+      "data_savings_pct": 88.76712328767124
+    }
+  }
+}

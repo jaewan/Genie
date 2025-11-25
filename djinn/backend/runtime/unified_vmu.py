@@ -334,7 +334,9 @@ class DataSegment(MemorySegment):
             if offset + size > self.capacity:
                 raise RuntimeError(f"Invalid offset/size for session {session_id}")
 
-            return self.buffer[offset:offset + size].view(dtype)
+            # Ensure buffer is allocated (lazy allocation)
+            buffer = self.slab
+            return buffer[offset:offset + size].view(dtype)
 
     def free_session(self, session_id: str) -> bool:
         """Free all data for a session (called during session cleanup)."""
@@ -682,50 +684,10 @@ class UnifiedVMU:
             logger.debug(f"✅ DMA transfer complete: {total_size} bytes to {segment.name} Segment")
             return target_offset
     
-    # [DEFER-PHASE2] Backward Compatibility API (for gradual migration)
-    def malloc_persistent(self, size: int, dtype: torch.dtype = torch.float32, name: str = "") -> int:
-        """
-        LEGACY API: Allocate in Data Segment (backward compatibility).
-
-        [DEFER-PHASE2] This method is deprecated. Use allocate_session_data() instead.
-        [DEFER-PHASE2] Migrate all callsites during Phase 2 executor integration.
-        """
-        logger.warning("⚠️  malloc_persistent() is deprecated. Use allocate_session_data() for Data Segment allocations.")
-        # Default session for legacy compatibility
-        return self.allocate_session_data("legacy_session", size, name)
-
-    def malloc_volatile(self, size: int, dtype: torch.dtype = torch.float32, name: str = "") -> int:
-        """
-        LEGACY API: Allocate in Stack Slab (backward compatibility).
-
-        [DEFER-PHASE2] This method is deprecated. Use allocate_volatile() instead.
-        [DEFER-PHASE2] Migrate all callsites during Phase 2 executor integration.
-        """
-        logger.warning("⚠️  malloc_volatile() is deprecated. Use allocate_volatile() for Stack allocations.")
-        offset, _ = self.allocate_volatile(size, name)
-        return offset
-    
-    def malloc_volatile(self, size: int, dtype: torch.dtype = torch.float32, name: str = "") -> int:
-        """
-        Allocate volatile memory (Activations).
-        
-        Volatile allocations:
-        - Stay below persistent watermark
-        - Reset after each request
-        - Can be reused for next request
-        
-        Args:
-            size: Allocation size in bytes
-            dtype: Data type (for tracking)
-            name: Name for debugging
-        
-        Returns:
-            Offset in the slab buffer
-        
-        Raises:
-            RuntimeError: If allocation would exceed slab capacity
-        """
-        aligned_start = self._align(self.current_offset)
+    # ✅ PHASE 2 COMPLETE: Legacy methods removed
+    # All callsites migrated to new API:
+    # - malloc_persistent() → allocate_session_data()
+    # - malloc_volatile() → allocate_volatile()
         new_offset = aligned_start + size
         
         if new_offset >= self.slab_capacity:

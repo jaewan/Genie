@@ -185,6 +185,7 @@ class ServerConfig:
     qos_max_concurrency: int = 4
     qos_class_shares: Dict[str, float] = field(default_factory=lambda: dict(DEFAULT_QOS_SHARES))
     qos_default_class: str = 'interactive'
+    qos_escalation_delay_ms: float = 800.0
 
     @staticmethod
     def _parse_qos_shares(value: Optional[str]) -> Optional[Dict[str, float]]:
@@ -217,7 +218,8 @@ class ServerConfig:
             enable_qos=os.getenv('GENIE_ENABLE_QOS', 'true').lower() == 'true',
             qos_max_concurrency=int(os.getenv('GENIE_QOS_MAX_CONCURRENCY', 4)),
             qos_class_shares=shares_override or dict(DEFAULT_QOS_SHARES),
-            qos_default_class=os.getenv('GENIE_QOS_DEFAULT_CLASS', 'interactive').lower()
+            qos_default_class=os.getenv('GENIE_QOS_DEFAULT_CLASS', 'interactive').lower(),
+            qos_escalation_delay_ms=float(os.getenv('GENIE_QOS_ESCALATION_DELAY_MS', 800.0))
         )
 
 

@@ -1,0 +1,191 @@
+{
+  "baseline": "djinn_full_test",
+  "model_id": "openai/whisper-large-v3",
+  "device": "Djinn remote (localhost:5556)",
+  "dtype": "float16",
+  "backend": "djinn",
+  "djinn_server": "localhost:5556",
+  "sample_rate": 16000,
+  "chunk_seconds": 5.0,
+  "stride_seconds": 1.0,
+  "runs": [
+    {
+      "run_id": 1,
+      "total_time_ms": 6820.427632890642,
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "start_s": 0.0,
+          "end_s": 5.0,
+          "chunk_duration_s": 5.0,
+          "latency_ms": 123.28352965414524,
+          "per_token_ms": 0.0,
+          "tokens": 0,
+          "host_to_device_mb": 1.46484375,
+          "device_to_host_mb": 0.0,
+          "transcript": null
+        },
+        {
+          "chunk_id": 2,
+          "start_s": 1.0,
+          "end_s": 6.0,
+          "chunk_duration_s": 5.0,
+          "latency_ms": 909.3419713899493,
+          "per_token_ms": 69.94938241461149,
+          "tokens": 13,
+          "host_to_device_mb": 0.0,
+          "device_to_host_mb": 9.918212890625e-05,
+          "transcript": null
+        },
+        {
+          "chunk_id": 3,
+          "start_s": 2.0,
+          "end_s": 7.0,
+          "chunk_duration_s": 5.0,
+          "latency_ms": 638.2775977253914,
+          "per_token_ms": 49.09827674810703,
+          "tokens": 13,
+          "host_to_device_mb": 0.0,
+          "device_to_host_mb": 9.918212890625e-05,
+          "transcript": null
+        },
+        {
+          "chunk_id": 4,
+          "start_s": 3.0,
+          "end_s": 8.0,
+          "chunk_duration_s": 5.0,
+          "latency_ms": 634.1861989349127,
+          "per_token_ms": 48.78355376422405,
+          "tokens": 13,
+          "host_to_device_mb": 0.0,
+          "device_to_host_mb": 9.918212890625e-05,
+          "transcript": null
+        },
+        {
+          "chunk_id": 5,
+          "start_s": 4.0,
+          "end_s": 9.0,
+          "chunk_duration_s": 5.0,
+          "latency_ms": 636.7954155430198,
+          "per_token_ms": 48.98426273407844,
+          "tokens": 13,
+          "host_to_device_mb": 0.0,
+          "device_to_host_mb": 9.918212890625e-05,
+          "transcript": null
+        },
+        {
+          "chunk_id": 6,
+          "start_s": 5.0,
+          "end_s": 10.0,
+          "chunk_duration_s": 5.0,
+          "latency_ms": 638.1458304822445,
+          "per_token_ms": 49.0881408063265,
+          "tokens": 13,
+          "host_to_device_mb": 0.0,
+          "device_to_host_mb": 9.918212890625e-05,
+          "transcript": null
+        },
+        {
+          "chunk_id": 7,
+          "start_s": 6.0,
+          "end_s": 11.0,
+          "chunk_duration_s": 5.0,
+          "latency_ms": 630.6529939174652,
+          "per_token_ms": 48.51176876288194,
+          "tokens": 13,
+          "host_to_device_mb": 0.0,
+          "device_to_host_mb": 9.918212890625e-05,
+          "transcript": null
+        },
+        {
+          "chunk_id": 8,
+          "start_s": 7.0,
+          "end_s": 12.0,
+          "chunk_duration_s": 5.0,
+          "latency_ms": 635.5039067566395,
+          "per_token_ms": 48.88491590435688,
+          "tokens": 13,
+          "host_to_device_mb": 0.0,
+          "device_to_host_mb": 9.918212890625e-05,
+          "transcript": null
+        },
+        {
+          "chunk_id": 9,
+          "start_s": 8.0,
+          "end_s": 13.0,
+          "chunk_duration_s": 5.0,
+          "latency_ms": 641.2639562040567,
+          "per_token_ms": 49.32799663108129,
+          "tokens": 13,
+          "host_to_device_mb": 0.0,
+          "device_to_host_mb": 9.918212890625e-05,
+          "transcript": null
+        },
+        {
+          "chunk_id": 10,
+          "start_s": 9.0,
+          "end_s": 14.0,
+          "chunk_duration_s": 5.0,
+          "latency_ms": 633.9339092373848,
+          "per_token_ms": 48.764146864414215,
+          "tokens": 13,
+          "host_to_device_mb": 0.0,
+          "device_to_host_mb": 9.918212890625e-05,
+          "transcript": null
+        },
+        {
+          "chunk_id": 11,
+          "start_s": 10.0,
+          "end_s": 15.0,
+          "chunk_duration_s": 5.0,
+          "latency_ms": 637.7566251903772,
+          "per_token_ms": 49.05820193772133,
+          "tokens": 13,
+          "host_to_device_mb": 0.0,
+          "device_to_host_mb": 9.918212890625e-05,
+          "transcript": null
+        }
+      ],
+      "aggregates": {
+        "chunk_latency_ms": {
+          "mean": 614.4674486395987,
+          "median": 636.7954155430198,
+          "p95": 775.302963797003,
+          "min": 123.28352965414524,
+          "max": 909.3419713899493
+        },
+        "chunk_per_token_ms": {
+          "mean": 46.40460423343665,
+          "median": 48.98426273407844,
+          "p95": 59.63868952284639,
+          "min": 0.0,
+          "max": 69.94938241461149
+        },
+        "chunk_throughput_audio_sec_per_sec": {
+          "mean": 10.61641082314012,
+          "median": 7.851815320837869,
+          "p95": 7.863619403558747,
+          "min": 5.498481492454801,
+          "max": 40.55691797620334
+        }
+      },
+      "gpu": {
+        "gpu_util_pct": null,
+        "mem_util_pct": null,
+        "mem_used_mb": null
+      }
+    }
+  ],
+  "library_versions": {
+    "torch": "2.9.0+cu128",
+    "torchaudio": "2.9.0+cu128",
+    "transformers": "4.57.1"
+  },
+  "meta": {
+    "audio_file": null,
+    "dummy_audio_seconds": 15.0,
+    "language": "en",
+    "task": "transcribe",
+    "sample_gpu": false
+  }
+}

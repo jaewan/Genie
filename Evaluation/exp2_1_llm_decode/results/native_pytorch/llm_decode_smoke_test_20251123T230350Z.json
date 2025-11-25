@@ -1,0 +1,72 @@
+{
+  "baseline": "smoke_test",
+  "model_id": "sshleifer/tiny-gpt2",
+  "prompt_tokens": 72,
+  "new_tokens": 10,
+  "batch_size": 1,
+  "runs": [
+    {
+      "total_ms": 42.35372878611088,
+      "per_token_ms": 4.235372878611088,
+      "tokens_generated": 10,
+      "throughput_tokens_per_s": 236.10672039056251,
+      "host_to_device_mb": 0.00054931640625,
+      "device_to_host_mb": 0.0006256103515625,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": null,
+      "run_id": 1
+    },
+    {
+      "total_ms": 42.17536002397537,
+      "per_token_ms": 4.217536002397537,
+      "tokens_generated": 10,
+      "throughput_tokens_per_s": 237.1052670164597,
+      "host_to_device_mb": 0.00054931640625,
+      "device_to_host_mb": 0.0006256103515625,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": null,
+      "run_id": 2
+    }
+  ],
+  "aggregates": {
+    "total_ms": {
+      "mean": 42.264544405043125,
+      "median": 42.264544405043125,
+      "p95": 42.3448103480041,
+      "min": 42.17536002397537,
+      "max": 42.35372878611088
+    },
+    "per_token_ms": {
+      "mean": 4.2264544405043125,
+      "median": 4.2264544405043125,
+      "p95": 4.23448103480041,
+      "min": 4.217536002397537,
+      "max": 4.235372878611088
+    },
+    "throughput_tokens_per_s": {
+      "mean": 236.6059937035111,
+      "median": 236.6059937035111,
+      "p95": 237.05533968516482,
+      "min": 236.10672039056251,
+      "max": 237.1052670164597
+    }
+  },
+  "device": "NVIDIA L4",
+  "dtype": "float16",
+  "backend": "local",
+  "djinn_server": null,
+  "seed": 42,
+  "library_versions": {
+    "torch": "2.9.0+cu128",
+    "transformers": "4.57.1"
+  },
+  "meta": {
+    "prompt_file": "Evaluation/exp2_1_llm_decode/configs/prompt.txt",
+    "prompt_text": null,
+    "sample_gpu": false
+  }
+}

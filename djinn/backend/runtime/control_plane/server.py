@@ -105,11 +105,30 @@ class ControlPlaneServer:
         """Stop the control plane server"""
         logger.info("Stopping control plane server...")
         
-        # Cancel background tasks
-        if self.heartbeat_task:
+        # Cancel background tasks gracefully
+        pending_tasks = []
+        if self.heartbeat_task and not self.heartbeat_task.done():
             self.heartbeat_task.cancel()
-        if self.cleanup_task:
+            pending_tasks.append(self.heartbeat_task)
+        if self.cleanup_task and not self.cleanup_task.done():
             self.cleanup_task.cancel()
+            pending_tasks.append(self.cleanup_task)
+
+        if pending_tasks:
+            # Wait for tasks to handle cancellation, with timeout
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*pending_tasks, return_exceptions=True),
+                    timeout=2.0  # 2 second timeout to avoid hanging
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Timeout waiting for background tasks to cancel")
+            except Exception as e:
+                logger.debug(f"Error during task cancellation: {e}")
+        
+        # Clear task references
+        self.heartbeat_task = None
+        self.cleanup_task = None
         
         # Close all client connections
         for client in list(self.clients.values()):
@@ -280,42 +299,53 @@ class ControlPlaneServer:
         - Use gather for parallel sends
         """
         # Pre-create heartbeat message template (reused for all clients)
-        while True:
-            try:
-                await asyncio.sleep(30)  # Send heartbeat every 30 seconds
-                
-                # Skip if no clients
-                if not self.clients:
-                    continue
-                
-                # Create heartbeat message once (reused for all)
-                heartbeat_msg = ControlMessage(
-                    type=MessageType.HEARTBEAT,
-                    sender=self.node_id,
-                    timestamp=time.time(),
-                    message_id=str(uuid.uuid4()),
-                    payload={'timestamp': time.time()}
-                )
-                
-                # Send to all clients in parallel (optimized)
-                clients_list = list(self.clients.values())
-                tasks = [self._send_heartbeat_to_client(client, heartbeat_msg) 
-                        for client in clients_list]
-                
-                # Use gather for parallel execution
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                
-                # Count successful heartbeats
-                successful = sum(1 for r in results if r is True)
-                self._metrics['heartbeats_sent'] += successful
-                
-                if successful < len(clients_list):
-                    logger.debug(f"Sent {successful}/{len(clients_list)} heartbeats")
-                
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Heartbeat loop error: {e}")
+        try:
+            while True:
+                try:
+                    # Use shorter sleep intervals to check for cancellation more frequently
+                    # This allows tasks to respond to cancellation faster
+                    for _ in range(30):  # 30 * 1 second = 30 seconds total
+                        await asyncio.sleep(1)
+                        # Check if we've been cancelled
+                        if self.heartbeat_task and self.heartbeat_task.cancelled():
+                            raise asyncio.CancelledError()
+                    
+                    # Skip if no clients
+                    if not self.clients:
+                        continue
+                    
+                    # Create heartbeat message once (reused for all)
+                    heartbeat_msg = ControlMessage(
+                        type=MessageType.HEARTBEAT,
+                        sender=self.node_id,
+                        timestamp=time.time(),
+                        message_id=str(uuid.uuid4()),
+                        payload={'timestamp': time.time()}
+                    )
+                    
+                    # Send to all clients in parallel (optimized)
+                    clients_list = list(self.clients.values())
+                    tasks = [self._send_heartbeat_to_client(client, heartbeat_msg) 
+                            for client in clients_list]
+                    
+                    # Use gather for parallel execution
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    
+                    # Count successful heartbeats
+                    successful = sum(1 for r in results if r is True)
+                    self._metrics['heartbeats_sent'] += successful
+                    
+                    if successful < len(clients_list):
+                        logger.debug(f"Sent {successful}/{len(clients_list)} heartbeats")
+                    
+                except asyncio.CancelledError:
+                    logger.debug("Heartbeat loop cancelled")
+                    break
+                except Exception as e:
+                    logger.error(f"Heartbeat loop error: {e}")
+        except asyncio.CancelledError:
+            logger.debug("Heartbeat loop cancelled (outer)")
+            raise
     
     async def _send_heartbeat_to_client(self, client: ClientHandler, 
                                        message: ControlMessage) -> bool:
@@ -329,41 +359,52 @@ class ControlPlaneServer:
     
     async def cleanup_loop(self):
         """Background cleanup loop"""
-        while True:
-            try:
-                await asyncio.sleep(60)  # Cleanup every minute
-                
-                current_time = time.time()
-                
-                # Check for timed out clients
-                disconnected_clients = []
-                for client_id, client in self.clients.items():
-                    if current_time - client.last_heartbeat > self.heartbeat_timeout:
-                        disconnected_clients.append(client_id)
-                
-                # Remove timed out clients
-                for client_id in disconnected_clients:
-                    logger.warning(f"Removing timed out client: {client_id}")
-                    client = self.clients[client_id]
-                    client.connected = False
-                    self.unregister_client(client_id)
-                
-                # Check for stale transfers
-                stale_transfers = []
-                for transfer_id, transfer in self.active_transfers.items():
-                    # Simple timeout check - in practice, this would be more sophisticated
-                    if current_time - transfer.timeout_seconds > 3600:  # 1 hour default timeout
-                        stale_transfers.append(transfer_id)
-                
-                # Remove stale transfers
-                for transfer_id in stale_transfers:
-                    logger.warning(f"Removing stale transfer: {transfer_id}")
-                    del self.active_transfers[transfer_id]
-                
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Cleanup loop error: {e}")
+        try:
+            while True:
+                try:
+                    # Use shorter sleep intervals to check for cancellation more frequently
+                    # This allows tasks to respond to cancellation faster
+                    for _ in range(60):  # 60 * 1 second = 60 seconds total
+                        await asyncio.sleep(1)
+                        # Check if we've been cancelled
+                        if self.cleanup_task and self.cleanup_task.cancelled():
+                            raise asyncio.CancelledError()
+                    
+                    current_time = time.time()
+                    
+                    # Check for timed out clients
+                    disconnected_clients = []
+                    for client_id, client in self.clients.items():
+                        if current_time - client.last_heartbeat > self.heartbeat_timeout:
+                            disconnected_clients.append(client_id)
+                    
+                    # Remove timed out clients
+                    for client_id in disconnected_clients:
+                        logger.warning(f"Removing timed out client: {client_id}")
+                        client = self.clients[client_id]
+                        client.connected = False
+                        self.unregister_client(client_id)
+                    
+                    # Check for stale transfers
+                    stale_transfers = []
+                    for transfer_id, transfer in self.active_transfers.items():
+                        # Simple timeout check - in practice, this would be more sophisticated
+                        if current_time - transfer.timeout_seconds > 3600:  # 1 hour default timeout
+                            stale_transfers.append(transfer_id)
+                    
+                    # Remove stale transfers
+                    for transfer_id in stale_transfers:
+                        logger.warning(f"Removing stale transfer: {transfer_id}")
+                        del self.active_transfers[transfer_id]
+                    
+                except asyncio.CancelledError:
+                    logger.debug("Cleanup loop cancelled")
+                    break
+                except Exception as e:
+                    logger.error(f"Cleanup loop error: {e}")
+        except asyncio.CancelledError:
+            logger.debug("Cleanup loop cancelled (outer)")
+            raise
     
     def get_metrics(self) -> Dict[str, Any]:
         """Get server performance metrics."""

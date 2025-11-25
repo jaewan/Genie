@@ -1,0 +1,165 @@
+{
+  "baseline": "native_pytorch_smoke",
+  "model_id": "openai/whisper-tiny",
+  "device": "cpu",
+  "dtype": "float32",
+  "sample_rate": 16000,
+  "chunk_seconds": 2.0,
+  "stride_seconds": 1.0,
+  "runs": [
+    {
+      "run_id": 1,
+      "total_time_ms": 572.7461660280824,
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "start_s": 0.0,
+          "end_s": 2.0,
+          "chunk_duration_s": 2.0,
+          "latency_ms": 60.496251098811626,
+          "per_token_ms": 60.496251098811626,
+          "tokens": 1,
+          "host_to_device_mb": 0.91552734375,
+          "device_to_host_mb": 7.62939453125e-06,
+          "transcript": null
+        },
+        {
+          "chunk_id": 2,
+          "start_s": 1.0,
+          "end_s": 3.0,
+          "chunk_duration_s": 2.0,
+          "latency_ms": 60.093726962804794,
+          "per_token_ms": 60.093726962804794,
+          "tokens": 1,
+          "host_to_device_mb": 0.91552734375,
+          "device_to_host_mb": 7.62939453125e-06,
+          "transcript": null
+        },
+        {
+          "chunk_id": 3,
+          "start_s": 2.0,
+          "end_s": 4.0,
+          "chunk_duration_s": 2.0,
+          "latency_ms": 61.19464337825775,
+          "per_token_ms": 61.19464337825775,
+          "tokens": 1,
+          "host_to_device_mb": 0.91552734375,
+          "device_to_host_mb": 7.62939453125e-06,
+          "transcript": null
+        },
+        {
+          "chunk_id": 4,
+          "start_s": 3.0,
+          "end_s": 5.0,
+          "chunk_duration_s": 2.0,
+          "latency_ms": 60.74995081871748,
+          "per_token_ms": 60.74995081871748,
+          "tokens": 1,
+          "host_to_device_mb": 0.91552734375,
+          "device_to_host_mb": 7.62939453125e-06,
+          "transcript": null
+        },
+        {
+          "chunk_id": 5,
+          "start_s": 4.0,
+          "end_s": 6.0,
+          "chunk_duration_s": 2.0,
+          "latency_ms": 61.67748477309942,
+          "per_token_ms": 61.67748477309942,
+          "tokens": 1,
+          "host_to_device_mb": 0.91552734375,
+          "device_to_host_mb": 7.62939453125e-06,
+          "transcript": null
+        },
+        {
+          "chunk_id": 6,
+          "start_s": 5.0,
+          "end_s": 7.0,
+          "chunk_duration_s": 2.0,
+          "latency_ms": 65.11291489005089,
+          "per_token_ms": 65.11291489005089,
+          "tokens": 1,
+          "host_to_device_mb": 0.91552734375,
+          "device_to_host_mb": 7.62939453125e-06,
+          "transcript": null
+        },
+        {
+          "chunk_id": 7,
+          "start_s": 6.0,
+          "end_s": 8.0,
+          "chunk_duration_s": 2.0,
+          "latency_ms": 60.788811184465885,
+          "per_token_ms": 60.788811184465885,
+          "tokens": 1,
+          "host_to_device_mb": 0.91552734375,
+          "device_to_host_mb": 7.62939453125e-06,
+          "transcript": null
+        },
+        {
+          "chunk_id": 8,
+          "start_s": 7.0,
+          "end_s": 9.0,
+          "chunk_duration_s": 2.0,
+          "latency_ms": 61.30031030625105,
+          "per_token_ms": 61.30031030625105,
+          "tokens": 1,
+          "host_to_device_mb": 0.91552734375,
+          "device_to_host_mb": 7.62939453125e-06,
+          "transcript": null
+        },
+        {
+          "chunk_id": 9,
+          "start_s": 8.0,
+          "end_s": 10.0,
+          "chunk_duration_s": 2.0,
+          "latency_ms": 61.26060523092747,
+          "per_token_ms": 61.26060523092747,
+          "tokens": 1,
+          "host_to_device_mb": 0.91552734375,
+          "device_to_host_mb": 7.62939453125e-06,
+          "transcript": null
+        }
+      ],
+      "aggregates": {
+        "chunk_latency_ms": {
+          "mean": 61.40829984926515,
+          "median": 61.19464337825775,
+          "p95": 63.7387428432703,
+          "min": 60.093726962804794,
+          "max": 65.11291489005089
+        },
+        "chunk_per_token_ms": {
+          "mean": 61.40829984926515,
+          "median": 61.19464337825775,
+          "p95": 63.7387428432703,
+          "min": 60.093726962804794,
+          "max": 65.11291489005089
+        },
+        "chunk_throughput_audio_sec_per_sec": {
+          "mean": 32.58475099410631,
+          "median": 32.68259915557565,
+          "p95": 32.63894996111644,
+          "min": 30.71587262491908,
+          "max": 33.28134401179521
+        }
+      },
+      "gpu": {
+        "gpu_util_pct": null,
+        "mem_util_pct": null,
+        "mem_used_mb": null
+      }
+    }
+  ],
+  "library_versions": {
+    "torch": "2.9.0+cu128",
+    "torchaudio": "2.9.0+cu128",
+    "transformers": "4.57.1"
+  },
+  "meta": {
+    "audio_file": null,
+    "dummy_audio_seconds": 10.0,
+    "language": "en",
+    "task": "transcribe",
+    "sample_gpu": false
+  }
+}

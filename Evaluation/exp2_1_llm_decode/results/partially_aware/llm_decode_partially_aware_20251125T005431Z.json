@@ -1,0 +1,176 @@
+{
+  "baseline": "partially_aware",
+  "model_id": "gpt2-xl",
+  "prompt_tokens": 72,
+  "new_tokens": 50,
+  "batch_size": 1,
+  "runs": [
+    {
+      "total_ms": 2472.313861362636,
+      "per_token_ms": 49.44627722725272,
+      "tokens_generated": 50,
+      "throughput_tokens_per_s": 20.223969448782725,
+      "host_to_device_mb": 0.000762939453125,
+      "device_to_host_mb": 9.585762023925781,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The first time.",
+      "run_id": 1
+    },
+    {
+      "total_ms": 2466.6172610595822,
+      "per_token_ms": 49.332345221191645,
+      "tokens_generated": 50,
+      "throughput_tokens_per_s": 20.27067627773007,
+      "host_to_device_mb": 0.000762939453125,
+      "device_to_host_mb": 9.585762023925781,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The first time.",
+      "run_id": 2
+    },
+    {
+      "total_ms": 2450.7894637063146,
+      "per_token_ms": 49.01578927412629,
+      "tokens_generated": 50,
+      "throughput_tokens_per_s": 20.40158925948102,
+      "host_to_device_mb": 0.000762939453125,
+      "device_to_host_mb": 9.585762023925781,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The first time.",
+      "run_id": 3
+    },
+    {
+      "total_ms": 2447.453665547073,
+      "per_token_ms": 48.94907331094146,
+      "tokens_generated": 50,
+      "throughput_tokens_per_s": 20.429395948880458,
+      "host_to_device_mb": 0.000762939453125,
+      "device_to_host_mb": 9.585762023925781,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The first time.",
+      "run_id": 4
+    },
+    {
+      "total_ms": 2451.8444864079356,
+      "per_token_ms": 49.03688972815871,
+      "tokens_generated": 50,
+      "throughput_tokens_per_s": 20.39281050538906,
+      "host_to_device_mb": 0.000762939453125,
+      "device_to_host_mb": 9.585762023925781,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The first time.",
+      "run_id": 5
+    },
+    {
+      "total_ms": 2471.0149504244328,
+      "per_token_ms": 49.420299008488655,
+      "tokens_generated": 50,
+      "throughput_tokens_per_s": 20.23460035780511,
+      "host_to_device_mb": 0.000762939453125,
+      "device_to_host_mb": 9.585762023925781,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The first time.",
+      "run_id": 6
+    },
+    {
+      "total_ms": 2466.2793148308992,
+      "per_token_ms": 49.325586296617985,
+      "tokens_generated": 50,
+      "throughput_tokens_per_s": 20.273453902535064,
+      "host_to_device_mb": 0.000762939453125,
+      "device_to_host_mb": 9.585762023925781,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The first time.",
+      "run_id": 7
+    },
+    {
+      "total_ms": 2456.266801804304,
+      "per_token_ms": 49.12533603608608,
+      "tokens_generated": 50,
+      "throughput_tokens_per_s": 20.35609485226581,
+      "host_to_device_mb": 0.000762939453125,
+      "device_to_host_mb": 9.585762023925781,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The first time.",
+      "run_id": 8
+    },
+    {
+      "total_ms": 2459.330671466887,
+      "per_token_ms": 49.18661342933774,
+      "tokens_generated": 50,
+      "throughput_tokens_per_s": 20.330734935362354,
+      "host_to_device_mb": 0.000762939453125,
+      "device_to_host_mb": 9.585762023925781,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The first time.",
+      "run_id": 9
+    },
+    {
+      "total_ms": 2468.5512464493513,
+      "per_token_ms": 49.371024928987026,
+      "tokens_generated": 50,
+      "throughput_tokens_per_s": 20.254795225303774,
+      "host_to_device_mb": 0.000762939453125,
+      "device_to_host_mb": 9.585762023925781,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The first time.",
+      "run_id": 10
+    }
+  ],
+  "aggregates": {
+    "total_ms": {
+      "mean": 2461.0461723059416,
+      "median": 2462.804993148893,
+      "p95": 2471.7293514404446,
+      "min": 2447.453665547073,
+      "max": 2472.313861362636
+    },
+    "per_token_ms": {
+      "mean": 49.22092344611883,
+      "median": 49.25609986297786,
+      "p95": 49.43458702880889,
+      "min": 48.94907331094146,
+      "max": 49.44627722725272
+    },
+    "throughput_tokens_per_s": {
+      "mean": 20.316812071353546,
+      "median": 20.30209441894871,
+      "p95": 20.41688293865071,
+      "min": 20.223969448782725,
+      "max": 20.429395948880458
+    }
+  },
+  "device": "Djinn remote (localhost:5556)",
+  "dtype": "float16",
+  "backend": "djinn",
+  "djinn_server": "localhost:5556",
+  "seed": 42,
+  "library_versions": {
+    "torch": "2.9.0+cu128",
+    "transformers": "4.57.1"
+  },
+  "meta": {
+    "prompt_file": null,
+    "prompt_text": null,
+    "sample_gpu": false
+  }
+}

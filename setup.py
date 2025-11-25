@@ -47,6 +47,10 @@ setup(
     
     extras_require={
         'dev': read_requirements('requirements-dev.txt') if os.path.exists('requirements-dev.txt') else [],
+        'evaluation': [
+            'pyyaml>=6.0.0',
+            'pynvml>=11.0.0',
+        ],
     },
     
     # Python version requirement

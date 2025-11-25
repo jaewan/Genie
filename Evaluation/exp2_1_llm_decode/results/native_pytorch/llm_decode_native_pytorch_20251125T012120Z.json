@@ -1,0 +1,85 @@
+{
+  "baseline": "native_pytorch",
+  "model_id": "gpt2",
+  "prompt_tokens": 32,
+  "new_tokens": 10,
+  "batch_size": 1,
+  "runs": [
+    {
+      "total_ms": 75.9695153683424,
+      "per_token_ms": 7.59695153683424,
+      "tokens_generated": 10,
+      "throughput_tokens_per_s": 131.63174664882942,
+      "host_to_device_mb": 0.000244140625,
+      "device_to_host_mb": 0.0003204345703125,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": null,
+      "run_id": 1
+    },
+    {
+      "total_ms": 73.56831058859825,
+      "per_token_ms": 7.356831058859825,
+      "tokens_generated": 10,
+      "throughput_tokens_per_s": 135.9280907770338,
+      "host_to_device_mb": 0.000244140625,
+      "device_to_host_mb": 0.0003204345703125,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": null,
+      "run_id": 2
+    },
+    {
+      "total_ms": 73.67944996803999,
+      "per_token_ms": 7.367944996803999,
+      "tokens_generated": 10,
+      "throughput_tokens_per_s": 135.72305445192262,
+      "host_to_device_mb": 0.000244140625,
+      "device_to_host_mb": 0.0003204345703125,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": null,
+      "run_id": 3
+    }
+  ],
+  "aggregates": {
+    "total_ms": {
+      "mean": 74.40575864166021,
+      "median": 73.67944996803999,
+      "p95": 75.74050882831216,
+      "min": 73.56831058859825,
+      "max": 75.9695153683424
+    },
+    "per_token_ms": {
+      "mean": 7.440575864166021,
+      "median": 7.367944996803999,
+      "p95": 7.574050882831216,
+      "min": 7.356831058859825,
+      "max": 7.59695153683424
+    },
+    "throughput_tokens_per_s": {
+      "mean": 134.4276306259286,
+      "median": 135.72305445192262,
+      "p95": 135.90758714452267,
+      "min": 131.63174664882942,
+      "max": 135.9280907770338
+    }
+  },
+  "device": "NVIDIA L4",
+  "dtype": "float16",
+  "backend": "local",
+  "djinn_server": null,
+  "seed": 42,
+  "library_versions": {
+    "torch": "2.9.0+cu128",
+    "transformers": "4.57.1"
+  },
+  "meta": {
+    "prompt_file": null,
+    "prompt_text": null,
+    "sample_gpu": false
+  }
+}

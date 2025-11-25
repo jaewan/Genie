@@ -15,7 +15,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 
 import torch
 
@@ -27,7 +27,7 @@ class KVSession:
     """Represents a stateful KV cache session."""
     session_id: str
     gpu_id: int
-    kv_cache: Optional[torch.Tensor] = None
+    kv_cache: Optional[Any] = None
     last_access: float = field(default_factory=time.time)
     bytes_used: int = 0
     step_count: int = 0
@@ -75,7 +75,7 @@ class KVSessionManager:
         self, 
         session_id: str, 
         gpu_id: int,
-        initial_kv: Optional[torch.Tensor] = None
+        initial_kv: Optional[Any] = None
     ) -> KVSession:
         """
         Get existing session or create new one.
@@ -105,9 +105,11 @@ class KVSessionManager:
             bytes_used = 0
             if initial_kv is not None:
                 kv_gpu = await asyncio.to_thread(
-                    lambda: initial_kv.to(torch.device(f"cuda:{gpu_id}"), non_blocking=True)
+                    self._move_structure_to_device,
+                    initial_kv,
+                    torch.device(f"cuda:{gpu_id}")
                 )
-                bytes_used = kv_gpu.element_size() * kv_gpu.numel()
+                bytes_used = self._estimate_size_bytes(kv_gpu)
             
             sess = KVSession(
                 session_id=session_id,
@@ -134,7 +136,7 @@ class KVSessionManager:
     async def update_kv(
         self,
         session_id: str,
-        kv_cache: torch.Tensor
+        kv_cache: Any
     ) -> KVSession:
         """
         Update KV cache for an existing session.
@@ -156,14 +158,13 @@ class KVSessionManager:
             
             # Move new KV to session GPU (non-blocking)
             kv_gpu = await asyncio.to_thread(
-                lambda: kv_cache.to(
-                    torch.device(f"cuda:{sess.gpu_id}"), 
-                    non_blocking=True
-                )
+                self._move_structure_to_device,
+                kv_cache,
+                torch.device(f"cuda:{sess.gpu_id}")
             )
             
             # Update stats
-            new_bytes = kv_gpu.element_size() * kv_gpu.numel()
+            new_bytes = self._estimate_size_bytes(kv_gpu)
             old_bytes = sess.bytes_used
             sess.kv_cache = kv_gpu
             sess.bytes_used = new_bytes
@@ -273,3 +274,40 @@ class KVSessionManager:
             "active_sessions": len(self._sessions),
             "kv_bytes_pinned_mb": self.stats["kv_bytes_pinned"] / (1024 * 1024),
         }
+
+    def _move_structure_to_device(self, data: Any, device: torch.device) -> Any:
+        """Recursively move tensors to the specified device."""
+        if isinstance(data, torch.Tensor):
+            return data.to(device, non_blocking=True)
+        if isinstance(data, (list, tuple)):
+            converted = [self._move_structure_to_device(elem, device) for elem in data]
+            return type(data)(converted)
+        if isinstance(data, dict):
+            return {k: self._move_structure_to_device(v, device) for k, v in data.items()}
+        return data
+
+    def _estimate_size_bytes(self, data: Any) -> int:
+        """Recursively estimate tensor memory usage in bytes."""
+        if isinstance(data, torch.Tensor):
+            return data.element_size() * data.numel()
+        if isinstance(data, (list, tuple)):
+            return sum(self._estimate_size_bytes(elem) for elem in data)
+        if isinstance(data, dict):
+            return sum(self._estimate_size_bytes(v) for v in data.values())
+        return 0
+
+
+_global_kv_session_manager: Optional[KVSessionManager] = None
+
+
+def get_kv_session_manager() -> KVSessionManager:
+    """Get or create global KV session manager."""
+    global _global_kv_session_manager
+    if _global_kv_session_manager is None:
+        _global_kv_session_manager = KVSessionManager()
+        try:
+            loop = asyncio.get_event_loop()
+            loop.create_task(_global_kv_session_manager.start_cleanup())
+        except RuntimeError:
+            logger.warning("Async loop not running; KV session cleanup not started")
+    return _global_kv_session_manager

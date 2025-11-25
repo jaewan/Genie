@@ -1,0 +1,4078 @@
+{
+  "config": {
+    "experiment": {
+      "name": "phase4_smoke_test",
+      "description": "Quick smoke test of Phase 4 load test infrastructure",
+      "duration_seconds": 120,
+      "djinn_server_address": "localhost:5556",
+      "sla": {
+        "p99_latency_ms": 4000,
+        "error_rate": 0.05,
+        "gpu_utilization": 0.05
+      }
+    },
+    "user_classes": {
+      "llm_users": {
+        "count": 8,
+        "percentage": 60,
+        "workload": {
+          "implementation": "hf_causal_lm",
+          "params": {
+            "model_id": "sshleifer/tiny-gpt2",
+            "prompt_text": "Djinn orchestrates disaggregated accelerators.",
+            "prompt_length": 64,
+            "new_tokens": 24,
+            "batch_size": 1,
+            "unit_name": "tokens"
+          }
+        },
+        "request_pattern": {
+          "requests_per_minute": 20,
+          "burst_probability": 0.15
+        }
+      },
+      "vision_users": {
+        "count": 4,
+        "percentage": 30,
+        "workload": {
+          "implementation": "hf_vision",
+          "params": {
+            "model_id": "microsoft/resnet-50",
+            "batch_size": 4,
+            "image_size": 224,
+            "unit_name": "images"
+          },
+          "semantic_hints": {
+            "phase": "vision",
+            "priority": "interactive"
+          }
+        },
+        "request_pattern": {
+          "requests_per_minute": 12,
+          "burst_probability": 0.05
+        }
+      },
+      "multimodal_users": {
+        "count": 2,
+        "percentage": 10,
+        "workload": {
+          "implementation": "hf_multimodal",
+          "params": {
+            "model_id": "openai/clip-vit-base-patch32",
+            "batch_size": 1,
+            "image_size": 224,
+            "text_length": 77,
+            "unit_name": "pairs",
+            "execution_mode": "classification"
+          },
+          "semantic_hints": {
+            "phase": "vision",
+            "priority": "interactive",
+            "kv_cache_size_mb": 0
+          }
+        },
+        "request_pattern": {
+          "requests_per_minute": 6,
+          "burst_probability": 0.02
+        }
+      }
+    },
+    "metrics": {
+      "collection_interval_seconds": 0.5,
+      "output_file": "Evaluation/phase4_load_test/results/smoke_test_{timestamp}.json"
+    }
+  },
+  "metrics": {
+    "duration_seconds": 130.17878484725952,
+    "total_requests": 526,
+    "successful_requests": 526,
+    "failed_requests": 0,
+    "error_rate": 0.0,
+    "latency_ms_p50": 104.7486518509686,
+    "latency_ms_p90": 384.1116729192436,
+    "latency_ms_p95": 442.3423504922539,
+    "latency_ms_p99": 6125.1282682828605,
+    "throughput_per_s": 4.040596942252631,
+    "gpu_utilization_pct": 0.803088803088803,
+    "gpu_utilization_samples": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      2.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      4.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      2.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      5.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      4.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      11.0,
+      0.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      4.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      2.0,
+      3.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      3.0,
+      0.0,
+      0.0,
+      5.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      5.0,
+      9.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      2.0,
+      0.0,
+      3.0,
+      0.0,
+      5.0,
+      11.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      2.0,
+      0.0,
+      1.0,
+      3.0,
+      6.0,
+      2.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      3.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      2.0,
+      0.0,
+      6.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      2.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      2.0,
+      1.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      3.0,
+      0.0,
+      6.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      3.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      3.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+      6.0,
+      0.0,
+      0.0,
+      0.0,
+      5.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      15.0,
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+      0.0,
+      18.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      4.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      2.0,
+      5.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      2.0,
+      0.0,
+      0.0,
+      0.0,
+      11.0,
+      0.0,
+      2.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "gpu_memory_used_mb": 14250.173021235521,
+    "per_class_metrics": {
+      "llm_users": {
+        "total_requests": 404,
+        "successful_requests": 404,
+        "failed_requests": 0,
+        "error_rate": 0.0,
+        "latency_ms_p50": 174.76180149242282,
+        "latency_ms_p99": 4709.638731600717,
+        "throughput_per_s": 3.10342426743358
+      },
+      "vision_users": {
+        "total_requests": 98,
+        "successful_requests": 98,
+        "failed_requests": 0,
+        "error_rate": 0.0,
+        "latency_ms_p50": 37.24759025499225,
+        "latency_ms_p99": 0.0,
+        "throughput_per_s": 0.7528108371497297
+      },
+      "multimodal_users": {
+        "total_requests": 24,
+        "successful_requests": 24,
+        "failed_requests": 0,
+        "error_rate": 0.0,
+        "latency_ms_p50": 25.504522491246462,
+        "latency_ms_p99": 0.0,
+        "throughput_per_s": 0.18436183766932157
+      }
+    },
+    "sla_violations": {
+      "p99_latency": false,
+      "error_rate": false,
+      "gpu_utilization": false
+    }
+  },
+  "raw_metrics": [
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 4699.6975764632225,
+      "success": true,
+      "timestamp": 1764023991.4856813
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 75.08130930364132,
+      "success": true,
+      "timestamp": 1764023991.560857
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 55.94742018729448,
+      "success": true,
+      "timestamp": 1764023991.6168907
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 2164.1632644459605,
+      "success": true,
+      "timestamp": 1764023996.78221
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 414.19663559645414,
+      "success": true,
+      "timestamp": 1764024000.1970122
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 199.17555712163448,
+      "success": true,
+      "timestamp": 1764024003.3966732
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 79.68327775597572,
+      "success": true,
+      "timestamp": 1764024006.4766898
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 179.91445492953062,
+      "success": true,
+      "timestamp": 1764024009.6570654
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 198.66473879665136,
+      "success": true,
+      "timestamp": 1764024012.8559566
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 264.6259441971779,
+      "success": true,
+      "timestamp": 1764024016.1244032
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 264.69047274440527,
+      "success": true,
+      "timestamp": 1764024019.3894386
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 282.5231486931443,
+      "success": true,
+      "timestamp": 1764024022.6727433
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 373.7407037988305,
+      "success": true,
+      "timestamp": 1764024026.0477285
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 69.62215807288885,
+      "success": true,
+      "timestamp": 1764024026.1174502
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 48.99619147181511,
+      "success": true,
+      "timestamp": 1764024026.1665397
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 178.20790503174067,
+      "success": true,
+      "timestamp": 1764024029.3581505
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 296.9035664573312,
+      "success": true,
+      "timestamp": 1764024032.6553063
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 40.95969721674919,
+      "success": true,
+      "timestamp": 1764024032.6963668
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 40.07132910192013,
+      "success": true,
+      "timestamp": 1764024032.736536
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 36.770534701645374,
+      "success": true,
+      "timestamp": 1764024032.7734118
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 221.63083590567112,
+      "success": true,
+      "timestamp": 1764024035.9971812
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 364.66417741030455,
+      "success": true,
+      "timestamp": 1764024039.3628998
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 313.1473818793893,
+      "success": true,
+      "timestamp": 1764024042.67653
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 339.38293624669313,
+      "success": true,
+      "timestamp": 1764024046.016409
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 366.4454147219658,
+      "success": true,
+      "timestamp": 1764024049.38384
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 219.98245175927877,
+      "success": true,
+      "timestamp": 1764024052.6047118
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 445.84976602345705,
+      "success": true,
+      "timestamp": 1764024056.051005
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 358.57660230249166,
+      "success": true,
+      "timestamp": 1764024059.409827
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 327.03003380447626,
+      "success": true,
+      "timestamp": 1764024062.737528
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 355.8425363153219,
+      "success": true,
+      "timestamp": 1764024066.0938213
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 310.83191093057394,
+      "success": true,
+      "timestamp": 1764024069.4056253
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 73.1594106182456,
+      "success": true,
+      "timestamp": 1764024069.4788551
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 65.53194671869278,
+      "success": true,
+      "timestamp": 1764024069.5444589
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 64.20710776001215,
+      "success": true,
+      "timestamp": 1764024069.6087437
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 113.91023453325033,
+      "success": true,
+      "timestamp": 1764024072.7236319
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 196.49064261466265,
+      "success": true,
+      "timestamp": 1764024075.9277508
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 76.98848098516464,
+      "success": true,
+      "timestamp": 1764024076.004835
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 62.059647403657436,
+      "success": true,
+      "timestamp": 1764024076.0669827
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 78.99349555373192,
+      "success": true,
+      "timestamp": 1764024076.1460466
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 58.17210394889116,
+      "success": true,
+      "timestamp": 1764024076.2043018
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 68.66382900625467,
+      "success": true,
+      "timestamp": 1764024079.2734172
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 212.87429053336382,
+      "success": true,
+      "timestamp": 1764024082.4949813
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 388.58174718916416,
+      "success": true,
+      "timestamp": 1764024085.884305
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 426.84569116681814,
+      "success": true,
+      "timestamp": 1764024089.3140705
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 90.98523762077093,
+      "success": true,
+      "timestamp": 1764024089.4051328
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 106.38380516320467,
+      "success": true,
+      "timestamp": 1764024089.5115905
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 85.44361684471369,
+      "success": true,
+      "timestamp": 1764024089.5971012
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 61.82616017758846,
+      "success": true,
+      "timestamp": 1764024089.6589923
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 137.0488852262497,
+      "success": true,
+      "timestamp": 1764024092.7961469
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 165.03876727074385,
+      "success": true,
+      "timestamp": 1764024095.9619293
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 128.12198884785175,
+      "success": true,
+      "timestamp": 1764024099.090402
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 91.9738644734025,
+      "success": true,
+      "timestamp": 1764024102.1835902
+    },
+    {
+      "user_id": 0,
+      "user_class": "llm_users",
+      "latency_ms": 145.84199711680412,
+      "success": true,
+      "timestamp": 1764024105.3305545
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 4705.835193395615,
+      "success": true,
+      "timestamp": 1764023991.494908
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 2259.6715725958347,
+      "success": true,
+      "timestamp": 1764023996.7559118
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 401.56603790819645,
+      "success": true,
+      "timestamp": 1764024000.1592858
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 214.67572916299105,
+      "success": true,
+      "timestamp": 1764024003.3744917
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 185.00591441988945,
+      "success": true,
+      "timestamp": 1764024003.5595791
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 90.79391695559025,
+      "success": true,
+      "timestamp": 1764024003.6504574
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 75.24372078478336,
+      "success": true,
+      "timestamp": 1764024003.725788
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 72.32916727662086,
+      "success": true,
+      "timestamp": 1764024003.798197
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 164.44617044180632,
+      "success": true,
+      "timestamp": 1764024006.9634478
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 159.05490424484015,
+      "success": true,
+      "timestamp": 1764024010.1238127
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 154.38061580061913,
+      "success": true,
+      "timestamp": 1764024013.2794313
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 161.26389242708683,
+      "success": true,
+      "timestamp": 1764024016.4429889
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 154.66494020074606,
+      "success": true,
+      "timestamp": 1764024019.5981073
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 104.31911423802376,
+      "success": true,
+      "timestamp": 1764024022.7038264
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 372.4960517138243,
+      "success": true,
+      "timestamp": 1764024026.0766773
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 271.28954976797104,
+      "success": true,
+      "timestamp": 1764024029.349322
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 300.6941946223378,
+      "success": true,
+      "timestamp": 1764024032.6503391
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 320.21398190408945,
+      "success": true,
+      "timestamp": 1764024035.9718242
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 380.7838959619403,
+      "success": true,
+      "timestamp": 1764024039.354603
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 309.5064349472523,
+      "success": true,
+      "timestamp": 1764024042.6650362
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 334.6514608711004,
+      "success": true,
+      "timestamp": 1764024046.0004578
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 365.14781042933464,
+      "success": true,
+      "timestamp": 1764024049.3659828
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 74.49787855148315,
+      "success": true,
+      "timestamp": 1764024049.440568
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 55.246842093765736,
+      "success": true,
+      "timestamp": 1764024049.4958951
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 123.18926211446524,
+      "success": true,
+      "timestamp": 1764024052.6193202
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 71.82573527097702,
+      "success": true,
+      "timestamp": 1764024052.6912324
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 33.66748057305813,
+      "success": true,
+      "timestamp": 1764024052.7249782
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 345.4323345795274,
+      "success": true,
+      "timestamp": 1764024056.071408
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 44.59900688380003,
+      "success": true,
+      "timestamp": 1764024056.1160986
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 44.85421068966389,
+      "success": true,
+      "timestamp": 1764024056.1610346
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 48.31692483276129,
+      "success": true,
+      "timestamp": 1764024056.2094326
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 203.14004179090261,
+      "success": true,
+      "timestamp": 1764024059.4130352
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 326.6802551224828,
+      "success": true,
+      "timestamp": 1764024062.740075
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 31.147683039307594,
+      "success": true,
+      "timestamp": 1764024062.771334
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 47.483280301094055,
+      "success": true,
+      "timestamp": 1764024062.8189054
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 47.32554778456688,
+      "success": true,
+      "timestamp": 1764024062.8663201
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 45.74126843363047,
+      "success": true,
+      "timestamp": 1764024062.912146
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 199.04128182679415,
+      "success": true,
+      "timestamp": 1764024066.1123433
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 302.5146285071969,
+      "success": true,
+      "timestamp": 1764024069.4155216
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 164.8818301036954,
+      "success": true,
+      "timestamp": 1764024072.5822935
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 309.68861375004053,
+      "success": true,
+      "timestamp": 1764024075.8929574
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 211.68212871998549,
+      "success": true,
+      "timestamp": 1764024079.1057281
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 370.31398620456457,
+      "success": true,
+      "timestamp": 1764024082.4763262
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 50.44104624539614,
+      "success": true,
+      "timestamp": 1764024082.526867
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 25.637510232627392,
+      "success": true,
+      "timestamp": 1764024082.5526075
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 335.85766050964594,
+      "success": true,
+      "timestamp": 1764024085.8888204
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 424.86291378736496,
+      "success": true,
+      "timestamp": 1764024089.3165948
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 263.07747792452574,
+      "success": true,
+      "timestamp": 1764024092.581734
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 197.83147796988487,
+      "success": true,
+      "timestamp": 1764024095.7804418
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 174.64191745966673,
+      "success": true,
+      "timestamp": 1764024098.9556942
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 176.41691025346518,
+      "success": true,
+      "timestamp": 1764024102.1332881
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 190.37263840436935,
+      "success": true,
+      "timestamp": 1764024105.3243926
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 51.83347221463919,
+      "success": true,
+      "timestamp": 1764024105.3763125
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 27.095727622509003,
+      "success": true,
+      "timestamp": 1764024105.403493
+    },
+    {
+      "user_id": 1,
+      "user_class": "llm_users",
+      "latency_ms": 24.671919643878937,
+      "success": true,
+      "timestamp": 1764024105.4282522
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 4705.140572972596,
+      "success": true,
+      "timestamp": 1764023991.4965532
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 2258.870298974216,
+      "success": true,
+      "timestamp": 1764023996.7574055
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 394.4731093943119,
+      "success": true,
+      "timestamp": 1764024000.1541057
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 212.36659307032824,
+      "success": true,
+      "timestamp": 1764024003.3669455
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 93.25465373694897,
+      "success": true,
+      "timestamp": 1764024006.4633112
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 173.54049626737833,
+      "success": true,
+      "timestamp": 1764024009.6382847
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 212.48577162623405,
+      "success": true,
+      "timestamp": 1764024012.8543572
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 262.74063158780336,
+      "success": true,
+      "timestamp": 1764024016.1207864
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 258.9685581624508,
+      "success": true,
+      "timestamp": 1764024019.3810606
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 259.77079570293427,
+      "success": true,
+      "timestamp": 1764024022.6441984
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 358.77561941742897,
+      "success": true,
+      "timestamp": 1764024026.0058103
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 172.83351719379425,
+      "success": true,
+      "timestamp": 1764024029.1791832
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 54.66101597994566,
+      "success": true,
+      "timestamp": 1764024032.2369843
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 97.61387202888727,
+      "success": true,
+      "timestamp": 1764024035.3367584
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 118.6690591275692,
+      "success": true,
+      "timestamp": 1764024038.4579415
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 53.22318524122238,
+      "success": true,
+      "timestamp": 1764024041.5135412
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 90.38987196981907,
+      "success": true,
+      "timestamp": 1764024044.6050165
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 104.05655857175589,
+      "success": true,
+      "timestamp": 1764024047.710384
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 71.09872251749039,
+      "success": true,
+      "timestamp": 1764024047.7816005
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 62.997668981552124,
+      "success": true,
+      "timestamp": 1764024047.8447146
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 60.67513953894377,
+      "success": true,
+      "timestamp": 1764024047.9054945
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 54.959739558398724,
+      "success": true,
+      "timestamp": 1764024047.9605548
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 62.16867547482252,
+      "success": true,
+      "timestamp": 1764024051.0254393
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 61.45822163671255,
+      "success": true,
+      "timestamp": 1764024051.08699
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 55.259278044104576,
+      "success": true,
+      "timestamp": 1764024051.142352
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 96.18915431201458,
+      "success": true,
+      "timestamp": 1764024054.2394593
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 99.78544991463423,
+      "success": true,
+      "timestamp": 1764024057.3417132
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 69.88468393683434,
+      "success": true,
+      "timestamp": 1764024060.412998
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 72.0859756693244,
+      "success": true,
+      "timestamp": 1764024063.4859347
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 63.981251791119576,
+      "success": true,
+      "timestamp": 1764024066.5509975
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 64.89295419305563,
+      "success": true,
+      "timestamp": 1764024069.61624
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 116.2760341539979,
+      "success": true,
+      "timestamp": 1764024072.7330015
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 199.67906177043915,
+      "success": true,
+      "timestamp": 1764024075.9343326
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 79.70298174768686,
+      "success": true,
+      "timestamp": 1764024076.0141048
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 65.68796932697296,
+      "success": true,
+      "timestamp": 1764024076.079859
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 89.75524175912142,
+      "success": true,
+      "timestamp": 1764024076.1696925
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 45.64176220446825,
+      "success": true,
+      "timestamp": 1764024076.2154155
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 69.30497568100691,
+      "success": true,
+      "timestamp": 1764024079.2853122
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 198.889983817935,
+      "success": true,
+      "timestamp": 1764024082.4977572
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 386.76346372812986,
+      "success": true,
+      "timestamp": 1764024085.8857138
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 430.83954881876707,
+      "success": true,
+      "timestamp": 1764024089.3207474
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 254.65267710387707,
+      "success": true,
+      "timestamp": 1764024092.5796359
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 48.36670495569706,
+      "success": true,
+      "timestamp": 1764024092.6280742
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 145.79875953495502,
+      "success": true,
+      "timestamp": 1764024092.7739325
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 179.54087257385254,
+      "success": true,
+      "timestamp": 1764024095.9559724
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 107.01143462210894,
+      "success": true,
+      "timestamp": 1764024096.0630562
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 71.58718910068274,
+      "success": true,
+      "timestamp": 1764024096.134707
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 44.56261731684208,
+      "success": true,
+      "timestamp": 1764024096.1793482
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 44.87368557602167,
+      "success": true,
+      "timestamp": 1764024096.2243018
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 142.21976790577173,
+      "success": true,
+      "timestamp": 1764024099.3677247
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 62.357849441468716,
+      "success": true,
+      "timestamp": 1764024102.431314
+    },
+    {
+      "user_id": 2,
+      "user_class": "llm_users",
+      "latency_ms": 28.048371896147728,
+      "success": true,
+      "timestamp": 1764024105.460532
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 4706.209522671998,
+      "success": true,
+      "timestamp": 1764023991.5001915
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 2258.0180317163467,
+      "success": true,
+      "timestamp": 1764023996.7587836
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 404.00904417037964,
+      "success": true,
+      "timestamp": 1764024000.1665301
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 112.4670272693038,
+      "success": true,
+      "timestamp": 1764024000.2790844
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 74.85365122556686,
+      "success": true,
+      "timestamp": 1764024000.3540208
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 191.75853114575148,
+      "success": true,
+      "timestamp": 1764024003.5463045
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 48.37443400174379,
+      "success": true,
+      "timestamp": 1764024006.5953004
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 114.25319872796535,
+      "success": true,
+      "timestamp": 1764024009.715101
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 151.4152316376567,
+      "success": true,
+      "timestamp": 1764024012.8668785
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 267.1681744977832,
+      "success": true,
+      "timestamp": 1764024016.134997
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 261.7373261600733,
+      "success": true,
+      "timestamp": 1764024019.3976114
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 277.6309959590435,
+      "success": true,
+      "timestamp": 1764024022.6756117
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 378.0628675594926,
+      "success": true,
+      "timestamp": 1764024026.056037
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 284.3929687514901,
+      "success": true,
+      "timestamp": 1764024029.3413768
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 304.66924887150526,
+      "success": true,
+      "timestamp": 1764024032.6463192
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 313.5537626221776,
+      "success": true,
+      "timestamp": 1764024035.960215
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 390.5507456511259,
+      "success": true,
+      "timestamp": 1764024039.3511212
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 313.77857457846403,
+      "success": true,
+      "timestamp": 1764024042.666416
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 340.65520856529474,
+      "success": true,
+      "timestamp": 1764024046.0081806
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 364.4627658650279,
+      "success": true,
+      "timestamp": 1764024049.3733628
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 224.26991071552038,
+      "success": true,
+      "timestamp": 1764024052.598637
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 445.8611598238349,
+      "success": true,
+      "timestamp": 1764024056.045013
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 352.6959428563714,
+      "success": true,
+      "timestamp": 1764024059.3980856
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 325.16022957861423,
+      "success": true,
+      "timestamp": 1764024062.7241933
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 361.6046505048871,
+      "success": true,
+      "timestamp": 1764024066.0863032
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 315.9661730751395,
+      "success": true,
+      "timestamp": 1764024069.4025578
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 169.31409668177366,
+      "success": true,
+      "timestamp": 1764024072.5730577
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 317.9528070613742,
+      "success": true,
+      "timestamp": 1764024075.8913279
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 208.51816795766354,
+      "success": true,
+      "timestamp": 1764024079.10078
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 383.5097011178732,
+      "success": true,
+      "timestamp": 1764024082.4846466
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 387.2118331491947,
+      "success": true,
+      "timestamp": 1764024085.8728704
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 406.63983579725027,
+      "success": true,
+      "timestamp": 1764024089.289711
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 283.9534692466259,
+      "success": true,
+      "timestamp": 1764024092.5738978
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 202.02147401869297,
+      "success": true,
+      "timestamp": 1764024095.7763276
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 172.28062264621258,
+      "success": true,
+      "timestamp": 1764024098.9502094
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 178.09171602129936,
+      "success": true,
+      "timestamp": 1764024102.1284683
+    },
+    {
+      "user_id": 3,
+      "user_class": "llm_users",
+      "latency_ms": 192.41688773036003,
+      "success": true,
+      "timestamp": 1764024105.3215773
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 4720.611110329628,
+      "success": true,
+      "timestamp": 1764023991.517147
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 2254.1298251599073,
+      "success": true,
+      "timestamp": 1764023996.7715805
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 415.2642637491226,
+      "success": true,
+      "timestamp": 1764024000.187279
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 99.71228800714016,
+      "success": true,
+      "timestamp": 1764024000.2870502
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 75.0805800780654,
+      "success": true,
+      "timestamp": 1764024000.3621926
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 43.94916072487831,
+      "success": true,
+      "timestamp": 1764024000.4062123
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 23.75387493520975,
+      "success": true,
+      "timestamp": 1764024000.4300468
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 158.22207927703857,
+      "success": true,
+      "timestamp": 1764024003.588586
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 47.80819173902273,
+      "success": true,
+      "timestamp": 1764024006.6432292
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 74.60150308907032,
+      "success": true,
+      "timestamp": 1764024009.734344
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 134.41063277423382,
+      "success": true,
+      "timestamp": 1764024012.869534
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 266.16993360221386,
+      "success": true,
+      "timestamp": 1764024016.1363344
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 262.64897361397743,
+      "success": true,
+      "timestamp": 1764024019.4001422
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 277.45150588452816,
+      "success": true,
+      "timestamp": 1764024022.6783142
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 379.17627580463886,
+      "success": true,
+      "timestamp": 1764024026.0594285
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 284.79824494570494,
+      "success": true,
+      "timestamp": 1764024029.3449042
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 59.85577683895826,
+      "success": true,
+      "timestamp": 1764024029.404858
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 50.28838571161032,
+      "success": true,
+      "timestamp": 1764024029.455247
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 207.26535934954882,
+      "success": true,
+      "timestamp": 1764024032.663297
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 325.7693201303482,
+      "success": true,
+      "timestamp": 1764024035.9894361
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 373.7615030258894,
+      "success": true,
+      "timestamp": 1764024039.3642197
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 313.5474631562829,
+      "success": true,
+      "timestamp": 1764024042.6780052
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 338.82772363722324,
+      "success": true,
+      "timestamp": 1764024046.01775
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 366.458467207849,
+      "success": true,
+      "timestamp": 1764024049.385276
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 216.15765243768692,
+      "success": true,
+      "timestamp": 1764024052.601749
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 440.7248506322503,
+      "success": true,
+      "timestamp": 1764024056.043435
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 351.7379555851221,
+      "success": true,
+      "timestamp": 1764024059.3954358
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 35.69389507174492,
+      "success": true,
+      "timestamp": 1764024059.4312155
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 50.988187082111835,
+      "success": true,
+      "timestamp": 1764024059.4822946
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 42.57868602871895,
+      "success": true,
+      "timestamp": 1764024059.5249655
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 219.66875344514847,
+      "success": true,
+      "timestamp": 1764024062.7453122
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 351.8339032307267,
+      "success": true,
+      "timestamp": 1764024066.0975204
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 310.94031129032373,
+      "success": true,
+      "timestamp": 1764024069.4095192
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 73.24735913425684,
+      "success": true,
+      "timestamp": 1764024069.482837
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 66.01439416408539,
+      "success": true,
+      "timestamp": 1764024069.5489292
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 62.8422936424613,
+      "success": true,
+      "timestamp": 1764024069.6118639
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 28.702354058623314,
+      "success": true,
+      "timestamp": 1764024069.6406507
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 95.29317263513803,
+      "success": true,
+      "timestamp": 1764024072.7370703
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 206.33970014750957,
+      "success": true,
+      "timestamp": 1764024075.9449656
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 75.01602545380592,
+      "success": true,
+      "timestamp": 1764024076.0200496
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 71.11226487904787,
+      "success": true,
+      "timestamp": 1764024076.091237
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 84.36375856399536,
+      "success": true,
+      "timestamp": 1764024076.1756835
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 81.25969208776951,
+      "success": true,
+      "timestamp": 1764024079.257803
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 232.6829805970192,
+      "success": true,
+      "timestamp": 1764024082.4911826
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 389.57840763032436,
+      "success": true,
+      "timestamp": 1764024085.881857
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 409.4729134812951,
+      "success": true,
+      "timestamp": 1764024089.2951167
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 94.5338448509574,
+      "success": true,
+      "timestamp": 1764024089.3897734
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 112.2543541714549,
+      "success": true,
+      "timestamp": 1764024089.5021122
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 86.08530461788177,
+      "success": true,
+      "timestamp": 1764024089.5882719
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 63.18012997508049,
+      "success": true,
+      "timestamp": 1764024089.6515331
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 130.17295952886343,
+      "success": true,
+      "timestamp": 1764024092.7824912
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 174.78275299072266,
+      "success": true,
+      "timestamp": 1764024095.9583972
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 123.50189499557018,
+      "success": true,
+      "timestamp": 1764024099.0823932
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 92.94723346829414,
+      "success": true,
+      "timestamp": 1764024102.17896
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 63.799270428717136,
+      "success": true,
+      "timestamp": 1764024102.242865
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 28.88182271271944,
+      "success": true,
+      "timestamp": 1764024102.2718499
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 27.087497524917126,
+      "success": true,
+      "timestamp": 1764024102.2990367
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 26.452955789864063,
+      "success": true,
+      "timestamp": 1764024102.32558
+    },
+    {
+      "user_id": 4,
+      "user_class": "llm_users",
+      "latency_ms": 53.86301316320896,
+      "success": true,
+      "timestamp": 1764024105.380155
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 4719.52020470053,
+      "success": true,
+      "timestamp": 1764023991.518624
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 2253.9651673287153,
+      "success": true,
+      "timestamp": 1764023996.773048
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 415.66259413957596,
+      "success": true,
+      "timestamp": 1764024000.1893437
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 199.15833696722984,
+      "success": true,
+      "timestamp": 1764024003.389662
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 182.32231494039297,
+      "success": true,
+      "timestamp": 1764024003.57207
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 83.1278283149004,
+      "success": true,
+      "timestamp": 1764024003.655285
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 82.91605021804571,
+      "success": true,
+      "timestamp": 1764024003.7382746
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 63.772302120923996,
+      "success": true,
+      "timestamp": 1764024003.802125
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 166.92774277180433,
+      "success": true,
+      "timestamp": 1764024006.9696853
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 161.60758771002293,
+      "success": true,
+      "timestamp": 1764024010.1318154
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 151.32103580981493,
+      "success": true,
+      "timestamp": 1764024013.285557
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 162.27759327739477,
+      "success": true,
+      "timestamp": 1764024016.448486
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 155.06298560649157,
+      "success": true,
+      "timestamp": 1764024019.6042314
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 97.45792020112276,
+      "success": true,
+      "timestamp": 1764024022.7079372
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 369.08029299229383,
+      "success": true,
+      "timestamp": 1764024026.0780663
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 51.496061496436596,
+      "success": true,
+      "timestamp": 1764024026.1296632
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 40.527015924453735,
+      "success": true,
+      "timestamp": 1764024026.1702764
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 34.80144124478102,
+      "success": true,
+      "timestamp": 1764024026.2051806
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 26.450657285749912,
+      "success": true,
+      "timestamp": 1764024026.23173
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 139.02602810412645,
+      "success": true,
+      "timestamp": 1764024029.3753464
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 41.34733509272337,
+      "success": true,
+      "timestamp": 1764024029.416796
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 42.00330562889576,
+      "success": true,
+      "timestamp": 1764024029.4588935
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 26.08487941324711,
+      "success": true,
+      "timestamp": 1764024029.4850717
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 37.21670340746641,
+      "success": true,
+      "timestamp": 1764024029.5223851
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 158.02042931318283,
+      "success": true,
+      "timestamp": 1764024032.6812644
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 299.51039236038923,
+      "success": true,
+      "timestamp": 1764024035.9810803
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 68.03087145090103,
+      "success": true,
+      "timestamp": 1764024036.049219
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 42.832860723137856,
+      "success": true,
+      "timestamp": 1764024036.092142
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 277.03980449587107,
+      "success": true,
+      "timestamp": 1764024039.3699696
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 317.1254266053438,
+      "success": true,
+      "timestamp": 1764024042.6882524
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 336.4849854260683,
+      "success": true,
+      "timestamp": 1764024046.0255024
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 367.8345577791333,
+      "success": true,
+      "timestamp": 1764024049.3936265
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 51.74664407968521,
+      "success": true,
+      "timestamp": 1764024049.4454606
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 58.83161257952452,
+      "success": true,
+      "timestamp": 1764024049.5043547
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 31.019700691103935,
+      "success": true,
+      "timestamp": 1764024049.5354552
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 33.14141556620598,
+      "success": true,
+      "timestamp": 1764024049.568674
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 102.47604828327894,
+      "success": true,
+      "timestamp": 1764024052.6735775
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 395.00807598233223,
+      "success": true,
+      "timestamp": 1764024056.0689423
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 332.30007719248533,
+      "success": true,
+      "timestamp": 1764024059.4018724
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 308.9145002886653,
+      "success": true,
+      "timestamp": 1764024062.711611
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 361.15527525544167,
+      "success": true,
+      "timestamp": 1764024066.0760472
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 317.2707334160805,
+      "success": true,
+      "timestamp": 1764024069.393845
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 76.87231618911028,
+      "success": true,
+      "timestamp": 1764024069.4708507
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 68.24639067053795,
+      "success": true,
+      "timestamp": 1764024069.5391846
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 51.2902969494462,
+      "success": true,
+      "timestamp": 1764024072.5911198
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 124.5567025616765,
+      "success": true,
+      "timestamp": 1764024072.7157629
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 29.713650234043598,
+      "success": true,
+      "timestamp": 1764024072.745563
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 25.53619723767042,
+      "success": true,
+      "timestamp": 1764024072.7712007
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 176.51150282472372,
+      "success": true,
+      "timestamp": 1764024075.9494202
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 165.85452109575272,
+      "success": true,
+      "timestamp": 1764024079.115939
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 364.0602584928274,
+      "success": true,
+      "timestamp": 1764024082.4805334
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 388.03903106600046,
+      "success": true,
+      "timestamp": 1764024085.8697963
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 405.2310772240162,
+      "success": true,
+      "timestamp": 1764024089.2865427
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 284.07556656748056,
+      "success": true,
+      "timestamp": 1764024092.5723825
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 200.77838096767664,
+      "success": true,
+      "timestamp": 1764024095.7734494
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 164.84337951987982,
+      "success": true,
+      "timestamp": 1764024098.9411423
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 176.93876381963491,
+      "success": true,
+      "timestamp": 1764024102.1227028
+    },
+    {
+      "user_id": 5,
+      "user_class": "llm_users",
+      "latency_ms": 192.8185811266303,
+      "success": true,
+      "timestamp": 1764024105.3178096
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 4717.905631288886,
+      "success": true,
+      "timestamp": 1764023991.5201046
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 2255.1519265398383,
+      "success": true,
+      "timestamp": 1764023996.7760231
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 417.38057415932417,
+      "success": true,
+      "timestamp": 1764024000.1938093
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 198.22372123599052,
+      "success": true,
+      "timestamp": 1764024003.3922467
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 80.23981843143702,
+      "success": true,
+      "timestamp": 1764024006.4736462
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 184.83296316117048,
+      "success": true,
+      "timestamp": 1764024009.6596277
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 200.5315087735653,
+      "success": true,
+      "timestamp": 1764024012.8604023
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 266.09034091234207,
+      "success": true,
+      "timestamp": 1764024016.128747
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 266.86248276382685,
+      "success": true,
+      "timestamp": 1764024019.396241
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 277.26533357053995,
+      "success": true,
+      "timestamp": 1764024022.674234
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 378.3621769398451,
+      "success": true,
+      "timestamp": 1764024026.054153
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 283.5579551756382,
+      "success": true,
+      "timestamp": 1764024029.3380666
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 296.1701871827245,
+      "success": true,
+      "timestamp": 1764024032.6355386
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 318.4048691764474,
+      "success": true,
+      "timestamp": 1764024035.9547272
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 382.5915390625596,
+      "success": true,
+      "timestamp": 1764024039.3378334
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 309.70489140599966,
+      "success": true,
+      "timestamp": 1764024042.650326
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 337.6673134043813,
+      "success": true,
+      "timestamp": 1764024045.9900448
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 363.6157177388668,
+      "success": true,
+      "timestamp": 1764024049.3542085
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 229.68968749046326,
+      "success": true,
+      "timestamp": 1764024052.585561
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 444.42154560238123,
+      "success": true,
+      "timestamp": 1764024056.0326247
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 352.8384128585458,
+      "success": true,
+      "timestamp": 1764024059.3872814
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 318.63480899482965,
+      "success": true,
+      "timestamp": 1764024062.708897
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 360.3005148470402,
+      "success": true,
+      "timestamp": 1764024066.073123
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 313.57230246067047,
+      "success": true,
+      "timestamp": 1764024069.3877316
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 174.74084999412298,
+      "success": true,
+      "timestamp": 1764024072.5665479
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 307.1188488975167,
+      "success": true,
+      "timestamp": 1764024075.8762286
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 219.2033575847745,
+      "success": true,
+      "timestamp": 1764024079.096299
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 368.0892465636134,
+      "success": true,
+      "timestamp": 1764024082.4675326
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 393.3373596519232,
+      "success": true,
+      "timestamp": 1764024085.8630497
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 394.45510786026716,
+      "success": true,
+      "timestamp": 1764024089.2605417
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 296.3599804788828,
+      "success": true,
+      "timestamp": 1764024092.560289
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 206.49879705160856,
+      "success": true,
+      "timestamp": 1764024095.7688107
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 180.31835835427046,
+      "success": true,
+      "timestamp": 1764024095.949222
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 103.96549850702286,
+      "success": true,
+      "timestamp": 1764024096.0532672
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 71.32492866367102,
+      "success": true,
+      "timestamp": 1764024096.1246781
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 59.107279404997826,
+      "success": true,
+      "timestamp": 1764024099.1847982
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 61.779010109603405,
+      "success": true,
+      "timestamp": 1764024102.2475724
+    },
+    {
+      "user_id": 6,
+      "user_class": "llm_users",
+      "latency_ms": 118.04335005581379,
+      "success": true,
+      "timestamp": 1764024105.3668048
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 4709.819216281176,
+      "success": true,
+      "timestamp": 1764023991.5146601
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 2250.7634283974767,
+      "success": true,
+      "timestamp": 1764023996.765775
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 418.4489483013749,
+      "success": true,
+      "timestamp": 1764024000.1850765
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 97.91790321469307,
+      "success": true,
+      "timestamp": 1764024000.2830732
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 74.02814645320177,
+      "success": true,
+      "timestamp": 1764024000.357169
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 45.96119187772274,
+      "success": true,
+      "timestamp": 1764024000.4032116
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 164.50745146721601,
+      "success": true,
+      "timestamp": 1764024003.5684617
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 90.63394088298082,
+      "success": true,
+      "timestamp": 1764024003.6591651
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 86.3915216177702,
+      "success": true,
+      "timestamp": 1764024003.7456186
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 59.571899473667145,
+      "success": true,
+      "timestamp": 1764024003.805258
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 25.7553793489933,
+      "success": true,
+      "timestamp": 1764024003.8310947
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 152.79274713248014,
+      "success": true,
+      "timestamp": 1764024006.984582
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 151.86574030667543,
+      "success": true,
+      "timestamp": 1764024010.1371536
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 153.20261847227812,
+      "success": true,
+      "timestamp": 1764024013.2909975
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 158.28882064670324,
+      "success": true,
+      "timestamp": 1764024016.4501057
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 163.41475397348404,
+      "success": true,
+      "timestamp": 1764024019.6143708
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 88.68875168263912,
+      "success": true,
+      "timestamp": 1764024022.7109528
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 369.1601203754544,
+      "success": true,
+      "timestamp": 1764024026.080413
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 273.59892427921295,
+      "success": true,
+      "timestamp": 1764024029.3543313
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 302.9829300940037,
+      "success": true,
+      "timestamp": 1764024032.6575608
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 325.5867110565305,
+      "success": true,
+      "timestamp": 1764024035.9838107
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 381.82188104838133,
+      "success": true,
+      "timestamp": 1764024039.3666039
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 311.76397390663624,
+      "success": true,
+      "timestamp": 1764024042.6794798
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 340.79819079488516,
+      "success": true,
+      "timestamp": 1764024046.02173
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 368.36368311196566,
+      "success": true,
+      "timestamp": 1764024049.390762
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 219.82439514249563,
+      "success": true,
+      "timestamp": 1764024052.6117299
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 443.21331195533276,
+      "success": true,
+      "timestamp": 1764024056.056077
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 351.54108330607414,
+      "success": true,
+      "timestamp": 1764024059.4083366
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 323.3415549620986,
+      "success": true,
+      "timestamp": 1764024062.732007
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 355.4909089580178,
+      "success": true,
+      "timestamp": 1764024066.0879507
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 315.6249551102519,
+      "success": true,
+      "timestamp": 1764024069.4041731
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 171.8758586794138,
+      "success": true,
+      "timestamp": 1764024072.5768354
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 317.3199025914073,
+      "success": true,
+      "timestamp": 1764024075.8954563
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 215.36236722022295,
+      "success": true,
+      "timestamp": 1764024079.1114874
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 367.32338555157185,
+      "success": true,
+      "timestamp": 1764024082.4791195
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 385.5162737891078,
+      "success": true,
+      "timestamp": 1764024085.866715
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 398.99883419275284,
+      "success": true,
+      "timestamp": 1764024089.266942
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 294.4016018882394,
+      "success": true,
+      "timestamp": 1764024092.5620692
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 60.75854413211346,
+      "success": true,
+      "timestamp": 1764024092.6229084
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 123.5408941283822,
+      "success": true,
+      "timestamp": 1764024092.746523
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 67.07762461155653,
+      "success": true,
+      "timestamp": 1764024092.8136814
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 41.918675415217876,
+      "success": true,
+      "timestamp": 1764024092.85568
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 112.34241351485252,
+      "success": true,
+      "timestamp": 1764024095.968557
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 99.0250613540411,
+      "success": true,
+      "timestamp": 1764024096.0676513
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 71.12253736704588,
+      "success": true,
+      "timestamp": 1764024096.1388423
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 43.9087375998497,
+      "success": true,
+      "timestamp": 1764024096.1828198
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 44.254458509385586,
+      "success": true,
+      "timestamp": 1764024096.227149
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 140.25205001235008,
+      "success": true,
+      "timestamp": 1764024099.3736932
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 61.997974291443825,
+      "success": true,
+      "timestamp": 1764024102.4369092
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 29.692097567021847,
+      "success": true,
+      "timestamp": 1764024102.466706
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 32.957252115011215,
+      "success": true,
+      "timestamp": 1764024102.4997559
+    },
+    {
+      "user_id": 7,
+      "user_class": "llm_users",
+      "latency_ms": 29.44912202656269,
+      "success": true,
+      "timestamp": 1764024105.5302966
+    },
+    {
+      "user_id": 8,
+      "user_class": "vision_users",
+      "latency_ms": 6209.10819247365,
+      "success": true,
+      "timestamp": 1764023993.0164905
+    },
+    {
+      "user_id": 8,
+      "user_class": "vision_users",
+      "latency_ms": 38.99759519845247,
+      "success": true,
+      "timestamp": 1764023998.0579472
+    },
+    {
+      "user_id": 8,
+      "user_class": "vision_users",
+      "latency_ms": 32.05164708197117,
+      "success": true,
+      "timestamp": 1764024003.0932887
+    },
+    {
+      "user_id": 8,
+      "user_class": "vision_users",
+      "latency_ms": 32.99007751047611,
+      "success": true,
+      "timestamp": 1764024008.128087
+    },
+    {
+      "user_id": 8,
+      "user_class": "vision_users",
+      "latency_ms": 105.17818946391344,
+      "success": true,
+      "timestamp": 1764024013.2339141
+    },
+    {
+      "user_id": 8,
+      "user_class": "vision_users",
+      "latency_ms": 39.37236312776804,
+      "success": true,
+      "timestamp": 1764024018.2770762
+    },
+    {
+      "user_id": 8,
+      "user_class": "vision_users",
+      "latency_ms": 29.034212231636047,
+      "success": true,
+      "timestamp": 1764024023.3079984
+    },
+    {
+      "user_id": 8,
+      "user_class": "vision_users",
+      "latency_ms": 33.22798199951649,
+      "success": true,
+      "timestamp": 1764024028.344014
+    },
+    {
+      "user_id": 8,
+      "user_class": "vision_users",
+      "latency_ms": 32.574872486293316,
+      "success": true,
+      "timestamp": 1764024033.3789785
+    },
+    {
+      "user_id": 8,
+      "user_class": "vision_users",
+      "latency_ms": 47.85320907831192,
+      "success": true,
+      "timestamp": 1764024038.4282258
+    },
+    {
+      "user_id": 8,
+      "user_class": "vision_users",
+      "latency_ms": 33.49501080811024,
+      "success": true,
+      "timestamp": 1764024043.4629593
+    },
+    {
+      "user_id": 8,
+      "user_class": "vision_users",
+      "latency_ms": 35.31092777848244,
+      "success": true,
+      "timestamp": 1764024048.4998124
+    },
+    {
+      "user_id": 8,
+      "user_class": "vision_users",
+      "latency_ms": 64.27657697349787,
+      "success": true,
+      "timestamp": 1764024053.5654843
+    },
+    {
+      "user_id": 8,
+      "user_class": "vision_users",
+      "latency_ms": 36.91649716347456,
+      "success": true,
+      "timestamp": 1764024058.6043863
+    },
+    {
+      "user_id": 8,
+      "user_class": "vision_users",
+      "latency_ms": 44.29740272462368,
+      "success": true,
+      "timestamp": 1764024063.6507936
+    },
+    {
+      "user_id": 8,
+      "user_class": "vision_users",
+      "latency_ms": 24.51688051223755,
+      "success": true,
+      "timestamp": 1764024063.675554
+    },
+    {
+      "user_id": 8,
+      "user_class": "vision_users",
+      "latency_ms": 24.564900435507298,
+      "success": true,
+      "timestamp": 1764024063.7003338
+    },
+    {
+      "user_id": 8,
+      "user_class": "vision_users",
+      "latency_ms": 42.64017101377249,
+      "success": true,
+      "timestamp": 1764024068.7460103
+    },
+    {
+      "user_id": 8,
+      "user_class": "vision_users",
+      "latency_ms": 40.1478661224246,
+      "success": true,
+      "timestamp": 1764024073.787818
+    },
+    {
+      "user_id": 8,
+      "user_class": "vision_users",
+      "latency_ms": 37.172176875174046,
+      "success": true,
+      "timestamp": 1764024078.828784
+    },
+    {
+      "user_id": 8,
+      "user_class": "vision_users",
+      "latency_ms": 34.800514578819275,
+      "success": true,
+      "timestamp": 1764024083.867222
+    },
+    {
+      "user_id": 8,
+      "user_class": "vision_users",
+      "latency_ms": 288.95345237106085,
+      "success": true,
+      "timestamp": 1764024089.158661
+    },
+    {
+      "user_id": 8,
+      "user_class": "vision_users",
+      "latency_ms": 39.393020793795586,
+      "success": true,
+      "timestamp": 1764024094.1997995
+    },
+    {
+      "user_id": 8,
+      "user_class": "vision_users",
+      "latency_ms": 34.863319247961044,
+      "success": true,
+      "timestamp": 1764024099.2350147
+    },
+    {
+      "user_id": 8,
+      "user_class": "vision_users",
+      "latency_ms": 30.506876297295094,
+      "success": true,
+      "timestamp": 1764024104.2684946
+    },
+    {
+      "user_id": 9,
+      "user_class": "vision_users",
+      "latency_ms": 6401.343810372055,
+      "success": true,
+      "timestamp": 1764023993.4590178
+    },
+    {
+      "user_id": 9,
+      "user_class": "vision_users",
+      "latency_ms": 49.25968870520592,
+      "success": true,
+      "timestamp": 1764023998.5090983
+    },
+    {
+      "user_id": 9,
+      "user_class": "vision_users",
+      "latency_ms": 32.918816432356834,
+      "success": true,
+      "timestamp": 1764024003.546936
+    },
+    {
+      "user_id": 9,
+      "user_class": "vision_users",
+      "latency_ms": 38.236115127801895,
+      "success": true,
+      "timestamp": 1764024008.5863898
+    },
+    {
+      "user_id": 9,
+      "user_class": "vision_users",
+      "latency_ms": 43.390097096562386,
+      "success": true,
+      "timestamp": 1764024013.631021
+    },
+    {
+      "user_id": 9,
+      "user_class": "vision_users",
+      "latency_ms": 40.29877111315727,
+      "success": true,
+      "timestamp": 1764024018.672648
+    },
+    {
+      "user_id": 9,
+      "user_class": "vision_users",
+      "latency_ms": 33.58559496700764,
+      "success": true,
+      "timestamp": 1764024023.707275
+    },
+    {
+      "user_id": 9,
+      "user_class": "vision_users",
+      "latency_ms": 33.60355272889137,
+      "success": true,
+      "timestamp": 1764024028.7418694
+    },
+    {
+      "user_id": 9,
+      "user_class": "vision_users",
+      "latency_ms": 33.58706645667553,
+      "success": true,
+      "timestamp": 1764024033.7759314
+    },
+    {
+      "user_id": 9,
+      "user_class": "vision_users",
+      "latency_ms": 42.06144716590643,
+      "success": true,
+      "timestamp": 1764024038.8187628
+    },
+    {
+      "user_id": 9,
+      "user_class": "vision_users",
+      "latency_ms": 40.84743559360504,
+      "success": true,
+      "timestamp": 1764024043.86018
+    },
+    {
+      "user_id": 9,
+      "user_class": "vision_users",
+      "latency_ms": 40.44267348945141,
+      "success": true,
+      "timestamp": 1764024048.9027777
+    },
+    {
+      "user_id": 9,
+      "user_class": "vision_users",
+      "latency_ms": 43.69502700865269,
+      "success": true,
+      "timestamp": 1764024053.9469619
+    },
+    {
+      "user_id": 9,
+      "user_class": "vision_users",
+      "latency_ms": 42.60398540645838,
+      "success": true,
+      "timestamp": 1764024058.9905689
+    },
+    {
+      "user_id": 9,
+      "user_class": "vision_users",
+      "latency_ms": 37.32300363481045,
+      "success": true,
+      "timestamp": 1764024064.0289814
+    },
+    {
+      "user_id": 9,
+      "user_class": "vision_users",
+      "latency_ms": 38.82261086255312,
+      "success": true,
+      "timestamp": 1764024069.0688195
+    },
+    {
+      "user_id": 9,
+      "user_class": "vision_users",
+      "latency_ms": 32.8229321166873,
+      "success": true,
+      "timestamp": 1764024074.1019783
+    },
+    {
+      "user_id": 9,
+      "user_class": "vision_users",
+      "latency_ms": 17.71469321101904,
+      "success": true,
+      "timestamp": 1764024079.1237385
+    },
+    {
+      "user_id": 9,
+      "user_class": "vision_users",
+      "latency_ms": 32.43931196630001,
+      "success": true,
+      "timestamp": 1764024084.1569486
+    },
+    {
+      "user_id": 9,
+      "user_class": "vision_users",
+      "latency_ms": 40.50107579678297,
+      "success": true,
+      "timestamp": 1764024089.2004821
+    },
+    {
+      "user_id": 9,
+      "user_class": "vision_users",
+      "latency_ms": 41.04994237422943,
+      "success": true,
+      "timestamp": 1764024094.24187
+    },
+    {
+      "user_id": 9,
+      "user_class": "vision_users",
+      "latency_ms": 83.24515633285046,
+      "success": true,
+      "timestamp": 1764024099.3260403
+    },
+    {
+      "user_id": 9,
+      "user_class": "vision_users",
+      "latency_ms": 74.30275622755289,
+      "success": true,
+      "timestamp": 1764024104.401308
+    },
+    {
+      "user_id": 10,
+      "user_class": "vision_users",
+      "latency_ms": 6225.566605105996,
+      "success": true,
+      "timestamp": 1764023993.5313013
+    },
+    {
+      "user_id": 10,
+      "user_class": "vision_users",
+      "latency_ms": 33.75904355198145,
+      "success": true,
+      "timestamp": 1764023998.5662422
+    },
+    {
+      "user_id": 10,
+      "user_class": "vision_users",
+      "latency_ms": 53.684660233557224,
+      "success": true,
+      "timestamp": 1764024003.6267114
+    },
+    {
+      "user_id": 10,
+      "user_class": "vision_users",
+      "latency_ms": 40.87804537266493,
+      "success": true,
+      "timestamp": 1764024008.6686788
+    },
+    {
+      "user_id": 10,
+      "user_class": "vision_users",
+      "latency_ms": 34.205127507448196,
+      "success": true,
+      "timestamp": 1764024013.703614
+    },
+    {
+      "user_id": 10,
+      "user_class": "vision_users",
+      "latency_ms": 34.40066333860159,
+      "success": true,
+      "timestamp": 1764024018.738481
+    },
+    {
+      "user_id": 10,
+      "user_class": "vision_users",
+      "latency_ms": 32.184094190597534,
+      "success": true,
+      "timestamp": 1764024023.7718773
+    },
+    {
+      "user_id": 10,
+      "user_class": "vision_users",
+      "latency_ms": 34.62450951337814,
+      "success": true,
+      "timestamp": 1764024028.8069236
+    },
+    {
+      "user_id": 10,
+      "user_class": "vision_users",
+      "latency_ms": 31.215899623930454,
+      "success": true,
+      "timestamp": 1764024033.838517
+    },
+    {
+      "user_id": 10,
+      "user_class": "vision_users",
+      "latency_ms": 31.727314926683903,
+      "success": true,
+      "timestamp": 1764024038.8709223
+    },
+    {
+      "user_id": 10,
+      "user_class": "vision_users",
+      "latency_ms": 34.20945070683956,
+      "success": true,
+      "timestamp": 1764024043.9057739
+    },
+    {
+      "user_id": 10,
+      "user_class": "vision_users",
+      "latency_ms": 31.152849085628986,
+      "success": true,
+      "timestamp": 1764024048.9373152
+    },
+    {
+      "user_id": 10,
+      "user_class": "vision_users",
+      "latency_ms": 25.242687202990055,
+      "success": true,
+      "timestamp": 1764024053.96486
+    },
+    {
+      "user_id": 10,
+      "user_class": "vision_users",
+      "latency_ms": 40.902912616729736,
+      "success": true,
+      "timestamp": 1764024059.007142
+    },
+    {
+      "user_id": 10,
+      "user_class": "vision_users",
+      "latency_ms": 39.318122901022434,
+      "success": true,
+      "timestamp": 1764024064.0478003
+    },
+    {
+      "user_id": 10,
+      "user_class": "vision_users",
+      "latency_ms": 41.63797106593847,
+      "success": true,
+      "timestamp": 1764024069.09039
+    },
+    {
+      "user_id": 10,
+      "user_class": "vision_users",
+      "latency_ms": 28.251645155251026,
+      "success": true,
+      "timestamp": 1764024074.1209419
+    },
+    {
+      "user_id": 10,
+      "user_class": "vision_users",
+      "latency_ms": 15.274818986654282,
+      "success": true,
+      "timestamp": 1764024079.142335
+    },
+    {
+      "user_id": 10,
+      "user_class": "vision_users",
+      "latency_ms": 33.03383942693472,
+      "success": true,
+      "timestamp": 1764024084.1762004
+    },
+    {
+      "user_id": 10,
+      "user_class": "vision_users",
+      "latency_ms": 34.358722157776356,
+      "success": true,
+      "timestamp": 1764024089.2122009
+    },
+    {
+      "user_id": 10,
+      "user_class": "vision_users",
+      "latency_ms": 37.70903963595629,
+      "success": true,
+      "timestamp": 1764024094.250638
+    },
+    {
+      "user_id": 10,
+      "user_class": "vision_users",
+      "latency_ms": 82.71342515945435,
+      "success": true,
+      "timestamp": 1764024099.334013
+    },
+    {
+      "user_id": 10,
+      "user_class": "vision_users",
+      "latency_ms": 62.36683297902346,
+      "success": true,
+      "timestamp": 1764024104.4015775
+    },
+    {
+      "user_id": 11,
+      "user_class": "vision_users",
+      "latency_ms": 5898.071436211467,
+      "success": true,
+      "timestamp": 1764023993.451118
+    },
+    {
+      "user_id": 11,
+      "user_class": "vision_users",
+      "latency_ms": 34.147320315241814,
+      "success": true,
+      "timestamp": 1764023998.4868612
+    },
+    {
+      "user_id": 11,
+      "user_class": "vision_users",
+      "latency_ms": 27.6126591488719,
+      "success": true,
+      "timestamp": 1764024003.5211241
+    },
+    {
+      "user_id": 11,
+      "user_class": "vision_users",
+      "latency_ms": 41.220580227673054,
+      "success": true,
+      "timestamp": 1764024008.5640547
+    },
+    {
+      "user_id": 11,
+      "user_class": "vision_users",
+      "latency_ms": 42.117743752896786,
+      "success": true,
+      "timestamp": 1764024013.607837
+    },
+    {
+      "user_id": 11,
+      "user_class": "vision_users",
+      "latency_ms": 39.86095543950796,
+      "success": true,
+      "timestamp": 1764024018.6486778
+    },
+    {
+      "user_id": 11,
+      "user_class": "vision_users",
+      "latency_ms": 33.75743143260479,
+      "success": true,
+      "timestamp": 1764024023.6834404
+    },
+    {
+      "user_id": 11,
+      "user_class": "vision_users",
+      "latency_ms": 35.01665685325861,
+      "success": true,
+      "timestamp": 1764024028.7197466
+    },
+    {
+      "user_id": 11,
+      "user_class": "vision_users",
+      "latency_ms": 34.219167195260525,
+      "success": true,
+      "timestamp": 1764024033.7549322
+    },
+    {
+      "user_id": 11,
+      "user_class": "vision_users",
+      "latency_ms": 38.56899682432413,
+      "success": true,
+      "timestamp": 1764024038.7942648
+    },
+    {
+      "user_id": 11,
+      "user_class": "vision_users",
+      "latency_ms": 41.552131064236164,
+      "success": true,
+      "timestamp": 1764024043.8372474
+    },
+    {
+      "user_id": 11,
+      "user_class": "vision_users",
+      "latency_ms": 42.911238968372345,
+      "success": true,
+      "timestamp": 1764024048.8814287
+    },
+    {
+      "user_id": 11,
+      "user_class": "vision_users",
+      "latency_ms": 38.15360087901354,
+      "success": true,
+      "timestamp": 1764024053.9202769
+    },
+    {
+      "user_id": 11,
+      "user_class": "vision_users",
+      "latency_ms": 41.35154280811548,
+      "success": true,
+      "timestamp": 1764024058.9626539
+    },
+    {
+      "user_id": 11,
+      "user_class": "vision_users",
+      "latency_ms": 41.267684660851955,
+      "success": true,
+      "timestamp": 1764024064.005251
+    },
+    {
+      "user_id": 11,
+      "user_class": "vision_users",
+      "latency_ms": 40.13629723340273,
+      "success": true,
+      "timestamp": 1764024069.0467877
+    },
+    {
+      "user_id": 11,
+      "user_class": "vision_users",
+      "latency_ms": 30.819689854979515,
+      "success": true,
+      "timestamp": 1764024074.0782921
+    },
+    {
+      "user_id": 11,
+      "user_class": "vision_users",
+      "latency_ms": 21.608485840260983,
+      "success": true,
+      "timestamp": 1764024079.101415
+    },
+    {
+      "user_id": 11,
+      "user_class": "vision_users",
+      "latency_ms": 30.882788822054863,
+      "success": true,
+      "timestamp": 1764024084.1337094
+    },
+    {
+      "user_id": 11,
+      "user_class": "vision_users",
+      "latency_ms": 53.354158997535706,
+      "success": true,
+      "timestamp": 1764024089.1908143
+    },
+    {
+      "user_id": 11,
+      "user_class": "vision_users",
+      "latency_ms": 33.79211854189634,
+      "success": true,
+      "timestamp": 1764024094.225127
+    },
+    {
+      "user_id": 11,
+      "user_class": "vision_users",
+      "latency_ms": 80.08785545825958,
+      "success": true,
+      "timestamp": 1764024099.3066819
+    },
+    {
+      "user_id": 11,
+      "user_class": "vision_users",
+      "latency_ms": 27.54062693566084,
+      "success": true,
+      "timestamp": 1764024099.3344166
+    },
+    {
+      "user_id": 11,
+      "user_class": "vision_users",
+      "latency_ms": 19.69953626394272,
+      "success": true,
+      "timestamp": 1764024099.3543122
+    },
+    {
+      "user_id": 11,
+      "user_class": "vision_users",
+      "latency_ms": 19.40788235515356,
+      "success": true,
+      "timestamp": 1764024099.3739169
+    },
+    {
+      "user_id": 11,
+      "user_class": "vision_users",
+      "latency_ms": 13.824380934238434,
+      "success": true,
+      "timestamp": 1764024099.3879416
+    },
+    {
+      "user_id": 11,
+      "user_class": "vision_users",
+      "latency_ms": 31.865093857049942,
+      "success": true,
+      "timestamp": 1764024104.4210181
+    },
+    {
+      "user_id": 12,
+      "user_class": "multimodal_users",
+      "latency_ms": 8840.537099167705,
+      "success": true,
+      "timestamp": 1764023996.6391072
+    },
+    {
+      "user_id": 12,
+      "user_class": "multimodal_users",
+      "latency_ms": 19.72079463303089,
+      "success": true,
+      "timestamp": 1764024006.6633997
+    },
+    {
+      "user_id": 12,
+      "user_class": "multimodal_users",
+      "latency_ms": 30.962180346250534,
+      "success": true,
+      "timestamp": 1764024016.7010064
+    },
+    {
+      "user_id": 12,
+      "user_class": "multimodal_users",
+      "latency_ms": 22.91526459157467,
+      "success": true,
+      "timestamp": 1764024026.725636
+    },
+    {
+      "user_id": 12,
+      "user_class": "multimodal_users",
+      "latency_ms": 25.904133915901184,
+      "success": true,
+      "timestamp": 1764024036.753093
+    },
+    {
+      "user_id": 12,
+      "user_class": "multimodal_users",
+      "latency_ms": 29.792758636176586,
+      "success": true,
+      "timestamp": 1764024046.7843769
+    },
+    {
+      "user_id": 12,
+      "user_class": "multimodal_users",
+      "latency_ms": 26.52047574520111,
+      "success": true,
+      "timestamp": 1764024056.812869
+    },
+    {
+      "user_id": 12,
+      "user_class": "multimodal_users",
+      "latency_ms": 26.981601491570473,
+      "success": true,
+      "timestamp": 1764024066.8406959
+    },
+    {
+      "user_id": 12,
+      "user_class": "multimodal_users",
+      "latency_ms": 24.241330102086067,
+      "success": true,
+      "timestamp": 1764024076.8667526
+    },
+    {
+      "user_id": 12,
+      "user_class": "multimodal_users",
+      "latency_ms": 25.09506605565548,
+      "success": true,
+      "timestamp": 1764024086.8933241
+    },
+    {
+      "user_id": 12,
+      "user_class": "multimodal_users",
+      "latency_ms": 22.563518024981022,
+      "success": true,
+      "timestamp": 1764024096.917752
+    },
+    {
+      "user_id": 12,
+      "user_class": "multimodal_users",
+      "latency_ms": 24.83205869793892,
+      "success": true,
+      "timestamp": 1764024106.9459891
+    },
+    {
+      "user_id": 13,
+      "user_class": "multimodal_users",
+      "latency_ms": 8071.638631634414,
+      "success": true,
+      "timestamp": 1764023996.659196
+    },
+    {
+      "user_id": 13,
+      "user_class": "multimodal_users",
+      "latency_ms": 13.8172572478652,
+      "success": true,
+      "timestamp": 1764024006.6736486
+    },
+    {
+      "user_id": 13,
+      "user_class": "multimodal_users",
+      "latency_ms": 43.61335840076208,
+      "success": true,
+      "timestamp": 1764024016.7178133
+    },
+    {
+      "user_id": 13,
+      "user_class": "multimodal_users",
+      "latency_ms": 24.617914110422134,
+      "success": true,
+      "timestamp": 1764024026.7428932
+    },
+    {
+      "user_id": 13,
+      "user_class": "multimodal_users",
+      "latency_ms": 25.901488959789276,
+      "success": true,
+      "timestamp": 1764024036.7705102
+    },
+    {
+      "user_id": 13,
+      "user_class": "multimodal_users",
+      "latency_ms": 30.164307914674282,
+      "success": true,
+      "timestamp": 1764024046.8022904
+    },
+    {
+      "user_id": 13,
+      "user_class": "multimodal_users",
+      "latency_ms": 25.81069152802229,
+      "success": true,
+      "timestamp": 1764024056.8301718
+    },
+    {
+      "user_id": 13,
+      "user_class": "multimodal_users",
+      "latency_ms": 28.250236064195633,
+      "success": true,
+      "timestamp": 1764024066.8591044
+    },
+    {
+      "user_id": 13,
+      "user_class": "multimodal_users",
+      "latency_ms": 23.801473900675774,
+      "success": true,
+      "timestamp": 1764024076.8841903
+    },
+    {
+      "user_id": 13,
+      "user_class": "multimodal_users",
+      "latency_ms": 25.198353454470634,
+      "success": true,
+      "timestamp": 1764024086.9107642
+    },
+    {
+      "user_id": 13,
+      "user_class": "multimodal_users",
+      "latency_ms": 23.253201507031918,
+      "success": true,
+      "timestamp": 1764024096.9360569
+    },
+    {
+      "user_id": 13,
+      "user_class": "multimodal_users",
+      "latency_ms": 24.389445781707764,
+      "success": true,
+      "timestamp": 1764024106.9636831
+    }
+  ]
+}

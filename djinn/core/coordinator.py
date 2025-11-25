@@ -231,6 +231,9 @@ class DjinnCoordinator:
         )
         await self.control_plane.start()
         logger.info("✓ Control plane started")
+        
+        # Register cleanup hook for graceful shutdown
+        self._register_cleanup_hook()
 
         # 2. Initialize memory manager
         try:
@@ -743,9 +746,10 @@ class DjinnCoordinator:
         if model is not None:
             try:
                 from .enhanced_model_manager import EnhancedModelManager, ModelNotRegisteredError
-                from .model_fingerprint import ModelFingerprint
+                from .fingerprint_policy import FingerprintPolicy
 
-                logging_fingerprint = ModelFingerprint.compute(model)
+                fingerprint_policy = FingerprintPolicy()
+                logging_fingerprint, _ = fingerprint_policy.compute_fingerprint(model)
                 manager = EnhancedModelManager(coordinator=self)
 
                 inputs_dict: Dict[str, torch.Tensor] = {}
@@ -1435,10 +1439,13 @@ class DjinnCoordinator:
             model: PyTorch model
             model_id: Optional model identifier
         """
+        import time
+        start_time = time.perf_counter()
         logger.info(f"Registering model {fingerprint[:8]} with remote server...")
         
         from ..server.transport.protocol import MessageType
         from ..core.secure_serializer import SecureSerializer
+        from ..core.weight_serializer import serialize_weights_binary
         
         model_class = f"{model.__class__.__module__}.{model.__class__.__name__}"
         model_config = getattr(model, 'config', None)
@@ -1456,24 +1463,70 @@ class DjinnCoordinator:
                 "Provide model_id when calling register_model."
             )
         
+        # Extract model weights
+        weights_start = time.perf_counter()
+        logger.info(f"Extracting model state_dict...")
+        state_dict = model.state_dict()
+        logger.info(f"State dict extracted: {len(state_dict)} parameters")
+        
+        logger.info(f"Serializing weights to binary format...")
+        weights_bytes = serialize_weights_binary(state_dict)
+        weights_time = (time.perf_counter() - weights_start) * 1000.0
+        logger.info(f"✅ Serialized {len(state_dict)} weights in {weights_time:.1f}ms ({len(weights_bytes) / (1024*1024):.2f} MB)")
+        
+        # Serialize architecture for model reconstruction
+        architecture_start = time.perf_counter()
+        import pickle
+        architecture_data = pickle.dumps({
+            'type': 'structure',
+            'class_name': model.__class__.__name__,
+            'class_module': model.__class__.__module__,
+            'config': serialized_config,
+            'model_id': resolved_model_id,
+        })
+        architecture_time = (time.perf_counter() - architecture_start) * 1000.0
+        logger.info(f"✅ Serialized architecture in {architecture_time:.1f}ms ({len(architecture_data) / 1024:.2f} KB)")
+        
+        # Determine framework from model class
+        framework = 'transformers' if 'transformers' in model_class.lower() else 'pytorch'
+        
         request = {
             'type': 'REGISTER_MODEL',
             'fingerprint': fingerprint,
             'model_id': resolved_model_id,
             'model_class': model_class,
             'config': serialized_config,
+            'weights_binary': weights_bytes,  # ✅ FIX: Include serialized weights
+            'architecture_data': architecture_data,  # ✅ FIX: Include architecture for reconstruction
+            'descriptor': {
+                'num_weights': len(state_dict),
+                'model_class': model_class,
+                'framework': framework,  # ✅ FIX: Include framework for builder selection
+                'config': serialized_config,  # ✅ FIX: Include config in descriptor for transformers builder
+                'class_name': model.__class__.__name__,
+            },
+            'weight_ids': list(state_dict.keys()),  # Server expects this
             '_request_id': str(uuid.uuid4()),
         }
         
         server_address = self.config.server_address or 'localhost:5556'
         
         try:
+            # Serialize request
+            serialize_start = time.perf_counter()
             serialized = SecureSerializer.serialize_request(request)
+            serialize_time = (time.perf_counter() - serialize_start) * 1000.0
+            logger.info(f"✅ Request serialized in {serialize_time:.1f}ms ({len(serialized) / (1024*1024):.2f} MB total)")
+            
+            # Send request
+            send_start = time.perf_counter()
             response_msg_type, response_data = await self._send_tcp_request(
                 server_address,
                 MessageType.REGISTER_MODEL,
                 serialized
             )
+            send_time = (time.perf_counter() - send_start) * 1000.0
+            logger.info(f"✅ Request sent and response received in {send_time:.1f}ms")
             
             if response_msg_type == MessageType.ERROR:
                 error = SecureSerializer.deserialize_response(response_data)
@@ -1481,45 +1534,59 @@ class DjinnCoordinator:
             
             response = SecureSerializer.deserialize_response(response_data)
             if response.get('status') == 'success':
-                logger.info(f"✅ Model {fingerprint[:8]} registered on server")
+                total_time = (time.perf_counter() - start_time) * 1000.0
+                logger.info(f"✅ Model {fingerprint[:8]} registered on server (total: {total_time:.1f}ms)")
             else:
                 raise RuntimeError(response.get('message', 'Unknown error'))
         except Exception as e:
-            logger.warning(f"Failed to register with server: {e}")
+            total_time = (time.perf_counter() - start_time) * 1000.0
+            logger.warning(f"Failed to register with server after {total_time:.1f}ms: {e}")
             import traceback
             logger.debug(traceback.format_exc())
+            raise
     
     async def warmup_remote_gpu(self) -> Dict[str, Any]:
         """
         Request GPU warmup on the remote server (one-time shared operation).
         """
+        import time
+        start_time = time.perf_counter()
         from ..server.transport.protocol import MessageType
         from ..core.secure_serializer import SecureSerializer
         
         server_address = self.config.server_address or 'localhost:5556'
         request = {'type': 'WARMUP_GPU'}
         
-        logger.info("Requesting remote GPU warmup...")
+        logger.debug("Requesting remote GPU warmup...")
         try:
+            serialize_start = time.perf_counter()
             serialized = SecureSerializer.serialize_request(request)
+            serialize_time = (time.perf_counter() - serialize_start) * 1000.0
+            logger.debug(f"Warmup request serialized in {serialize_time:.2f}ms")
+            
+            send_start = time.perf_counter()
             msg_type, response_data = await self._send_tcp_request(
                 server_address,
                 MessageType.WARMUP_GPU,
                 serialized
             )
+            send_time = (time.perf_counter() - send_start) * 1000.0
+            logger.debug(f"Warmup request sent and response received in {send_time:.2f}ms")
             
             if msg_type == MessageType.ERROR:
                 error = SecureSerializer.deserialize_response(response_data)
                 raise RuntimeError(error.get('message', 'Unknown error'))
             
             response = SecureSerializer.deserialize_response(response_data)
+            total_time = (time.perf_counter() - start_time) * 1000.0
             if response.get('status') == 'success':
-                logger.info("✅ Remote GPU warmup complete")
+                logger.debug(f"✅ Remote GPU warmup complete ({total_time:.1f}ms)")
             else:
                 logger.warning(f"⚠️  Remote GPU warmup reported: {response.get('message', 'Unknown error')}")
             return response
         except Exception as e:
-            logger.warning(f"⚠️  Remote GPU warmup failed: {e}")
+            total_time = (time.perf_counter() - start_time) * 1000.0
+            logger.warning(f"⚠️  Remote GPU warmup failed after {total_time:.1f}ms: {e}")
             return {'status': 'error', 'message': str(e)}
     
     async def execute_remote_batch(self, batch_requests: List[Dict]) -> List[Any]:
@@ -1559,11 +1626,54 @@ class DjinnCoordinator:
             logger.warning(f"Batch execution failed: {e}")
             raise RuntimeError(f"Remote batch execution failed: {e}")
     
+    async def execute_remote_stage(
+        self,
+        fingerprint: str,
+        stage: str,
+        inputs: Dict[str, torch.Tensor],
+        *,
+        session_id: Optional[str] = None,
+        state_handle: Optional[Dict[str, Any]] = None,
+        stage_options: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Execute a partial model stage (encoder/decoder) remotely."""
+        from ..server.transport.protocol import MessageType
+        from ..core.secure_serializer import SecureSerializer
+        from .model_execution_serializer import ModelExecutionSerializer
+
+        server_address = self.config.server_address or 'localhost:5556'
+        extra_metadata: Dict[str, Any] = {'stage': stage}
+        if session_id:
+            extra_metadata['session_id'] = session_id
+        if state_handle:
+            extra_metadata['state_handle'] = state_handle
+        if stage_options:
+            extra_metadata['stage_options'] = stage_options
+
+        serialized = ModelExecutionSerializer.serialize_execute_request(
+            fingerprint=fingerprint,
+            inputs=inputs,
+            extra_metadata=extra_metadata,
+        )
+
+        response_msg_type, response_data = await self._send_tcp_request(
+            server_address,
+            MessageType.EXECUTE_STAGE,
+            serialized,
+        )
+
+        if response_msg_type == MessageType.ERROR:
+            error_response = SecureSerializer.deserialize_response(response_data)
+            raise RuntimeError(error_response.get('message', 'Unknown error'))
+
+        return SecureSerializer.deserialize_response(response_data)
+    
     async def execute_remote_model(self, fingerprint: str, inputs: Dict[str, torch.Tensor], 
                                    profile_id: Optional[str] = None,
                                    qos_class: Optional[str] = None,
                                    deadline_ms: Optional[int] = None,
-                                   return_metrics: bool = False):
+                                   return_metrics: bool = False,
+                                   semantic_hints: Optional[Dict[str, Any]] = None):
         """
         Execute registered model on remote server via RPC.
         
@@ -1573,6 +1683,7 @@ class DjinnCoordinator:
             profile_id: Optional profile ID for tracing
             qos_class: Optional QoS hint ("realtime", "interactive", "batch")
             deadline_ms: Optional latency target used for QoS heuristics
+            semantic_hints: Optional semantic hints (e.g., execution_phase, priority, kv_cache_size_mb)
             
         Returns:
             Output tensor
@@ -1597,12 +1708,19 @@ class DjinnCoordinator:
         try:
             # Use binary protocol (2-3x faster than pickle)
             from .model_execution_serializer import ModelExecutionSerializer
+            
+            # Prepare extra metadata with semantic hints
+            extra_metadata = {}
+            if semantic_hints:
+                extra_metadata.update(semantic_hints)
+            
             serialized = ModelExecutionSerializer.serialize_execute_request(
                 fingerprint=fingerprint,
                 inputs=inputs,
                 profile_id=profile_id,
                 qos_class=qos_class,
-                deadline_ms=deadline_ms
+                deadline_ms=deadline_ms,
+                extra_metadata=extra_metadata if extra_metadata else None
             )
 
             # Send with EXECUTE_MODEL message type
@@ -1619,7 +1737,7 @@ class DjinnCoordinator:
             
             # Deserialize response using binary protocol
             try:
-                result, metrics, status = ModelExecutionSerializer.deserialize_execute_response(response_data)
+                result, metrics, status, error_message = ModelExecutionSerializer.deserialize_execute_response(response_data)
             except Exception:
                 logger.error(f"⚠️  Failed to parse EXECUTE_MODEL response ({len(response_data)} bytes)")
                 logger.error(f"Response head: {response_data[:32].hex()}")
@@ -1634,7 +1752,8 @@ class DjinnCoordinator:
             elif status == 'queued':
                 raise RuntimeError("Remote execution queued; async polling not implemented")
             else:
-                raise RuntimeError(f"Remote execution failed with status: {status}")
+                message = error_message or 'Unknown error'
+                raise RuntimeError(f"Remote execution failed with status: {status} ({message})")
                 
         except Exception as e:
             logger.error(f"RPC execution failed: {e}")
@@ -1648,11 +1767,29 @@ class DjinnCoordinator:
 
         # Stop control plane
         if self.control_plane:
-            await self.control_plane.stop()
+            try:
+                await self.control_plane.stop()
+            except Exception as e:
+                logger.warning(f"Error stopping control plane: {e}")
 
         # Stop transports
         for name, transport in self.transports.items():
             if hasattr(transport, 'stop'):
-                await transport.stop()
+                try:
+                    await transport.stop()
+                except Exception as e:
+                    logger.warning(f"Error stopping transport {name}: {e}")
 
         logger.info("DjinnCoordinator stopped")
+    
+    def _register_cleanup_hook(self):
+        """
+        Register cleanup hook to ensure graceful shutdown.
+        
+        Note: Tasks handle CancelledError properly in their loops.
+        The key is ensuring stop() is called before event loop closes.
+        This is a placeholder for future improvements if needed.
+        """
+        # Tasks already handle cancellation in their loops
+        # The real fix is in ControlPlaneServer.stop() which properly cancels tasks
+        pass

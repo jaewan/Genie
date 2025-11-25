@@ -1,0 +1,71 @@
+{
+  "baseline": "local_large_smoke",
+  "model_id": "openai/whisper-large-v3",
+  "device": "NVIDIA L4",
+  "dtype": "float16",
+  "backend": "local",
+  "djinn_server": null,
+  "sample_rate": 16000,
+  "chunk_seconds": 5.0,
+  "stride_seconds": 1.0,
+  "runs": [
+    {
+      "run_id": 1,
+      "total_time_ms": 581.7015385255218,
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "start_s": 0.0,
+          "end_s": 5.0,
+          "chunk_duration_s": 5.0,
+          "latency_ms": 566.062013618648,
+          "per_token_ms": 566.062013618648,
+          "tokens": 0,
+          "host_to_device_mb": 0.732421875,
+          "device_to_host_mb": 7.62939453125e-06,
+          "transcript": null
+        }
+      ],
+      "aggregates": {
+        "chunk_latency_ms": {
+          "mean": 566.062013618648,
+          "median": 566.062013618648,
+          "p95": 566.062013618648,
+          "min": 566.062013618648,
+          "max": 566.062013618648
+        },
+        "chunk_per_token_ms": {
+          "mean": 566.062013618648,
+          "median": 566.062013618648,
+          "p95": 566.062013618648,
+          "min": 566.062013618648,
+          "max": 566.062013618648
+        },
+        "chunk_throughput_audio_sec_per_sec": {
+          "mean": 8.832954481500439,
+          "median": 8.832954481500439,
+          "p95": 8.832954481500439,
+          "min": 8.832954481500439,
+          "max": 8.832954481500439
+        }
+      },
+      "gpu": {
+        "gpu_util_pct": null,
+        "mem_util_pct": null,
+        "mem_used_mb": null
+      }
+    }
+  ],
+  "library_versions": {
+    "torch": "2.9.0+cu128",
+    "torchaudio": "2.9.0+cu128",
+    "transformers": "4.57.1"
+  },
+  "meta": {
+    "audio_file": null,
+    "dummy_audio_seconds": 5.0,
+    "language": "en",
+    "task": "transcribe",
+    "sample_gpu": false
+  }
+}

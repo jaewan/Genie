@@ -8,6 +8,7 @@ import networkx as nx
 
 from djinn.core.exceptions import Result, PatternMatchError
 from djinn.core.types import MatchingMode  # Import from shared types
+from djinn.core.graph_interface import Graph as DjinnGraph
 from .graph_utils import graph_to_networkx
 import logging
 import os
@@ -215,7 +216,7 @@ class PatternRegistry:
 
 	def match_patterns(
 		self,
-		graph: ComputationGraph,
+		graph: DjinnGraph,
 		mode: MatchingMode = MatchingMode.EXHAUSTIVE,
 		required_patterns: Optional[Set[str]] = None,
 		confidence_threshold: float = 0.90,
@@ -225,7 +226,7 @@ class PatternRegistry:
 		Match patterns with configurable strategy and comprehensive observability.
 
 		Args:
-			graph: Computation graph to analyze
+			graph: Unified Graph interface (DjinnGraph) to analyze
 			mode: Matching mode (exhaustive, fast, required_only)
 			required_patterns: Set of pattern names that MUST be tried
 			confidence_threshold: Threshold for early termination

@@ -1,0 +1,85 @@
+{
+  "baseline": "full_djinn",
+  "model_id": "gpt2",
+  "prompt_tokens": 32,
+  "new_tokens": 10,
+  "batch_size": 1,
+  "runs": [
+    {
+      "total_ms": 150.5315164104104,
+      "per_token_ms": 15.05315164104104,
+      "tokens_generated": 10,
+      "throughput_tokens_per_s": 66.43127126106877,
+      "host_to_device_mb": 0.0006256103515625,
+      "device_to_host_mb": 7.860324859619141,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The",
+      "run_id": 1
+    },
+    {
+      "total_ms": 156.29840269684792,
+      "per_token_ms": 15.629840269684792,
+      "tokens_generated": 10,
+      "throughput_tokens_per_s": 63.98018039503401,
+      "host_to_device_mb": 0.0006256103515625,
+      "device_to_host_mb": 7.860324859619141,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The",
+      "run_id": 2
+    },
+    {
+      "total_ms": 153.16050313413143,
+      "per_token_ms": 15.316050313413143,
+      "tokens_generated": 10,
+      "throughput_tokens_per_s": 65.29098426402025,
+      "host_to_device_mb": 0.0006256103515625,
+      "device_to_host_mb": 7.860324859619141,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The",
+      "run_id": 3
+    }
+  ],
+  "aggregates": {
+    "total_ms": {
+      "mean": 153.33014074712992,
+      "median": 153.16050313413143,
+      "p95": 155.98461274057627,
+      "min": 150.5315164104104,
+      "max": 156.29840269684792
+    },
+    "per_token_ms": {
+      "mean": 15.333014074712992,
+      "median": 15.316050313413143,
+      "p95": 15.598461274057627,
+      "min": 15.05315164104104,
+      "max": 15.629840269684792
+    },
+    "throughput_tokens_per_s": {
+      "mean": 65.23414530670767,
+      "median": 65.29098426402025,
+      "p95": 66.31724256136393,
+      "min": 63.98018039503401,
+      "max": 66.43127126106877
+    }
+  },
+  "device": "Djinn remote (localhost:5556)",
+  "dtype": "float16",
+  "backend": "djinn",
+  "djinn_server": "localhost:5556",
+  "seed": 42,
+  "library_versions": {
+    "torch": "2.9.0+cu128",
+    "transformers": "4.57.1"
+  },
+  "meta": {
+    "prompt_file": null,
+    "prompt_text": null,
+    "sample_gpu": false
+  }
+}

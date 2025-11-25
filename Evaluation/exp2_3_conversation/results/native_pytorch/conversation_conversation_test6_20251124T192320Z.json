@@ -1,0 +1,124 @@
+{
+  "baseline": "conversation_test6",
+  "model_id": "sshleifer/tiny-gpt2",
+  "device": "Djinn remote (localhost:5556)",
+  "dtype": "float16",
+  "backend": "djinn",
+  "djinn_server": "localhost:5556",
+  "runs": [
+    {
+      "run_id": 1,
+      "total_time_ms": 1779.335342347622,
+      "turns": [
+        {
+          "turn_id": 1,
+          "prompt": "[System] You are Djinn, a semantic-aware tensor OS engineer.\n\nUser: Hey Djinn, can you remind me what makes your GPU time-sharing different?\n\nAssistant:",
+          "response": null,
+          "latency_ms": 93.0051626637578,
+          "per_token_ms": 18.60103253275156,
+          "tokens": 5,
+          "host_to_device_mb": 0.0003204345703125,
+          "device_to_host_mb": 21.08867645263672
+        },
+        {
+          "turn_id": 2,
+          "prompt": "[System] You are Djinn, a semantic-aware tensor OS engineer.\n\nUser: Hey Djinn, can you remind me what makes your GPU time-sharing different?\n\nAssistant: factors factors factors factors factors\n\nUser: How do you keep KV caches around between conversational turns?\n\nAssistant:",
+          "response": null,
+          "latency_ms": 104.6595647931099,
+          "per_token_ms": 20.93191295862198,
+          "tokens": 5,
+          "host_to_device_mb": 0.000518798828125,
+          "device_to_host_mb": 33.550167083740234
+        },
+        {
+          "turn_id": 3,
+          "prompt": "[System] You are Djinn, a semantic-aware tensor OS engineer.\n\nUser: Hey Djinn, can you remind me what makes your GPU time-sharing different?\n\nAssistant: factors factors factors factors factors\n\nUser: How do you keep KV caches around between conversational turns?\n\nAssistant: stairs stairs stairs stairs stairs\n\nUser: What happens if another tenant interrupts my session?\n\nAssistant:",
+          "response": null,
+          "latency_ms": 120.39968371391296,
+          "per_token_ms": 24.079936742782593,
+          "tokens": 5,
+          "host_to_device_mb": 0.0006866455078125,
+          "device_to_host_mb": 44.094505310058594
+        },
+        {
+          "turn_id": 4,
+          "prompt": "[System] You are Djinn, a semantic-aware tensor OS engineer.\n\nUser: Hey Djinn, can you remind me what makes your GPU time-sharing different?\n\nAssistant: factors factors factors factors factors\n\nUser: How do you keep KV caches around between conversational turns?\n\nAssistant: stairs stairs stairs stairs stairs\n\nUser: What happens if another tenant interrupts my session?\n\nAssistant: factors factors factors factors factors\n\nUser: Does the VMU help with streaming audio workloads too?\n\nAssistant:",
+          "response": null,
+          "latency_ms": 137.5754615291953,
+          "per_token_ms": 27.51509230583906,
+          "tokens": 5,
+          "host_to_device_mb": 0.00087738037109375,
+          "device_to_host_mb": 56.07670783996582
+        },
+        {
+          "turn_id": 5,
+          "prompt": "[System] You are Djinn, a semantic-aware tensor OS engineer.\n\nUser: Hey Djinn, can you remind me what makes your GPU time-sharing different?\n\nAssistant: factors factors factors factors factors\n\nUser: How do you keep KV caches around between conversational turns?\n\nAssistant: stairs stairs stairs stairs stairs\n\nUser: What happens if another tenant interrupts my session?\n\nAssistant: factors factors factors factors factors\n\nUser: Does the VMU help with streaming audio workloads too?\n\nAssistant: factors factors factors factors factors\n\nUser: Explain phase detection like I'm new to disaggregation.\n\nAssistant:",
+          "response": null,
+          "latency_ms": 179.47873286902905,
+          "per_token_ms": 35.89574657380581,
+          "tokens": 5,
+          "host_to_device_mb": 0.00106048583984375,
+          "device_to_host_mb": 67.57962226867676
+        },
+        {
+          "turn_id": 6,
+          "prompt": "[System] You are Djinn, a semantic-aware tensor OS engineer.\n\nUser: Hey Djinn, can you remind me what makes your GPU time-sharing different?\n\nAssistant: factors factors factors factors factors\n\nUser: How do you keep KV caches around between conversational turns?\n\nAssistant: stairs stairs stairs stairs stairs\n\nUser: What happens if another tenant interrupts my session?\n\nAssistant: factors factors factors factors factors\n\nUser: Does the VMU help with streaming audio workloads too?\n\nAssistant: factors factors factors factors factors\n\nUser: Explain phase detection like I'm new to disaggregation.\n\nAssistant: factors factors factors factors factors\n\nUser: What's the biggest bottleneck you see today?\n\nAssistant:",
+          "response": null,
+          "latency_ms": 283.7210800498724,
+          "per_token_ms": 56.74421600997448,
+          "tokens": 5,
+          "host_to_device_mb": 0.00122833251953125,
+          "device_to_host_mb": 78.12396049499512
+        },
+        {
+          "turn_id": 7,
+          "prompt": "[System] You are Djinn, a semantic-aware tensor OS engineer.\n\nUser: Hey Djinn, can you remind me what makes your GPU time-sharing different?\n\nAssistant: factors factors factors factors factors\n\nUser: How do you keep KV caches around between conversational turns?\n\nAssistant: stairs stairs stairs stairs stairs\n\nUser: What happens if another tenant interrupts my session?\n\nAssistant: factors factors factors factors factors\n\nUser: Does the VMU help with streaming audio workloads too?\n\nAssistant: factors factors factors factors factors\n\nUser: Explain phase detection like I'm new to disaggregation.\n\nAssistant: factors factors factors factors factors\n\nUser: What's the biggest bottleneck you see today?\n\nAssistant: stairs stairs stairs stairs stairs\n\nUser: How does QoS keep realtime sessions responsive?\n\nAssistant:",
+          "response": null,
+          "latency_ms": 386.321104131639,
+          "per_token_ms": 77.2642208263278,
+          "tokens": 5,
+          "host_to_device_mb": 0.00140380859375,
+          "device_to_host_mb": 89.14758682250977
+        },
+        {
+          "turn_id": 8,
+          "prompt": "[System] You are Djinn, a semantic-aware tensor OS engineer.\n\nUser: Hey Djinn, can you remind me what makes your GPU time-sharing different?\n\nAssistant: factors factors factors factors factors\n\nUser: How do you keep KV caches around between conversational turns?\n\nAssistant: stairs stairs stairs stairs stairs\n\nUser: What happens if another tenant interrupts my session?\n\nAssistant: factors factors factors factors factors\n\nUser: Does the VMU help with streaming audio workloads too?\n\nAssistant: factors factors factors factors factors\n\nUser: Explain phase detection like I'm new to disaggregation.\n\nAssistant: factors factors factors factors factors\n\nUser: What's the biggest bottleneck you see today?\n\nAssistant: stairs stairs stairs stairs stairs\n\nUser: How does QoS keep realtime sessions responsive?\n\nAssistant: stairs stairs stairs stairs stairs\n\nUser: Wrap it up with a quick summary for our exec team.\n\nAssistant:",
+          "response": null,
+          "latency_ms": 465.2724349871278,
+          "per_token_ms": 93.05448699742556,
+          "tokens": 5,
+          "host_to_device_mb": 0.00159454345703125,
+          "device_to_host_mb": 101.12978935241699
+        }
+      ],
+      "aggregates": {
+        "turn_latency_ms": {
+          "mean": 221.30415309220552,
+          "median": 158.52709719911218,
+          "p95": 437.6394691877067,
+          "min": 93.0051626637578,
+          "max": 465.2724349871278
+        },
+        "turn_per_token_ms": {
+          "mean": 44.260830618441105,
+          "median": 31.705419439822435,
+          "p95": 87.52789383754134,
+          "min": 18.60103253275156,
+          "max": 93.05448699742556
+        },
+        "total_host_to_device_mb": 0.0076904296875,
+        "total_device_to_host_mb": 490.791015625
+      },
+      "gpu": {
+        "gpu_util_pct": null,
+        "mem_util_pct": null,
+        "mem_used_mb": null
+      }
+    }
+  ],
+  "conversation_file": "Evaluation/exp2_3_conversation/prompts/conversation.json",
+  "library_versions": {
+    "torch": "2.9.0+cu128",
+    "transformers": "4.57.1"
+  }
+}

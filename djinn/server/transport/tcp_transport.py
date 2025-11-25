@@ -22,6 +22,11 @@ except ImportError:
     from djinn.server.transport.base import Transport
     from djinn.core.metadata_types import ResultMetadata, ErrorMetadata
 
+try:
+    from .protocol import MessageType
+except ImportError:
+    from djinn.server.transport.protocol import MessageType
+
 logger = logging.getLogger(__name__)
 
 
@@ -83,17 +88,25 @@ class TCPTransport(Transport):
         self._batch_size_threshold = self._central_config.network.batch_size_threshold
 
     async def initialize(self) -> bool:
-        """Start TCP receiver (server-side)."""
+        """Start TCP receiver (server-side).
+        
+        NOTE: Message-type protocol (REGISTER_MODEL, EXECUTE_MODEL) is handled by DjinnServer
+        on data_port. TCPTransport only handles old tensor transfer protocol if needed.
+        For Phase 3, we skip starting a separate server to avoid port conflicts.
+        """
         try:
-            # Start TCP server for receiving tensors
-            self.server = await asyncio.start_server(
-                self._handle_connection,
-                '0.0.0.0',
-                self.data_port
-            )
-
-            addrs = ', '.join(str(sock.getsockname()) for sock in self.server.sockets)
-            logger.info(f"TCP transport listening on {addrs}")
+            # ✅ FIX: Don't start server if is_server=False (client-side transport)
+            # or if main server is already handling data_port
+            if not getattr(self.config, 'is_server', False):
+                logger.debug("TCP transport: client-side, not starting server")
+                self.server = None
+                return True
+            
+            # ✅ FIX: Skip starting server - main DjinnServer handles data_port for message-type protocol
+            # Old tensor transfer protocol is deprecated
+            logger.info(f"TCP transport initialized (server-side, but not starting separate listener)")
+            logger.info(f"Message-type protocol handled by DjinnServer on data_port {self.data_port}")
+            self.server = None
             return True
 
         except Exception as e:
@@ -185,6 +198,9 @@ class TCPTransport(Transport):
             conn.writer.write(struct.pack('>I', len(metadata_json)))
             conn.writer.write(metadata_json)
 
+            # Send message type so server can parse payload framing correctly
+            conn.writer.write(struct.pack('B', MessageType.SINGLE_TENSOR))
+
             # Send tensor size
             conn.writer.write(struct.pack('>Q', expected_size))
 
@@ -263,7 +279,8 @@ class TCPTransport(Transport):
                 conn.writer.write(struct.pack('>I', len(metadata_json)))
                 conn.writer.write(metadata_json)
 
-                # Send number of tensors
+                # Send message type followed by number of tensors
+                conn.writer.write(struct.pack('B', MessageType.MULTI_TENSOR))
                 conn.writer.write(struct.pack('B', len(tensors)))
 
                 # Send each tensor
@@ -384,245 +401,25 @@ class TCPTransport(Transport):
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter
     ):
-        """Handle incoming tensor transfer (single or multi-tensor)."""
+        """
+        Handle incoming connections - route to appropriate protocol handler.
+        
+        ⚠️  NOTE: This method is currently DEAD CODE.
+        TCPTransport server is disabled (initialize() sets self.server = None).
+        All message-type protocol (REGISTER_MODEL, EXECUTE_MODEL) is handled by DjinnServer.
+        Old tensor transfer protocol is deprecated.
+        
+        This method is kept for potential future use if we need to re-enable
+        TCPTransport server for backward compatibility or special use cases.
+        """
+        # ✅ DEAD CODE: This method is never called because TCPTransport server is disabled.
+        # Keeping for potential future use, but currently unreachable.
         addr = writer.get_extra_info('peername')
-        logger.info(f"TCP connection from {addr}")
-
-        try:
-            # Read transfer_id
-            transfer_id_len_bytes = await reader.readexactly(4)
-            transfer_id_len = struct.unpack('>I', transfer_id_len_bytes)[0]
-            transfer_id_bytes = await reader.readexactly(transfer_id_len)
-            transfer_id = transfer_id_bytes.decode('utf-8')
-
-            # Read metadata
-            metadata_len_bytes = await reader.readexactly(4)
-            metadata_len = struct.unpack('>I', metadata_len_bytes)[0]
-            metadata_bytes = await reader.readexactly(metadata_len)
-
-            metadata = json.loads(metadata_bytes.decode('utf-8'))
-            logger.info(f"Received metadata: {metadata}")
-            logger.info(f"Client port in received metadata: {metadata.get('client_port')}")
-            logger.info(f"Source node in received metadata: {metadata.get('source_node')}")
-
-            # Check if this is multi-tensor or single-tensor message
-            # ✅ FIX: Use explicit message type instead of heuristics
-            from .protocol import MessageType
-            
-            # Protocol: [1 byte: msg_type] [metadata...] [tensor data...]
-            # msg_type: 0x01 = SINGLE_TENSOR, 0x02 = MULTI_TENSOR
-            peek_data = await reader.readexactly(1)
-            msg_type_byte = struct.unpack('B', peek_data)[0]
-            
-            # Explicit message type detection (no heuristics)
-            if msg_type_byte == MessageType.SINGLE_TENSOR:
-                is_multi_tensor = False
-            elif msg_type_byte == MessageType.MULTI_TENSOR:
-                is_multi_tensor = True
-            else:
-                # Fallback to heuristic for backward compatibility (legacy clients)
-                # This should be deprecated eventually
-                logger.warning(
-                    f"Legacy protocol detected (msg_type={msg_type_byte:02x}), "
-                    f"using heuristic detection. Consider upgrading client."
-                )
-                next_byte_val = msg_type_byte
-                is_multi_tensor = 'num_inputs' in metadata and next_byte_val <= 10
-            
-            if is_multi_tensor:
-                # Multi-tensor protocol
-                num_tensors = next_byte_val
-                logger.info(f"Receiving {num_tensors} tensors for {transfer_id}")
-                
-                tensors = []
-                for i in range(num_tensors):
-                    # Read tensor size
-                    size_bytes = await reader.readexactly(8)
-                    tensor_size = struct.unpack('>Q', size_bytes)[0]
-                    
-                    # Read tensor data
-                    tensor_bytes = await reader.readexactly(tensor_size)
-                    
-                    # Reconstruct tensor
-                    shape = metadata['input_shapes'][i]
-                    dtype_str = metadata['input_dtypes'][i]
-                    
-                    # Map PyTorch dtype string to NumPy dtype
-                    dtype_map = {
-                        'torch.float32': np.float32,
-                        'torch.float16': np.float16,
-                        'torch.int64': np.int64,
-                        'torch.int32': np.int32,
-                        'torch.float64': np.float64,
-                    }
-                    np_dtype = dtype_map.get(dtype_str, np.float32)
-                    
-                    # Create numpy array
-                    np_array = np.frombuffer(tensor_bytes, dtype=np_dtype)
-                    np_array = np_array.reshape(shape)
-                    
-                    # Convert to PyTorch tensor
-                    tensor = torch.from_numpy(np_array.copy())
-                    tensors.append(tensor)
-                    
-                    logger.debug(f"  Received tensor {i}: {shape}")
-                
-                # Extract result_id from metadata
-                result_id = metadata.get('result_id', transfer_id)
-                
-                # Route based on message type
-                if metadata.get('is_result', False):
-                    # This is a result coming back
-                    if metadata.get('is_error', False):
-                        # This is an error result
-                        error_meta = ErrorMetadata(
-                            result_id=result_id,
-                            original_transfer=metadata.get('original_transfer', transfer_id),
-                            error_message=metadata.get('error_message', 'Unknown error'),
-                            error_type=metadata.get('error_type', 'RuntimeError'),
-                            shape=metadata.get('shape', [0]),
-                            dtype=metadata.get('dtype', 'torch.float32'),
-                            size_bytes=metadata.get('size_bytes', 0)
-                        )
-                        if self._result_callback:
-                            await self._result_callback(result_id, Exception(error_meta.error_message))
-                            logger.debug(f"Error result routed to callback: {result_id}")
-                        else:
-                            logger.warning(f"Error result received but no callback: {result_id}")
-                        # Don't process as operation request
-                        return
-                    else:
-                        # This is a successful result
-                        if self._result_callback:
-                            await self._result_callback(result_id, tensors[0])
-                            logger.debug(f"Success result routed to callback: {result_id}")
-                        else:
-                            logger.warning(f"Result received but no callback: {result_id}")
-                        # Don't process as operation request
-                        return
-                
-                elif metadata.get('operation'):
-                    # This is an operation request - call server callback with multiple tensors
-                    # Add source node information for result callback
-                    metadata['source_node'] = f"{addr[0]}:{addr[1]}"  # Use actual client port
-                    if self._operation_callback:
-                        await self._operation_callback(transfer_id, tensors, metadata)
-                    else:
-                        logger.warning(f"Operation request but no callback: {transfer_id}")
-                
-                else:
-                    # Store for retrieval
-                    self._received_tensors[transfer_id] = tensors[0] if len(tensors) == 1 else tensors
-                    if transfer_id in self._receive_handlers:
-                        self._receive_handlers[transfer_id].set_result(True)
-                
-                logger.info(f"✓ Multi-tensor transfer complete: {transfer_id}")
-            
-            else:
-                # Single-tensor protocol (original)
-                # Re-interpret first byte + next 7 bytes as tensor size
-                size_bytes_full = peek_data + await reader.readexactly(7)
-                tensor_size = struct.unpack('>Q', size_bytes_full)[0]
-
-                logger.info(f"Receiving single tensor: {transfer_id}, {tensor_size} bytes")
-
-                # Read tensor data
-                tensor_bytes = await reader.readexactly(tensor_size)
-
-                # Reconstruct tensor
-                shape = metadata['shape']
-                dtype_str = metadata['dtype']
-
-                # Map PyTorch dtype string to NumPy dtype
-                dtype_map = {
-                    'torch.float32': np.float32,
-                    'torch.float16': np.float16,
-                    'torch.int64': np.int64,
-                    'torch.int32': np.int32,
-                    'torch.float64': np.float64,
-                }
-                np_dtype = dtype_map.get(dtype_str, np.float32)
-
-                # Create numpy array
-                np_array = np.frombuffer(tensor_bytes, dtype=np_dtype)
-                np_array = np_array.reshape(shape)
-
-                # Convert to PyTorch tensor
-                tensor = torch.from_numpy(np_array.copy())
-
-                # ✅ Extract result_id from metadata (matches client's queue key)
-                result_id = metadata.get('result_id', transfer_id)
-
-                # ✅ Check if this is an error response
-                if metadata.get('is_error', False):
-                    # This is an error response
-                    error_msg = metadata.get('error_message', 'Unknown error')
-                    error_type = metadata.get('error_type', 'RuntimeError')
-                    
-                    # Create exception
-                    exception = RuntimeError(f"{error_type}: {error_msg}")
-                    
-                    # Pass exception to callback
-                    if self._result_callback:
-                        await self._result_callback(result_id, exception)
-                        logger.debug(f"Error response routed to callback: {result_id}")
-                    else:
-                        logger.warning(f"Error response received but no callback: {result_id}")
-                    return  # Don't process as normal result
-
-                # ✅ CHECK: Is this a result?
-                if metadata.get('is_result', False):
-                    # This is a result coming back
-                    if metadata.get('is_error', False):
-                        # This is an error result - create typed error metadata
-                        error_meta = ErrorMetadata(
-                            result_id=result_id,
-                            original_transfer=metadata.get('original_transfer', transfer_id),
-                            error_message=metadata.get('error_message', 'Unknown error'),
-                            error_type=metadata.get('error_type', 'RuntimeError'),
-                            shape=metadata.get('shape', [0]),
-                            dtype=metadata.get('dtype', 'torch.float32'),
-                            size_bytes=metadata.get('size_bytes', 0)
-                        )
-                        if self._result_callback:
-                            await self._result_callback(result_id, Exception(error_meta.error_message))
-                        else:
-                            logger.warning(f"Error result received but no callback: {result_id}")
-                    else:
-                        # This is a successful result
-                        if self._result_callback:
-                            await self._result_callback(result_id, tensor)
-                            logger.debug(f"Success result routed to callback: {result_id}")
-                        else:
-                            logger.warning(f"Result received but no callback: {result_id}")
-                        # Don't process as operation request
-                        return
-                # ✅ CHECK: Is this an operation request?
-                elif metadata.get('operation'):
-                    # This needs execution - call server callback
-                    # Add source node information for result callback
-                    metadata['source_node'] = f"{addr[0]}:{addr[1]}"  # Use actual client port
-                    if self._operation_callback:
-                        await self._operation_callback(transfer_id, tensor, metadata)
-                    else:
-                        logger.warning(f"Operation request but no callback: {transfer_id}")
-                else:
-                    # This is a normal transfer
-                    self._received_tensors[transfer_id] = tensor
-
-                    # Signal completion
-                    if transfer_id in self._receive_handlers:
-                        self._receive_handlers[transfer_id].set_result(True)
-
-                logger.info(f"Tensor received: {tensor.shape}")
-
-        except Exception as e:
-            logger.error(f"Error receiving tensor: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-        finally:
-            writer.close()
-            await writer.wait_closed()
+        logger.warning(f"⚠️  TCPTransport._handle_connection called (unexpected) from {addr}")
+        raise RuntimeError(
+            "TCPTransport._handle_connection should not be called. "
+            "TCPTransport server is disabled. Use DjinnServer for message-type protocol."
+        )
 
     # ✅ OPTIMIZATION: Operation batching methods
     async def _flush_batch(self, target: str):

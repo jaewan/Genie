@@ -1,0 +1,48 @@
+{
+  "experiment": "exp2_1_llm_decode",
+  "model_id": "gpt2-xl",
+  "prompt_tokens": 72,
+  "new_tokens": 50,
+  "batch_size": 1,
+  "runs_per_baseline": 10,
+  "baselines": {
+    "semantic_blind": {
+      "mean_latency_ms": 6036.8179240264,
+      "p95_latency_ms": 6061.712695099413,
+      "mean_per_token_ms": 120.736358480528,
+      "p95_per_token_ms": 121.23425390198827,
+      "mean_throughput_tps": 8.282597834213156,
+      "result_file": "Evaluation/exp2_1_llm_decode/results/semantic_blind/llm_decode_semantic_blind_20251125T005320Z.json",
+      "data_transfer_mb": 925.0996589660645
+    },
+    "partially_aware": {
+      "mean_latency_ms": 602.6652947068214,
+      "p95_latency_ms": 612.5446038320661,
+      "mean_per_token_ms": 30.133264735341072,
+      "p95_per_token_ms": 30.627230191603303,
+      "mean_throughput_tps": 33.19492836659325,
+      "result_file": "Evaluation/exp2_1_llm_decode/results/partially_aware/llm_decode_partially_aware_20251125T001208Z.json",
+      "data_transfer_mb": 159.13631439208984
+    },
+    "full_djinn": {
+      "mean_latency_ms": 672.2412602975965,
+      "p95_latency_ms": 773.5800551250577,
+      "mean_per_token_ms": 33.61206301487982,
+      "p95_per_token_ms": 38.679002756252885,
+      "mean_throughput_tps": 30.018562844436158,
+      "result_file": "Evaluation/exp2_1_llm_decode/results/full_djinn/llm_decode_full_djinn_20251125T001220Z.json",
+      "data_transfer_mb": 159.13631439208984
+    }
+  },
+  "comparisons": {
+    "full_djinn_vs_semantic_blind": {
+      "speedup": 8.980135972840976,
+      "data_savings_pct": 82.79792746113989,
+      "throughput_improvement": 3.6242931801466503
+    },
+    "full_djinn_vs_partially_aware": {
+      "speedup": 0.8965014947758871,
+      "data_savings_pct": 0.0
+    }
+  }
+}

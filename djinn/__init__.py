@@ -159,6 +159,9 @@ from .backend.runtime.initialization import (
     register_init_hook,
 )
 
+# Public API - Phase 3 (Semantic Hints)
+from .core.semantic_hints import session, SemanticHints, Priority, get_current_hints
+
 # Convenience wrapper for synchronous code
 def init(
     server_address=None,
@@ -640,6 +643,12 @@ __all__ = [
     'get_coordinator',               # ✅ Access remote coordinator
     'get_initialization_time_ms',    # ✅ Get init duration
     'register_init_hook',            # ✅ Register custom init handlers
+
+    # Phase 3 (Semantic Hints)
+    'session',                       # ✅ Context manager for semantic hints
+    'SemanticHints',                 # ✅ Semantic hints dataclass
+    'Priority',                      # ✅ Priority enum
+    'get_current_hints',             # ✅ Get current semantic hints from context
 
     # Phase 3
     'annotate_graph',

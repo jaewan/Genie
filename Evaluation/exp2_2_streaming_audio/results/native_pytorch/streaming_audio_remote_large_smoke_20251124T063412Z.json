@@ -1,0 +1,71 @@
+{
+  "baseline": "remote_large_smoke",
+  "model_id": "openai/whisper-large-v3",
+  "device": "Djinn remote (localhost:5556)",
+  "dtype": "float16",
+  "backend": "djinn",
+  "djinn_server": "localhost:5556",
+  "sample_rate": 16000,
+  "chunk_seconds": 5.0,
+  "stride_seconds": 1.0,
+  "runs": [
+    {
+      "run_id": 1,
+      "total_time_ms": 13815.986067056656,
+      "chunks": [
+        {
+          "chunk_id": 1,
+          "start_s": 0.0,
+          "end_s": 5.0,
+          "chunk_duration_s": 5.0,
+          "latency_ms": 13811.61997653544,
+          "per_token_ms": 394.61771361529827,
+          "tokens": 35,
+          "host_to_device_mb": 1.4648666381835938,
+          "device_to_host_mb": 0.00026702880859375,
+          "transcript": null
+        }
+      ],
+      "aggregates": {
+        "chunk_latency_ms": {
+          "mean": 13811.61997653544,
+          "median": 13811.61997653544,
+          "p95": 13811.61997653544,
+          "min": 13811.61997653544,
+          "max": 13811.61997653544
+        },
+        "chunk_per_token_ms": {
+          "mean": 394.61771361529827,
+          "median": 394.61771361529827,
+          "p95": 394.61771361529827,
+          "min": 394.61771361529827,
+          "max": 394.61771361529827
+        },
+        "chunk_throughput_audio_sec_per_sec": {
+          "mean": 0.36201401490154667,
+          "median": 0.36201401490154667,
+          "p95": 0.36201401490154667,
+          "min": 0.36201401490154667,
+          "max": 0.36201401490154667
+        }
+      },
+      "gpu": {
+        "gpu_util_pct": null,
+        "mem_util_pct": null,
+        "mem_used_mb": null
+      }
+    }
+  ],
+  "library_versions": {
+    "torch": "2.9.0+cu128",
+    "torchaudio": "2.9.0+cu128",
+    "transformers": "4.57.1"
+  },
+  "meta": {
+    "audio_file": null,
+    "dummy_audio_seconds": 5.0,
+    "language": "en",
+    "task": "transcribe",
+    "sample_gpu": false
+  }
+}

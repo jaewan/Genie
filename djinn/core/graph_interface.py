@@ -58,6 +58,38 @@ class DjinnGraph(ABC):
         """Number of edges (dependencies)."""
         pass
     
+    def stable_id(self) -> str:
+        """
+        Compute stable graph identifier for caching.
+        
+        Returns a deterministic hash based on graph structure (operations, shapes, edges).
+        This enables caching of semantic analysis results across graph instances.
+        
+        Returns:
+            String hash identifier (hex digest)
+        """
+        import hashlib
+        # Build a canonical representation of the graph
+        parts = []
+        
+        # Add node operations in topological order
+        for node in self.topological_order():
+            parts.append(f"{node.id}:{node.operation}")
+            if hasattr(node, 'shape') and node.shape:
+                parts.append(f"shape:{tuple(node.shape)}")
+            if hasattr(node, 'dtype') and node.dtype:
+                parts.append(f"dtype:{str(node.dtype)}")
+        
+        # Add edges
+        for node in self.topological_order():
+            for inp in node.inputs:
+                inp_id = inp.id if hasattr(inp, 'id') else str(inp)
+                parts.append(f"edge:{inp_id}->{node.id}")
+        
+        # Compute hash
+        graph_str = "|".join(parts)
+        return hashlib.sha256(graph_str.encode('utf-8')).hexdigest()[:16]
+    
     def get_roots(self) -> List[NodeProtocol]:
         """Get root nodes (inputs with no predecessors)."""
         roots = []

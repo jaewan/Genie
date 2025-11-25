@@ -1,0 +1,43 @@
+{
+  "metadata": {
+    "driver": "synthetic",
+    "policy": "qos",
+    "timestamp": "2025-11-23T23:04:25.416561+00:00",
+    "config_path": "Evaluation/exp4_2_qos/configs/qos_mix.yaml",
+    "duration_s": 60
+  },
+  "metrics": {
+    "per_class": {
+      "realtime": {
+        "count": 121,
+        "latency_ms": {
+          "p50": 27.82845081060077,
+          "p90": 29.99827761445522,
+          "p99": 32.988830431889795
+        },
+        "sla_violation_rate": 1.0
+      },
+      "interactive": {
+        "count": 93,
+        "latency_ms": {
+          "p50": 76.14557542271359,
+          "p90": 78.26804580175175,
+          "p99": 79.59594872355206
+        },
+        "sla_violation_rate": 0.0
+      },
+      "batch": {
+        "count": 30,
+        "latency_ms": {
+          "p50": 267.3977897144832,
+          "p90": 269.13586633492514,
+          "p99": 270.6256239042773
+        },
+        "sla_violation_rate": null
+      }
+    },
+    "total_requests": 244,
+    "policy": "qos",
+    "duration_s": 60.0
+  }
+}

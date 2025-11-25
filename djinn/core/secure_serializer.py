@@ -231,7 +231,16 @@ class SecureSerializer:
             if not isinstance(entry, dict):
                 continue
 
-            if entry.get('_is_serialized_dict'):
+            if entry.get('_is_tensor'):
+                # Handle _is_tensor entries: serialize tensor to bytes
+                tensor = tensor_data.get(key)
+                if tensor is not None and isinstance(tensor, torch.Tensor):
+                    # Serialize tensor to numpy bytes
+                    cpu_tensor = tensor.cpu().contiguous()
+                    tensor_bytes = cpu_tensor.numpy().tobytes()
+                    tensor_entries.append((key, tensor_bytes))
+
+            elif entry.get('_is_serialized_dict'):
                 dict_bytes = tensor_data.get(key)
                 if dict_bytes is None:
                     continue
@@ -310,11 +319,30 @@ class SecureSerializer:
         is_register_model = request_type == 'REGISTER_MODEL'
         is_register_chunk = request_type == 'REGISTER_MODEL_CHUNK'
         is_execute_model = request_type == 'EXECUTE_MODEL'
+        # ✅ FIX: Check for binary protocol flags in metadata (weights_binary won't be in metadata JSON)
+        has_binary_flag = metadata.get('_binary_protocol')
+        has_binary_weights_flag = metadata.get('_has_binary_weights')
+        has_binary_chunk_flag = metadata.get('_has_binary_chunk')
+        has_arch_data_size = metadata.get('_architecture_data_size') is not None
         is_binary_protocol = (
-            metadata.get('_binary_protocol') or
-            'weights_binary' in metadata or
-            'chunk_data_binary' in metadata
+            has_binary_flag or
+            has_binary_weights_flag or
+            has_binary_chunk_flag or
+            has_arch_data_size
         ) and (is_register_model or is_register_chunk)
+        
+        # Always log for REGISTER_MODEL to debug
+        if is_register_model:
+            logger.info(
+                f"🔍 REGISTER_MODEL deserialization: "
+                f"request_type={request_type}, "
+                f"_binary_protocol={has_binary_flag}, "
+                f"_has_binary_weights={has_binary_weights_flag}, "
+                f"_has_binary_chunk={has_binary_chunk_flag}, "
+                f"_architecture_data_size={metadata.get('_architecture_data_size')}, "
+                f"is_binary_protocol={is_binary_protocol}, "
+                f"remaining_bytes={len(data)-offset}"
+            )
 
         tensor_data = {}
         has_serialized_inputs = (
@@ -325,7 +353,7 @@ class SecureSerializer:
         )
         binary_entries_required = any(
             isinstance(entry, dict) and (
-                entry.get('_is_serialized_dict') or entry.get('_is_binary')
+                entry.get('_is_serialized_dict') or entry.get('_is_binary') or entry.get('_is_tensor')
             )
             for entry in metadata.values()
         )
@@ -379,11 +407,13 @@ class SecureSerializer:
 
             # Remaining data is binary
             remaining_data = data[offset:]
+            logger.info(f"🔍 Binary weights/chunk data: {len(remaining_data)} bytes")
             request = metadata.copy()
 
             # Set the appropriate binary field based on request type
             if is_register_model:
                 request['weights_binary'] = remaining_data
+                logger.info(f"✅ Set weights_binary in request: {len(remaining_data)} bytes, model_id={request.get('model_id', 'N/A')[:30]}")
             elif is_register_chunk:
                 request['chunk_data_binary'] = remaining_data
 
@@ -430,7 +460,44 @@ class SecureSerializer:
             for key, entry in metadata.items():
                 if not isinstance(entry, dict):
                     continue
-                if entry.get('_is_binary') and key in tensor_data:
+                if entry.get('_is_tensor') and key in tensor_data:
+                    # Reconstruct tensor from binary data
+                    shape = entry.get('shape', [])
+                    dtype_str = entry.get('dtype', 'float32')
+                    tensor_bytes = tensor_data[key]
+                    # Convert dtype string to torch dtype
+                    dtype_map = {
+                        'torch.float32': torch.float32,
+                        'torch.float16': torch.float16,
+                        'torch.bfloat16': torch.bfloat16,
+                        'torch.int64': torch.int64,
+                        'torch.int32': torch.int32,
+                        'torch.bool': torch.bool,
+                        'float32': torch.float32,
+                        'float16': torch.float16,
+                        'bfloat16': torch.bfloat16,
+                        'int64': torch.int64,
+                        'int32': torch.int32,
+                        'bool': torch.bool,
+                    }
+                    dtype = dtype_map.get(dtype_str, torch.float32)
+                    # Reconstruct tensor from bytes
+                    import numpy as np
+                    np_dtype_map = {
+                        torch.float32: np.float32,
+                        torch.float16: np.float16,
+                        torch.bfloat16: np.float16,  # bfloat16 not directly supported
+                        torch.int64: np.int64,
+                        torch.int32: np.int32,
+                        torch.bool: np.bool_,
+                    }
+                    np_dtype = np_dtype_map.get(dtype, np.float32)
+                    np_array = np.frombuffer(tensor_bytes, dtype=np_dtype)
+                    if shape:
+                        np_array = np_array.reshape(shape)
+                    tensor = torch.from_numpy(np_array.copy())
+                    request[key] = tensor
+                elif entry.get('_is_binary') and key in tensor_data:
                     request[key] = {
                         'data': tensor_data[key],
                         'shape': entry.get('shape', entry.get('tensors', {}).get(key, {}).get('shape', [])),

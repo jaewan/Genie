@@ -1,0 +1,85 @@
+{
+  "baseline": "semantic_blind",
+  "model_id": "gpt2",
+  "prompt_tokens": 32,
+  "new_tokens": 10,
+  "batch_size": 1,
+  "runs": [
+    {
+      "total_ms": 462.2755078598857,
+      "per_token_ms": 46.22755078598857,
+      "tokens_generated": 10,
+      "throughput_tokens_per_s": 21.632121602754196,
+      "host_to_device_mb": 0.0055694580078125,
+      "device_to_host_mb": 69.9760627746582,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The KV cache is a single-threaded",
+      "run_id": 1
+    },
+    {
+      "total_ms": 474.248718470335,
+      "per_token_ms": 47.4248718470335,
+      "tokens_generated": 10,
+      "throughput_tokens_per_s": 21.085982124009714,
+      "host_to_device_mb": 0.0055694580078125,
+      "device_to_host_mb": 69.9760627746582,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The KV cache is a single-threaded",
+      "run_id": 2
+    },
+    {
+      "total_ms": 473.71302638202906,
+      "per_token_ms": 47.371302638202906,
+      "tokens_generated": 10,
+      "throughput_tokens_per_s": 21.10982692702107,
+      "host_to_device_mb": 0.0055694580078125,
+      "device_to_host_mb": 69.9760627746582,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": "The KV cache is a single-threaded",
+      "run_id": 3
+    }
+  ],
+  "aggregates": {
+    "total_ms": {
+      "mean": 470.07908423741657,
+      "median": 473.71302638202906,
+      "p95": 474.1951492615044,
+      "min": 462.2755078598857,
+      "max": 474.248718470335
+    },
+    "per_token_ms": {
+      "mean": 47.00790842374166,
+      "median": 47.371302638202906,
+      "p95": 47.41951492615044,
+      "min": 46.22755078598857,
+      "max": 47.4248718470335
+    },
+    "throughput_tokens_per_s": {
+      "mean": 21.275976884594993,
+      "median": 21.10982692702107,
+      "p95": 21.579892135180884,
+      "min": 21.085982124009714,
+      "max": 21.632121602754196
+    }
+  },
+  "device": "Djinn remote (localhost:5556)",
+  "dtype": "float16",
+  "backend": "djinn",
+  "djinn_server": "localhost:5556",
+  "seed": 42,
+  "library_versions": {
+    "torch": "2.9.0+cu128",
+    "transformers": "4.57.1"
+  },
+  "meta": {
+    "prompt_file": null,
+    "prompt_text": null,
+    "sample_gpu": false
+  }
+}

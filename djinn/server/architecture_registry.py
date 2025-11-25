@@ -252,15 +252,71 @@ class HybridArchitectureRegistry:
                             # Import and instantiate
                             module = __import__(class_module, fromlist=[class_name])
                             model_class = getattr(module, class_name)
-                            # Try to instantiate with descriptor config if available
-                            if descriptor and 'config' in descriptor:
+                            
+                            # Try to instantiate with config from architecture_data if available
+                            config_dict = data.get('config')
+                            if config_dict:
+                                # For transformers models, use AutoModel.from_config or specific model class
+                                if 'transformers' in class_module:
+                                    try:
+                                        from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForSpeechSeq2Seq
+                                        
+                                        # Try to determine model type from config
+                                        model_type = config_dict.get('model_type', '').lower()
+                                        
+                                        # Whisper models need special handling
+                                        if 'whisper' in model_type or 'whisper' in class_name.lower():
+                                            # Use AutoModelForSpeechSeq2Seq for Whisper
+                                            if hasattr(AutoConfig, 'from_dict'):
+                                                config = AutoConfig.from_dict(config_dict)
+                                            else:
+                                                from transformers import WhisperConfig
+                                                config = WhisperConfig.from_dict(config_dict)
+                                            model = AutoModelForSpeechSeq2Seq.from_config(config)
+                                        else:
+                                            # Other transformers models
+                                            if hasattr(AutoConfig, 'from_dict'):
+                                                config = AutoConfig.from_dict(config_dict)
+                                            else:
+                                                # Fallback: try to infer config class from model_type
+                                                config_class_name = config_dict.get('model_type', '').title() + 'Config'
+                                                try:
+                                                    config_module = __import__(f'transformers.models.{model_type}', fromlist=[config_class_name])
+                                                    config_class = getattr(config_module, config_class_name)
+                                                    config = config_class.from_dict(config_dict)
+                                                except (ImportError, AttributeError):
+                                                    # Last resort: use AutoConfig
+                                                    from transformers import AutoConfig
+                                                    config = AutoConfig.from_dict(config_dict)
+                                            
+                                            # Try AutoModelForCausalLM first, fallback to AutoModel
+                                            try:
+                                                model = AutoModelForCausalLM.from_config(config)
+                                            except Exception:
+                                                from transformers import AutoModel
+                                                model = AutoModel.from_config(config)
+                                    except Exception as e:
+                                        logger.warning(f"Failed to use AutoModel reconstruction: {e}, trying direct instantiation")
+                                        # Fallback to direct instantiation
+                                        if descriptor and 'config' in descriptor:
+                                            model = model_class(**descriptor['config'])
+                                        else:
+                                            model = model_class()
+                                else:
+                                    # Non-transformers models - use descriptor config or default
+                                    if descriptor and 'config' in descriptor:
+                                        model = model_class(**descriptor['config'])
+                                    else:
+                                        model = model_class()
+                            elif descriptor and 'config' in descriptor:
                                 model = model_class(**descriptor['config'])
                             else:
                                 model = model_class()
+                            
                             logger.info(f"Reconstructed {fingerprint} from class structure ({class_module}.{class_name})")
                             return model
                         except Exception as e:
-                            logger.warning(f"Failed to reconstruct from {class_module}.{class_name}: {e}")
+                            logger.warning(f"Failed to reconstruct from {class_module}.{class_name}: {e}", exc_info=True)
                             # Fall through to error
                     else:
                         raise SecurityError(f"Unsafe module: {class_module}")

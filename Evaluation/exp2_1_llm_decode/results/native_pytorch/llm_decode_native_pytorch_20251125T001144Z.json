@@ -1,0 +1,111 @@
+{
+  "baseline": "native_pytorch",
+  "model_id": "gpt2",
+  "prompt_tokens": 32,
+  "new_tokens": 20,
+  "batch_size": 1,
+  "runs": [
+    {
+      "total_ms": 145.4086322337389,
+      "per_token_ms": 7.270431611686945,
+      "tokens_generated": 20,
+      "throughput_tokens_per_s": 137.54341604596593,
+      "host_to_device_mb": 0.000244140625,
+      "device_to_host_mb": 0.000396728515625,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": null,
+      "run_id": 1
+    },
+    {
+      "total_ms": 151.47948544472456,
+      "per_token_ms": 7.573974272236228,
+      "tokens_generated": 20,
+      "throughput_tokens_per_s": 132.0310795965707,
+      "host_to_device_mb": 0.000244140625,
+      "device_to_host_mb": 0.000396728515625,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": null,
+      "run_id": 2
+    },
+    {
+      "total_ms": 149.27750546485186,
+      "per_token_ms": 7.463875273242593,
+      "tokens_generated": 20,
+      "throughput_tokens_per_s": 133.97865899299276,
+      "host_to_device_mb": 0.000244140625,
+      "device_to_host_mb": 0.000396728515625,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": null,
+      "run_id": 3
+    },
+    {
+      "total_ms": 148.9147786051035,
+      "per_token_ms": 7.445738930255175,
+      "tokens_generated": 20,
+      "throughput_tokens_per_s": 134.3050044283152,
+      "host_to_device_mb": 0.000244140625,
+      "device_to_host_mb": 0.000396728515625,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": null,
+      "run_id": 4
+    },
+    {
+      "total_ms": 148.49450159817934,
+      "per_token_ms": 7.424725079908967,
+      "tokens_generated": 20,
+      "throughput_tokens_per_s": 134.68512156846901,
+      "host_to_device_mb": 0.000244140625,
+      "device_to_host_mb": 0.000396728515625,
+      "gpu_util_pct": null,
+      "mem_util_pct": null,
+      "mem_used_mb": null,
+      "generated_text": null,
+      "run_id": 5
+    }
+  ],
+  "aggregates": {
+    "total_ms": {
+      "mean": 148.71498066931963,
+      "median": 148.9147786051035,
+      "p95": 151.03908944875002,
+      "min": 145.4086322337389,
+      "max": 151.47948544472456
+    },
+    "per_token_ms": {
+      "mean": 7.4357490334659815,
+      "median": 7.445738930255175,
+      "p95": 7.551954472437501,
+      "min": 7.270431611686945,
+      "max": 7.573974272236228
+    },
+    "throughput_tokens_per_s": {
+      "mean": 134.5086561264627,
+      "median": 134.3050044283152,
+      "p95": 136.97175715046654,
+      "min": 132.0310795965707,
+      "max": 137.54341604596593
+    }
+  },
+  "device": "NVIDIA L4",
+  "dtype": "float16",
+  "backend": "local",
+  "djinn_server": null,
+  "seed": 42,
+  "library_versions": {
+    "torch": "2.9.0+cu128",
+    "transformers": "4.57.1"
+  },
+  "meta": {
+    "prompt_file": null,
+    "prompt_text": null,
+    "sample_gpu": false
+  }
+}

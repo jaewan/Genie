@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from typing import Dict, Any, Union
 
-from djinn.core.graph import ComputationGraph
+from djinn.core.graph_interface import Graph as DjinnGraph
 from .pattern_registry import PatternRegistry
 from .workload import WorkloadProfile, WorkloadType, WorkloadClassifier
 from .hooks import HookManager
@@ -59,13 +59,26 @@ class SemanticAnalyzer:
 		self._analysis_stats: Dict[str, float] = {}
 
 	@track_performance
-	def analyze_graph(self, graph) -> WorkloadProfile:
-		"""Analyze graph with performance tracking and advanced algorithms."""
+	def analyze_graph(self, graph: DjinnGraph) -> WorkloadProfile:
+		"""Analyze graph with performance tracking and advanced algorithms.
+		
+		Args:
+			graph: Unified Graph interface (DjinnGraph)
+		"""
 		start_time = time.perf_counter()
 		logger = logging.getLogger(__name__)
 		
+		# Check if profiler is available
+		try:
+			from djinn.server.profiling_context import ProfilingContext
+			profiler = ProfilingContext.get_current()
+			profiler_active = profiler is not None
+		except (ImportError, AttributeError):
+			profiler_active = False
+			profiler = None
+		
+		# ✅ PHASE 3: Use unified Graph interface with stable_id()
 		# Stable graph-id caching (best-effort in-process)
-		# Note: Currently only supports ComputationGraph hashing
 		cache_enabled = os.getenv("GENIE_ANALYZER_CACHE", "1") == "1"
 		graph_id: str | None = None
 		if profiler_active:
@@ -75,9 +88,10 @@ class SemanticAnalyzer:
 			graph_id_context = None
 		
 		try:
-			if cache_enabled and isinstance(graph, ComputationGraph):
+			if cache_enabled:
 				try:
-					graph_id = compute_graph_id(graph)
+					# Use unified stable_id() method from Graph interface
+					graph_id = graph.stable_id()
 				except Exception:
 					graph_id = None
 					logger.debug("Graph ID computation failed", exc_info=True)

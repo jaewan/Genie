@@ -1,0 +1,235 @@
+{
+  "config": "Evaluation/exp5_1_overhead/configs/overhead_hf_smoke.yaml",
+  "experiment": {
+    "device": "cuda:0",
+    "dtype": "float16",
+    "runs": 2,
+    "warmup_runs": 1,
+    "tag": "hf_smoke",
+    "result_dir": "Evaluation/exp5_1_overhead/results",
+    "reference_baseline": "native_pytorch",
+    "blind_baseline": "semantic_blind",
+    "target_baseline": "full_djinn"
+  },
+  "workload": {
+    "workload": "hf_tiny_gpt2",
+    "category": "sequential",
+    "timestamp": "2025-11-24T19:39:43.453895+00:00",
+    "results": [
+      {
+        "baseline": "native_pytorch",
+        "runner_type": "local_synthetic",
+        "runs": [
+          {
+            "run_id": 1,
+            "latency_ms": 149.98896420001984,
+            "input_mb": 0.00048828125,
+            "output_mb": 0.000732421875,
+            "total_data_mb": 0.001220703125,
+            "units_processed": 32.0,
+            "throughput_units_per_s": 213.3490298481291
+          },
+          {
+            "run_id": 2,
+            "latency_ms": 153.14767230302095,
+            "input_mb": 0.00048828125,
+            "output_mb": 0.000732421875,
+            "total_data_mb": 0.001220703125,
+            "units_processed": 32.0,
+            "throughput_units_per_s": 208.9486540590978
+          }
+        ],
+        "aggregates": {
+          "latency_ms": {
+            "mean": 151.5683182515204,
+            "median": 151.5683182515204,
+            "p95": 152.9897368978709,
+            "min": 149.98896420001984,
+            "max": 153.14767230302095
+          },
+          "throughput_units_per_s": {
+            "mean": 211.14884195361344,
+            "median": 211.14884195361344,
+            "p95": 209.16867284854936,
+            "min": 208.9486540590978,
+            "max": 213.3490298481291
+          },
+          "total_data_mb": {
+            "mean": 0.001220703125,
+            "median": 0.001220703125,
+            "p95": 0.001220703125,
+            "min": 0.001220703125,
+            "max": 0.001220703125
+          }
+        },
+        "metadata": {
+          "unit_name": "tokens",
+          "device": "cuda:0",
+          "dtype": "float16",
+          "spec": {
+            "model_id": "sshleifer/tiny-gpt2",
+            "prompt_text": "Djinn keeps KV caches remote while preserving semantic intent.",
+            "prompt_length": 64,
+            "new_tokens": 32,
+            "batch_size": 1,
+            "unit_name": "tokens",
+            "generation": {
+              "do_sample": false,
+              "temperature": 0.0,
+              "top_p": 1.0
+            }
+          },
+          "baseline": "native_pytorch",
+          "runner_type": "local_synthetic"
+        },
+        "derived": {}
+      },
+      {
+        "baseline": "semantic_blind",
+        "runner_type": "remote_djinn",
+        "runs": [
+          {
+            "run_id": 1,
+            "latency_ms": 53.95037308335304,
+            "input_mb": 0.0009765625,
+            "output_mb": 12.269775390625,
+            "total_data_mb": 12.270751953125,
+            "units_processed": 50257.0,
+            "throughput_units_per_s": 931541.2874412045
+          },
+          {
+            "run_id": 2,
+            "latency_ms": 44.54765375703573,
+            "input_mb": 0.0009765625,
+            "output_mb": 12.269775390625,
+            "total_data_mb": 12.270751953125,
+            "units_processed": 50257.0,
+            "throughput_units_per_s": 1128162.669892857
+          }
+        ],
+        "aggregates": {
+          "latency_ms": {
+            "mean": 49.24901342019439,
+            "median": 49.24901342019439,
+            "p95": 45.0177897233516,
+            "min": 44.54765375703573,
+            "max": 53.95037308335304
+          },
+          "throughput_units_per_s": {
+            "mean": 1029851.9786670308,
+            "median": 1029851.9786670308,
+            "p95": 1118331.6007702746,
+            "min": 931541.2874412045,
+            "max": 1128162.669892857
+          },
+          "total_data_mb": {
+            "mean": 12.270751953125,
+            "median": 12.270751953125,
+            "p95": 12.270751953125,
+            "min": 12.270751953125,
+            "max": 12.270751953125
+          }
+        },
+        "metadata": {
+          "unit_name": "tokens",
+          "device": "cpu",
+          "dtype": "float32",
+          "spec": {
+            "model_id": "sshleifer/tiny-gpt2",
+            "prompt_text": "Djinn keeps KV caches remote while preserving semantic intent.",
+            "prompt_length": 64,
+            "new_tokens": 32,
+            "batch_size": 1,
+            "unit_name": "tokens",
+            "generation": {
+              "do_sample": false,
+              "temperature": 0.0,
+              "top_p": 1.0
+            }
+          },
+          "baseline": "semantic_blind",
+          "runner_type": "remote_djinn",
+          "semantic_aware": false
+        },
+        "derived": {
+          "latency_overhead_pct_vs_native_pytorch": -67.50705293274548
+        }
+      },
+      {
+        "baseline": "full_djinn",
+        "runner_type": "remote_djinn",
+        "runs": [
+          {
+            "run_id": 1,
+            "latency_ms": 56.7343020811677,
+            "input_mb": 0.0009765625,
+            "output_mb": 12.269775390625,
+            "total_data_mb": 12.270751953125,
+            "units_processed": 50257.0,
+            "throughput_units_per_s": 885830.9374829207
+          },
+          {
+            "run_id": 2,
+            "latency_ms": 44.55237928777933,
+            "input_mb": 0.0009765625,
+            "output_mb": 12.269775390625,
+            "total_data_mb": 12.270751953125,
+            "units_processed": 50257.0,
+            "throughput_units_per_s": 1128043.009226792
+          }
+        ],
+        "aggregates": {
+          "latency_ms": {
+            "mean": 50.643340684473515,
+            "median": 50.643340684473515,
+            "p95": 45.16147542744875,
+            "min": 44.55237928777933,
+            "max": 56.7343020811677
+          },
+          "throughput_units_per_s": {
+            "mean": 1006936.9733548564,
+            "median": 1006936.9733548564,
+            "p95": 1115932.4056395984,
+            "min": 885830.9374829207,
+            "max": 1128043.009226792
+          },
+          "total_data_mb": {
+            "mean": 12.270751953125,
+            "median": 12.270751953125,
+            "p95": 12.270751953125,
+            "min": 12.270751953125,
+            "max": 12.270751953125
+          }
+        },
+        "metadata": {
+          "unit_name": "tokens",
+          "device": "cpu",
+          "dtype": "float32",
+          "spec": {
+            "model_id": "sshleifer/tiny-gpt2",
+            "prompt_text": "Djinn keeps KV caches remote while preserving semantic intent.",
+            "prompt_length": 64,
+            "new_tokens": 32,
+            "batch_size": 1,
+            "unit_name": "tokens",
+            "generation": {
+              "do_sample": false,
+              "temperature": 0.0,
+              "top_p": 1.0
+            }
+          },
+          "baseline": "full_djinn",
+          "runner_type": "remote_djinn",
+          "semantic_aware": true
+        },
+        "derived": {
+          "latency_overhead_pct_vs_native_pytorch": -66.58711974330063,
+          "speedup_vs_semantic_blind": 0.9724677075912844,
+          "data_savings_pct_vs_semantic_blind": 0.0,
+          "semantic_efficiency_ratio": -0.0
+        }
+      }
+    ]
+  },
+  "generated_at": "20251124T193943Z"
+}

@@ -27,7 +27,7 @@ import logging
 import threading
 import time
 import uuid
-from typing import Dict, Set, Optional, Tuple
+from typing import Dict, Set, Optional, Tuple, Callable, List
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -89,6 +89,7 @@ class SessionManager:
         self.heartbeat_timeout_secs = heartbeat_timeout_secs
         self.sessions: Dict[str, SessionLease] = {}
         self.lock = threading.Lock()
+        self.cleanup_callbacks: List[Callable[[str], None]] = []
         
         # Statistics
         self.stats = {
@@ -109,6 +110,21 @@ class SessionManager:
         logger.info(
             f"✅ SessionManager initialized (timeout={heartbeat_timeout_secs}s)"
         )
+
+    def register_cleanup_callback(self, callback: Callable[[str], None]) -> None:
+        """
+        Register a callback invoked when a session is killed/cleaned.
+
+        Args:
+            callback: Callable that accepts session_id.
+        """
+        if not callable(callback):
+            raise ValueError("cleanup callback must be callable")
+
+        with self.lock:
+            if callback in self.cleanup_callbacks:
+                return
+            self.cleanup_callbacks.append(callback)
     
     def create_session(self) -> str:
         """
@@ -233,32 +249,42 @@ class SessionManager:
         Returns:
             Number of refs cleaned up
         """
+        callbacks: List[Callable[[str], None]] = []
         with self.lock:
             if session_id not in self.sessions:
                 return 0
-            
+
             lease = self.sessions[session_id]
-            
+
             # Release all refs
             count = len(lease.refs)
-            
+
             logger.info(
                 f"Killing session {session_id}: "
                 f"cleaning {count} refs"
             )
-            
+
             # Mark as dead
             lease.state = SessionState.DEAD
             lease.refs.clear()
             lease.reference_count.clear()
-            
+
             # Can optionally keep for audit trail or delete immediately
             # For now, just mark as dead
             lease.state = SessionState.CLEANED
-            
+
             self.stats['sessions_killed'] += 1
-            
-            return count
+            callbacks = list(self.cleanup_callbacks)
+
+        for callback in callbacks:
+            try:
+                callback(session_id)
+            except Exception as exc:
+                logger.error(
+                    f"Session cleanup callback failed for {session_id}: {exc}"
+                )
+
+        return count
     
     def _monitor_loop(self):
         """Background thread monitoring heartbeats."""

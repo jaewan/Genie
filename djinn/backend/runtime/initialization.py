@@ -192,14 +192,24 @@ async def init_async(
     """
     with _runtime_state.initialization_lock:
         if _runtime_state.initialized:
-            logger.debug("Djinn already initialized")
-            return {
-                'status': 'success',
-                'initialized': True,
-                'server_address': _runtime_state.server_address,
-                'gpu_count': _runtime_state.gpu_capabilities.get('gpu_count') if _runtime_state.gpu_capabilities else None,
-                'duration_ms': (_runtime_state.init_end_time - _runtime_state.init_start_time) * 1000 if _runtime_state.init_end_time else None,
-            }
+            # Check if coordinator is actually available (might be None if connection failed)
+            if _runtime_state.coordinator is not None:
+                logger.debug("Djinn already initialized with coordinator")
+                return {
+                    'status': 'success',
+                    'initialized': True,
+                    'server_address': _runtime_state.server_address,
+                    'gpu_count': _runtime_state.gpu_capabilities.get('gpu_count') if _runtime_state.gpu_capabilities else None,
+                    'duration_ms': (_runtime_state.init_end_time - _runtime_state.init_start_time) * 1000 if _runtime_state.init_end_time else None,
+                }
+            else:
+                # Initialized but coordinator is None - this can happen if:
+                # 1. Connection failed in previous initialization
+                # 2. We're in a new event loop and coordinator from old loop isn't accessible
+                # Re-initialize to ensure coordinator is available in current context
+                logger.debug("Djinn marked initialized but coordinator missing, re-initializing...")
+                _runtime_state.initialized = False
+                _runtime_state.initialization_task = None
         
         if _runtime_state.initialization_task is not None:
             # Already in progress, wait for it
@@ -368,7 +378,11 @@ async def _genie_init_async_impl(
                 # ✅ NEW: Warm up GPU on server (one-time, benefits all clients)
                 logger.info("[6/7] Warming up GPU on server...")
                 try:
-                    warmup_response = await coordinator.warmup_remote_gpu()
+                    # Add timeout to prevent hanging
+                    warmup_response = await asyncio.wait_for(
+                        coordinator.warmup_remote_gpu(),
+                        timeout=5.0  # 5 second timeout
+                    )
                     if warmup_response.get('status') == 'success':
                         if warmup_response.get('already_warmed'):
                             logger.info("  ✓ GPU already warmed up (shared across clients)")
@@ -376,6 +390,9 @@ async def _genie_init_async_impl(
                             logger.info("  ✓ GPU warmed up successfully (one-time, shared)")
                     else:
                         logger.warning(f"  ⚠️  GPU warmup failed: {warmup_response.get('message', 'Unknown error')}")
+                except asyncio.TimeoutError:
+                    logger.warning("  ⚠️  GPU warmup timed out (non-critical, continuing)")
+                    # Don't fail initialization - warmup is optional
                 except Exception as e:
                     logger.warning(f"  ⚠️  GPU warmup failed: {e}")
                     # Don't fail initialization - warmup is optional

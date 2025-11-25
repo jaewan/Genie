@@ -16,6 +16,7 @@ import json
 import numpy as np
 import time
 import uuid
+import concurrent.futures
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Any
 
@@ -27,6 +28,8 @@ from .capability_provider import CapabilityProvider
 from ..core.metadata_types import ResultMetadata, ErrorMetadata, create_result_metadata, create_error_metadata
 from ..backend.runtime.unified_vmu import get_vmu
 from .qos import BasicQosScheduler, QoSClass
+from .session_manager import get_session_manager
+from .multi_tenant.kv_session_manager import get_kv_session_manager
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +108,19 @@ class DjinnServer:
         self.qos_scheduler: Optional[BasicQosScheduler] = None
         self._default_qos_class: QoSClass = QoSClass.INTERACTIVE
         self._configure_qos_scheduler()
+        
+        # Tenant resource policy (Phase 1: multi-tenant isolation)
+        from .tenant_resource_policy import TenantResourcePolicy, TenantLimits
+        self.tenant_resource_policy = TenantResourcePolicy()
+        self._configure_default_tenants()
+        
+        # PHASE 2: Background registration infrastructure
+        self._registration_queue: Optional[asyncio.Queue] = None
+        self._registration_workers: List[asyncio.Task] = []
+        self._registration_locks: Dict[str, asyncio.Lock] = {}  # fingerprint -> Lock
+        self._registration_executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
+        self._registration_enabled = True  # Can be disabled for testing
+        self._configure_registration_backend()
 
     def _configure_qos_scheduler(self) -> None:
         """Initialize the QoS scheduler if enabled in config."""
@@ -123,6 +139,7 @@ class DjinnServer:
             self.qos_scheduler = BasicQosScheduler(
                 max_concurrency=max(1, qos_cfg.qos_max_concurrency),
                 class_shares=qos_cfg.qos_class_shares,
+                escalation_delay_ms=qos_cfg.qos_escalation_delay_ms,
             )
             logger.info(
                 "QoS scheduler enabled (max_concurrency=%d)",
@@ -131,6 +148,151 @@ class DjinnServer:
         except Exception as qos_error:
             logger.error(f"Failed to initialize QoS scheduler: {qos_error}")
             self.qos_scheduler = None
+    
+    def _configure_default_tenants(self) -> None:
+        """Set up default tenant limits."""
+        from .tenant_resource_policy import TenantLimits
+        
+        # Default tenant (for backward compatibility)
+        self.tenant_resource_policy.configure_tenant('default', TenantLimits(
+            max_vram_gb=40.0,
+            max_concurrent_requests=10,
+            priority=1,
+        ))
+        
+        logger.info("Tenant resource policy initialized with default tenant")
+    
+    def _configure_registration_backend(self) -> None:
+        """PHASE 2: Configure background registration infrastructure."""
+        if not self._registration_enabled:
+            logger.info("Registration backend disabled (testing mode)")
+            return
+        
+        # Create registration queue and workers
+        self._registration_queue = asyncio.Queue(maxsize=100)  # Limit queue size
+        
+        # Thread pool for CPU-bound work (HuggingFace loading, deserialization)
+        self._registration_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=2,
+            thread_name_prefix="djinn-registration"
+        )
+        
+        # Start background registration workers
+        num_workers = 2  # Concurrent registration workers
+        for i in range(num_workers):
+            worker_task = asyncio.create_task(
+                self._registration_worker(f"worker-{i}")
+            )
+            self._registration_workers.append(worker_task)
+        
+        logger.info(
+            f"PHASE 2: Registration backend initialized "
+            f"({num_workers} workers, thread pool: {self._registration_executor._max_workers} threads)"
+        )
+    
+    async def _registration_worker(self, worker_name: str) -> None:
+        """PHASE 2: Background worker for processing registration requests."""
+        logger.debug(f"Registration worker {worker_name} started")
+        
+        while True:
+            try:
+                # Get registration request from queue
+                request_data = await self._registration_queue.get()
+                
+                # Unpack request data
+                request = request_data['request']
+                response_future = request_data['future']
+                client_addr = request_data.get('client_addr', 'unknown')
+                
+                try:
+                    # Process registration
+                    result = await self._handle_register_model_binary(request)
+                    
+                    # Send result back via future
+                    if not response_future.cancelled():
+                        response_future.set_result(result)
+                    
+                except Exception as e:
+                    logger.error(
+                        f"Registration worker {worker_name} failed for {client_addr}: {e}",
+                        exc_info=True
+                    )
+                    error_result = {
+                        'status': 'error',
+                        'message': f'Registration failed: {str(e)}'
+                    }
+                    if not response_future.cancelled():
+                        response_future.set_result(error_result)
+                
+                finally:
+                    # Mark task as done
+                    self._registration_queue.task_done()
+                    
+            except asyncio.CancelledError:
+                logger.info(f"Registration worker {worker_name} cancelled")
+                break
+            except Exception as e:
+                logger.error(f"Registration worker {worker_name} error: {e}", exc_info=True)
+                # Continue processing other requests
+    
+    def _estimate_vram_usage(self, fingerprint: str, inputs: Dict) -> float:
+        """
+        Estimate VRAM usage for request (conservative heuristic).
+        
+        IMPORTANT: This is a CONSERVATIVE heuristic for Phase 1.
+        Better to reject slightly early than to OOM.
+        
+        Strategy:
+        1. Check cache for known models (use actual measured VRAM if available)
+        2. Use input size as proxy if unknown (heuristic)
+        3. Add conservative buffer for safety
+        
+        TODO (Phase 2+): Refine estimation using actual VMU telemetry
+        - Log estimate vs actual VRAM usage
+        - Build model-specific estimation functions
+        - Use historical data for better accuracy
+        """
+        # Check if model is registered and has cached VRAM estimate
+        if fingerprint and self._model_handler:
+            try:
+                model_ref = self._model_handler.model_cache.get_model_reference(fingerprint)
+                if model_ref is not None:
+                    cached_vram = getattr(model_ref, '_djinn_vram_gb', None)
+                    if cached_vram is not None:
+                        logger.debug(f"Using cached VRAM estimate for {fingerprint[:8]}: {cached_vram:.2f}GB")
+                        return cached_vram
+            except Exception as e:
+                logger.debug(f"Could not get cached VRAM estimate: {e}")
+        
+        # Estimate from input size (heuristic - will be refined in Phase 2)
+        try:
+            import torch
+            input_bytes = sum(
+                t.numel() * t.element_size() 
+                for t in inputs.values() 
+                if isinstance(t, torch.Tensor)
+            )
+            
+            # Conservative rule of thumb: 10x input size for activations
+            # (This is rough - actual usage varies significantly by model architecture)
+            estimate_gb = (input_bytes * 10) / (1024**3)
+            
+            # Add conservative safety buffer (50% overhead)
+            # Better to reject slightly early than to OOM
+            final_estimate = estimate_gb * 1.5
+            
+            logger.debug(
+                f"VRAM estimate for {fingerprint[:8] if fingerprint else 'unknown'}: "
+                f"input={input_bytes/(1024**2):.1f}MB, "
+                f"estimate={final_estimate:.2f}GB "
+                f"(heuristic - will be refined with actual telemetry)"
+            )
+            
+            return final_estimate
+        except Exception as e:
+            logger.warning(f"Error estimating VRAM from inputs: {e}")
+            # Very conservative default: assume 1GB
+            return 1.0
 
     async def start(self) -> bool:
         """Start the Djinn server."""
@@ -151,69 +313,73 @@ class DjinnServer:
             except Exception as init_err:
                 logger.warning(f"⚠️  Failed to initialize server state GPU context: {init_err}")
 
-            # 2. Start TCP server for listening to incoming operation requests
-            logger.info("Starting TCP server for operation requests...")
-            import asyncio
-            # Configure socket options for high-performance network transfer
-            async def optimize_connection(reader, writer):
-                """Optimize incoming connection with Phase 3 TCP optimizations."""
-                import socket
-                sock = writer.get_extra_info('socket')
-                if sock:
-                    try:
-                        # 1. Disable Nagle's algorithm (reduce latency)
-                        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                        
-                        # 2. Increase send buffer to 16MB (better TCP window utilization)
-                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 16 * 1024 * 1024)
-                        
-                        # 3. Increase receive buffer to 16MB (better TCP window utilization)
-                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16 * 1024 * 1024)
-                        
-                        # 4. Enable TCP window scaling (Linux-specific)
+            if os.getenv("GENIE_SKIP_TCP_GATEWAY", "0") == "1":
+                logger.info("Skipping built-in TCP gateway (GENIE_SKIP_TCP_GATEWAY=1)")
+            else:
+                # 2. Start TCP server for listening to incoming operation requests
+                logger.info("Starting TCP server for operation requests...")
+                # Configure socket options for high-performance network transfer
+                async def optimize_connection(reader, writer):
+                    """Optimize incoming connection with Phase 3 TCP optimizations."""
+                    import socket
+                    sock = writer.get_extra_info('socket')
+                    if sock:
                         try:
-                            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_WINDOW_CLAMP, 64 * 1024 * 1024)  # 64MB window
-                        except (AttributeError, OSError):
-                            pass  # Not available on this system
-                        
-                        # Get actual buffer sizes (may be adjusted by OS)
-                        actual_sndbuf = sock.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF)
-                        actual_rcvbuf = sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
-                        logger.debug(
-                            f"✅ Server TCP optimized: NODELAY=1, SNDBUF={actual_sndbuf/(1024*1024):.1f}MB, "
-                            f"RCVBUF={actual_rcvbuf/(1024*1024):.1f}MB"
+                            # 1. Disable Nagle's algorithm (reduce latency)
+                            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                            
+                            # 2. Increase send buffer to 16MB (better TCP window utilization)
+                            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 16 * 1024 * 1024)
+                            
+                            # 3. Increase receive buffer to 16MB (better TCP window utilization)
+                            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16 * 1024 * 1024)
+                            
+                            # 4. Enable TCP window scaling (Linux-specific)
+                            try:
+                                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_WINDOW_CLAMP, 64 * 1024 * 1024)  # 64MB window
+                            except (AttributeError, OSError):
+                                pass  # Not available on this system
+                            
+                            # Get actual buffer sizes (may be adjusted by OS)
+                            actual_sndbuf = sock.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF)
+                            actual_rcvbuf = sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+                            logger.debug(
+                                f"✅ Server TCP optimized: NODELAY=1, SNDBUF={actual_sndbuf/(1024*1024):.1f}MB, "
+                                f"RCVBUF={actual_rcvbuf/(1024*1024):.1f}MB"
+                            )
+                        except Exception as e:
+                            logger.warning(f"⚠️  Failed to optimize server TCP socket: {e}")
+                    await self._handle_connection(reader, writer)
+                
+                # ✅ FIX: Server's main TCP handler should listen on data_port for message-type protocol
+                # This is where clients connect for REGISTER_MODEL, EXECUTE_MODEL, etc.
+                ports_to_try = [self.data_port, self.control_port, 5557, 5558, 5559, 5560]
+                self.tcp_server = None
+                actual_port = None
+
+                for port in ports_to_try:
+                    try:
+                        self.tcp_server = await asyncio.start_server(
+                            optimize_connection,
+                            '0.0.0.0',
+                            port
                         )
-                    except Exception as e:
-                        logger.warning(f"⚠️  Failed to optimize server TCP socket: {e}")
-                await self._handle_connection(reader, writer)
-            
-            # Try to start TCP server, with port fallback if needed
-            ports_to_try = [self.data_port, 5557, 5558, 5559, 5560]
-            self.tcp_server = None
-            actual_port = None
+                        actual_port = port
+                        break
+                    except OSError as e:
+                        if e.errno == 98:  # Address already in use
+                            logger.warning(f"Port {port} in use, trying next port...")
+                            continue
+                        else:
+                            raise
 
-            for port in ports_to_try:
-                try:
-                    self.tcp_server = await asyncio.start_server(
-                        optimize_connection,
-                        '0.0.0.0',
-                        port
-                    )
-                    actual_port = port
-                    break
-                except OSError as e:
-                    if e.errno == 98:  # Address already in use
-                        logger.warning(f"Port {port} in use, trying next port...")
-                        continue
-                    else:
-                        raise
+                if self.tcp_server is None:
+                    raise RuntimeError(f"Could not bind to any port in {ports_to_try}")
 
-            if self.tcp_server is None:
-                raise RuntimeError(f"Could not bind to any port in {ports_to_try}")
-
-            # Update data_port to the actual port we're using
-            self.data_port = actual_port
-            logger.info(f"✓ TCP server listening on port {self.data_port} (Phase 3: TCP_NODELAY, 16MB buffers)")
+                # Log which port we're using
+                if actual_port != self.data_port:
+                    logger.warning(f"TCP server bound to port {actual_port} instead of data_port {self.data_port}")
+                logger.info(f"✓ TCP server listening on port {actual_port} for message-type protocol (REGISTER_MODEL, EXECUTE_MODEL, etc.)")
 
             # Set up transport for handling operation requests and sending results
             from .transport.tcp_transport import TCPTransport
@@ -286,6 +452,22 @@ class DjinnServer:
 
         self.is_running = False
 
+        # PHASE 2: Cleanup registration backend
+        if self._registration_workers:
+            logger.info("Stopping registration workers...")
+            for worker in self._registration_workers:
+                worker.cancel()
+            await asyncio.gather(*self._registration_workers, return_exceptions=True)
+            self._registration_workers.clear()
+        
+        if self._registration_executor:
+            logger.info("Shutting down registration thread pool...")
+            self._registration_executor.shutdown(wait=True, timeout=5.0)
+            self._registration_executor = None
+        
+        self._registration_queue = None
+        self._registration_locks.clear()
+
         # Server doesn't use control plane for basic operation
         # if self.control_plane:
         #     await self.control_plane.stop()
@@ -337,7 +519,7 @@ class DjinnServer:
             except ValueError:
                 logger.error(
                     f"🚨 PROTOCOL ERROR: Unrecognized message type 0x{msg_type_value:02x} "
-                    f"from {addr}. Only message-type-based protocol (0x05-0x0B, 0xFF) is supported."
+                    f"from {addr}. Supported message types: 0x05-0x0E, 0xFF."
                 )
                 raise ValueError(
                     f"Invalid protocol: 0x{msg_type_value:02x} is not a supported message type."
@@ -484,6 +666,7 @@ class DjinnServer:
                         f"⚠️  Large registration message: {length} bytes ({length / (1024*1024):.1f} MB). "
                         f"If this is a small model, this might indicate protocol mismatch."
                     )
+                    logger.info(f"🔍 REGISTER_MODEL message detected: length={length} bytes, will check for binary protocol")
                 
                 logger.info(
                     f"📊 Message length: {length} bytes ({length / (1024*1024):.1f} MB, "
@@ -559,8 +742,10 @@ class DjinnServer:
                                 'inputs': inputs,
                                 'profile_id': profile_id
                             }
+                            request['_binary_protocol'] = True
                             self._normalize_qos_metadata(request, exec_options)
                             self._ensure_request_id(request)
+                            self._attach_stage_metadata(request, exec_options)
                             logger.info("✅ Binary protocol request deserialized successfully")
                             # Store request for keep-alive decision
                             self._last_request = request
@@ -570,41 +755,22 @@ class DjinnServer:
                     else:
                         # ✅ SECOND: Try secure JSON protocol (v2.0+)
                         from djinn.core.secure_serializer import SecureSerializer
+                        logger.info(f"🔍 Attempting SecureSerializer.deserialize_request() for msg_type=0x{msg_type:02x}, length={len(request_bytes)} bytes")
                         request = SecureSerializer.deserialize_request(request_bytes)
                         self._normalize_qos_metadata(request)
                         self._ensure_request_id(request)
-                        logger.info("✅ Request deserialized successfully (secure JSON format)")
+                        logger.info(f"✅ Request deserialized: type={request.get('type')}, has_weights_binary={'weights_binary' in request}, model_id={request.get('model_id', 'N/A')[:30]}, keys={list(request.keys())[:10]}")
                         # Store request for keep-alive decision
                         self._last_request = request
                 except Exception as deserialize_error:
                     logger.error(f"Failed to deserialize request: {deserialize_error}")
-                    # ✅ IMPROVEMENT: Check if pickle fallback is allowed
-                    allow_pickle_fallback = getattr(self._central_config, 'security', None)
-                    if allow_pickle_fallback and hasattr(allow_pickle_fallback, 'allow_pickle_fallback'):
-                        allow_pickle = allow_pickle_fallback.allow_pickle_fallback
-                    else:
-                        # Default: disable pickle fallback for security
-                        allow_pickle = False
-                    
-                    if allow_pickle:
-                        # Try pickle for backward compatibility (legacy clients) - SECURITY RISK
-                        try:
-                            import pickle
-                            logger.warning("⚠️  Falling back to pickle deserialization (legacy client) - SECURITY RISK")
-                            request = pickle.loads(request_bytes)
-                            logger.info(f"✅ Request deserialized successfully (pickle fallback)")
-                            # Store request for keep-alive decision
-                            self._last_request = request
-                        except Exception as pickle_error:
-                            logger.error(f"Pickle fallback also failed: {pickle_error}")
-                            raise ValueError(f"Failed to deserialize request: {deserialize_error}")
-                    else:
-                        # Pickle fallback disabled - reject legacy clients
-                        logger.error("Legacy protocol (pickle) not supported. Client must upgrade to secure protocol.")
-                        raise ValueError(
-                            f"Failed to deserialize request with secure protocol: {deserialize_error}. "
-                            "Legacy pickle protocol is disabled for security. Please upgrade client."
-                        )
+                    # ✅ REMOVED: Pickle fallback code (dead code + security risk)
+                    # Pickle fallback was disabled by default and never used.
+                    # All clients now use secure JSON + binary protocol.
+                    raise ValueError(
+                        f"Failed to deserialize request with secure protocol: {deserialize_error}. "
+                        "Legacy pickle protocol is not supported. Please upgrade client to use secure protocol."
+                    )
                 
             except asyncio.TimeoutError:
                 logger.error(f"Timeout reading message from {addr} (type={msg_type:02x})")
@@ -725,12 +891,43 @@ class DjinnServer:
             try:
                 if msg_type == MessageType.REGISTER_MODEL:
                     # ✅ OPTIMIZATION: Check if this is direct binary protocol
-                    if 'weights_binary' in request:
-                        response = await self._handle_register_model_binary(request)
+                    has_weights_binary = 'weights_binary' in request
+                    request_keys_sample = [k for k in list(request.keys())[:15] if k not in ['weights_binary', 'architecture_data']]  # Sample keys excluding large binary fields
+                    logger.info(
+                        f"   🔍 REGISTER_MODEL routing check: "
+                        f"has_weights_binary={has_weights_binary}, "
+                        f"model_id={request.get('model_id', 'N/A')[:40]}, "
+                        f"model_class={request.get('model_class', 'N/A')[:60]}, "
+                        f"sample_keys={request_keys_sample}"
+                    )
+                    if has_weights_binary:
+                        logger.info(f"   ✅ Routing to _handle_register_model_binary() - binary protocol detected")
+                        # PHASE 2: Use background queue for registration (non-blocking)
+                        if self._registration_queue is not None:
+                            # Queue for background processing
+                            response_future = asyncio.Future()
+                            try:
+                                await self._registration_queue.put({
+                                    'request': request,
+                                    'future': response_future,
+                                    'client_addr': addr
+                                })
+                                logger.debug(f"Registration queued for background processing (fingerprint={request.get('fingerprint', 'unknown')[:8]})")
+                                # Wait for background worker to complete
+                                response = await response_future
+                            except asyncio.QueueFull:
+                                logger.warning("Registration queue full, falling back to synchronous processing")
+                                response = await self._handle_register_model_binary(request)
+                        else:
+                            # Fallback to synchronous processing if queue not available
+                            response = await self._handle_register_model_binary(request)
                     else:
+                        logger.info(f"   ⚠️  Routing to _handle_register_model() - non-binary path (no weights_binary in request)")
                         response = await self._handle_register_model(request)
                 elif msg_type == MessageType.EXECUTE_MODEL:
                     response = await self._handle_execute_model(request)
+                elif msg_type == MessageType.EXECUTE_STAGE:
+                    response = await self._handle_execute_stage(request)
                 elif msg_type == MessageType.INIT_MODEL:
                     response = await self._handle_init_model(request)
                 elif msg_type == MessageType.WARMUP_GPU:
@@ -795,7 +992,8 @@ class DjinnServer:
                     response_bytes = ModelExecutionSerializer.serialize_execute_response(
                         result=result,
                         metrics=metrics,
-                        status=status
+                        status=status,
+                        message=response.get('message')
                     )
                     logger.info("✅ Response serialized using binary protocol")
                 else:
@@ -883,49 +1081,186 @@ class DjinnServer:
         Handle model registration with direct binary protocol (optimized path).
         
         This is the fast path that avoids JSON overhead and intermediate dict structures.
+        
+        PHASE 2: Now includes deduplication locks and thread pool for CPU-bound work.
         """
+        registration_start = time.time()
         try:
             fingerprint = request['fingerprint']
-            descriptor = request['descriptor']
-            weight_ids = request['weight_ids']
-            weights_binary = request['weights_binary']
-            architecture_data = request.get('architecture_data')
             
-            logger.info(f"✅ PHASE 2: Received direct binary protocol registration ({len(weights_binary) / (1024*1024):.1f} MB)")
+            # PHASE 2: Get or create lock for this fingerprint (deduplication)
+            if fingerprint not in self._registration_locks:
+                self._registration_locks[fingerprint] = asyncio.Lock()
             
-            # Deserialize binary weights
-            from djinn.core.weight_deserializer import deserialize_weights_binary
+            async with self._registration_locks[fingerprint]:
+                # PHASE 1 FIX: Check if model already registered (early return)
+                # Check again inside lock (another request may have registered it)
+                from .model_cache_v23 import get_model_cache_v23
+                model_cache = get_model_cache_v23()
+                if model_cache.get_model(fingerprint) is not None:
+                    registration_time = (time.time() - registration_start) * 1000.0
+                    logger.info(
+                        f"✅ Model {fingerprint[:8]} already registered, skipping "
+                        f"(check took {registration_time:.1f}ms)"
+                    )
+                    return {
+                        'status': 'success',
+                        'fingerprint': fingerprint,
+                        'message': 'already_registered',
+                        'registration_time_ms': registration_time
+                    }
+                
+                # Continue with registration...
+                return await self._register_model_binary_impl(request, registration_start)
+        except Exception as e:
+            logger.error(f"Registration failed: {e}", exc_info=True)
+            return {
+                'status': 'error',
+                'message': str(e)
+            }
+    
+    async def _register_model_binary_impl(self, request: Dict, registration_start: float) -> Dict:
+        """
+        PHASE 2: Internal implementation of binary registration.
+        
+        This method handles the actual registration work, which can be run in:
+        - Background worker (async)
+        - Thread pool (CPU-bound HuggingFace loading)
+        """
+        fingerprint = request['fingerprint']
+        descriptor = request['descriptor']
+        weight_ids = request['weight_ids']
+        weights_binary = request['weights_binary']
+        architecture_data = request.get('architecture_data')
+        
+        logger.info(f"✅ PHASE 2: Received direct binary protocol registration ({len(weights_binary) / (1024*1024):.1f} MB)")
+        
+        # PHASE 2: Run CPU-bound deserialization in thread pool
+        from djinn.core.weight_deserializer import deserialize_weights_binary
+        
+        if self._registration_executor:
+            # Run deserialization in thread pool (CPU-bound)
+            loop = asyncio.get_event_loop()
+            deserialize_start = time.time()
+            uncached_weights = await loop.run_in_executor(
+                self._registration_executor,
+                deserialize_weights_binary,
+                weights_binary
+            )
+            deserialize_time = (time.time() - deserialize_start) * 1000
+        else:
+            # Fallback: synchronous deserialization
             deserialize_start = time.time()
             uncached_weights = deserialize_weights_binary(weights_binary)
             deserialize_time = (time.time() - deserialize_start) * 1000
-            logger.info(f"✅ PHASE 2: Binary deserialization complete: {deserialize_time:.1f}ms for {len(uncached_weights)} weights")
-            
-            # Register using existing handler
-            from .resilient_model_handler import ResilientModelHandler
-            if self._model_handler is None:
-                self._model_handler = ResilientModelHandler(gpu_id=0)
-                if hasattr(self.executor, 'model_cache') and self.executor.model_cache:
-                    self._model_handler.model_cache = self.executor.model_cache
-            
-            registration_request = {
-                'fingerprint': fingerprint,
-                'descriptor': descriptor,
-                'weight_ids': weight_ids,
-                'uncached_weights': uncached_weights,
-                'architecture_data': architecture_data
-            }
-            
-            registration_response = await self._model_handler._register_with_recovery(registration_request)
-            
-            if registration_response.get('status') == 'success':
-                logger.info(f"✅ Model {fingerprint} registered successfully (binary protocol)")
-                return registration_response
-            else:
-                error_msg = registration_response.get('message', 'Unknown error')
-                logger.error(f"❌ Model registration failed: {error_msg}")
-                return registration_response
+        
+        logger.info(f"✅ PHASE 2: Binary deserialization complete: {deserialize_time:.1f}ms for {len(uncached_weights)} weights")
+        
+        # If model_id is provided and this is a HuggingFace model, load from HuggingFace instead
+        model_id = request.get('model_id')
+        model_class = request.get('model_class', '')
+        
+        logger.info(f"   Binary registration check: model_id={model_id}, model_class={model_class}")
+        
+        if model_id and 'transformers' in model_class:
+            # PHASE 2: Run HuggingFace loading in thread pool (CPU-bound, I/O-bound)
+            logger.info(f"   Binary registration: Loading {model_id} from HuggingFace")
+            try:
+                if self._registration_executor:
+                    # Run HuggingFace loading in thread pool
+                    loop = asyncio.get_event_loop()
+                    model = await loop.run_in_executor(
+                        self._registration_executor,
+                        self._load_huggingface_model_sync,
+                        model_id
+                    )
+                else:
+                    # Fallback: synchronous loading
+                    model = self._load_huggingface_model_sync(model_id)
                 
-        except Exception as e:
+                if model is not None:
+                    model.eval()
+                    # Register directly with ModelCacheV23 (skip ResilientModelHandler)
+                    from .model_cache_v23 import get_model_cache_v23
+                    cache_v23 = get_model_cache_v23()
+                    cache_v23.register_model(fingerprint, model, model_id)
+                    registration_time = (time.time() - registration_start) * 1000.0
+                    logger.info(
+                        f"✅ Model {fingerprint[:8]} registered via HuggingFace (binary protocol) "
+                        f"in {registration_time:.1f}ms"
+                    )
+                    return {
+                        'status': 'success',
+                        'fingerprint': fingerprint,
+                        'registration_time_ms': registration_time
+                    }
+            except Exception as hf_error:
+                logger.warning(f"   HuggingFace loading failed ({hf_error}), falling back to architecture reconstruction")
+        
+        # Fallback to architecture reconstruction
+        # Initialize model handler if needed
+        from .resilient_model_handler import ResilientModelHandler
+        if self._model_handler is None:
+            self._model_handler = ResilientModelHandler(gpu_id=0)
+            if hasattr(self.executor, 'model_cache') and self.executor.model_cache:
+                self._model_handler.model_cache = self.executor.model_cache
+        
+        registration_request = {
+            'fingerprint': fingerprint,
+            'descriptor': descriptor,
+            'weight_ids': weight_ids,
+            'uncached_weights': uncached_weights,
+            'architecture_data': architecture_data
+        }
+        
+        registration_response = await self._model_handler._register_with_recovery(registration_request)
+        
+        if registration_response.get('status') == 'success':
+            registration_time = (time.time() - registration_start) * 1000.0
+            logger.info(
+                f"✅ Model {fingerprint} registered successfully (binary protocol) "
+                f"in {registration_time:.1f}ms"
+            )
+            registration_response['registration_time_ms'] = registration_time
+            try:
+                model_ref = self._model_handler.model_cache.get_model_reference(fingerprint)
+                if model_ref is not None:
+                    from .model_cache_v23 import get_model_cache_v23
+                    cache_v23 = get_model_cache_v23()
+                    cache_v23.register_model(fingerprint, model_ref, request.get('model_id'))
+                    logger.info("✅ Model mirrored into ModelCacheV23")
+                else:
+                    logger.warning("⚠️  Model reference missing after registration; ModelCacheV23 not updated")
+            except Exception as mirror_error:
+                logger.error(f"⚠️  Failed to mirror model into ModelCacheV23: {mirror_error}")
+            return registration_response
+        else:
+            error_msg = registration_response.get('message', 'Unknown error')
+            logger.error(f"❌ Model registration failed: {error_msg}")
+            return registration_response
+    
+    def _load_huggingface_model_sync(self, model_id: str):
+        """PHASE 2: Synchronous HuggingFace model loading (runs in thread pool)."""
+        from transformers import AutoConfig, AutoModelForImageClassification, AutoModel, AutoModelForCausalLM, AutoModelForSeq2SeqLM
+        
+        config = AutoConfig.from_pretrained(model_id)
+        model_type = getattr(config, "model_type", "")
+        
+        if model_type == "whisper":
+            from transformers import WhisperForConditionalGeneration
+            return WhisperForConditionalGeneration.from_pretrained(model_id)
+        elif getattr(config, "is_encoder_decoder", False):
+            return AutoModelForSeq2SeqLM.from_pretrained(model_id)
+        elif model_type in {"resnet", "vit", "efficientnet", "convnext", "deit", "swin"}:
+            return AutoModelForImageClassification.from_pretrained(model_id)
+        else:
+            try:
+                return AutoModelForCausalLM.from_pretrained(model_id)
+            except:
+                try:
+                    return AutoModelForImageClassification.from_pretrained(model_id)
+                except:
+                    return AutoModel.from_pretrained(model_id)
             logger.error(f"❌ Binary model registration failed: {e}")
             import traceback
             logger.error(f"Traceback:\n{traceback.format_exc()}")
@@ -942,23 +1277,67 @@ class DjinnServer:
             model_class = request.get('model_class', '')
             config_dict = request.get('config')
             
-            logger.info(f"📝 Registering model {fingerprint[:8]} (v2.3)...")
+            logger.info(f"📝 Registering model {fingerprint[:8]} (v2.3) - NON-BINARY PATH")
             logger.info(f"   Model class: {model_class}")
             logger.info(f"   Model ID: {model_id}")
+            logger.info(f"   Request keys (sample): {[k for k in list(request.keys())[:20] if k not in ['weights_binary', 'architecture_data']]}")
             
             # Reconstruct model from config
             # For HuggingFace models, we can use from_pretrained
+            has_model_id = bool(model_id)
+            has_transformers_class = 'transformers' in model_class if model_class else False
+            logger.info(f"   HuggingFace check: has_model_id={has_model_id}, has_transformers_class={has_transformers_class}, will_try_hf={has_model_id and has_transformers_class}")
+            
             if model_id and 'transformers' in model_class:
                 logger.info(f"   Loading from HuggingFace: {model_id}")
-                from transformers import AutoModel, AutoModelForCausalLM
+                from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, AutoModelForSeq2SeqLM, AutoModelForImageClassification
+
+                config = None
                 try:
-                    # Try AutoModelForCausalLM first (for GPT2, etc.)
-                    model = AutoModelForCausalLM.from_pretrained(model_id)
-                except:
-                    # Fallback to AutoModel
-                    model = AutoModel.from_pretrained(model_id)
-                
+                    config = AutoConfig.from_pretrained(model_id)
+                    logger.info(
+                        "   AutoConfig loaded: model_type=%s is_encoder_decoder=%s",
+                        getattr(config, "model_type", "unknown"),
+                        getattr(config, "is_encoder_decoder", False),
+                    )
+                except Exception as config_error:
+                    logger.warning(f"   Failed to load AutoConfig for {model_id}: {config_error}")
+
+                model = None
+                if config is not None:
+                    model_type = getattr(config, "model_type", "")
+                    if model_type == "whisper":
+                        logger.info("   Detected Whisper model; using WhisperForConditionalGeneration")
+                        from transformers import WhisperForConditionalGeneration
+
+                        model = WhisperForConditionalGeneration.from_pretrained(model_id)
+                    elif getattr(config, "is_encoder_decoder", False):
+                        logger.info("   Detected encoder-decoder architecture; using AutoModelForSeq2SeqLM")
+                        model = AutoModelForSeq2SeqLM.from_pretrained(model_id)
+                    elif model_type in {"resnet", "vit", "efficientnet", "convnext", "deit", "swin"}:
+                        # Vision classification models
+                        logger.info(f"   Detected vision model (type={model_type}); using AutoModelForImageClassification")
+                        try:
+                            model = AutoModelForImageClassification.from_pretrained(model_id)
+                        except Exception as vision_error:
+                            logger.warning(f"   AutoModelForImageClassification failed ({vision_error}); falling back to AutoModel")
+                            model = AutoModel.from_pretrained(model_id)
+
+                if model is None:
+                    try:
+                        # Try AutoModelForCausalLM first (for GPT-style decoder-only models)
+                        model = AutoModelForCausalLM.from_pretrained(model_id)
+                    except Exception as causal_error:
+                        try:
+                            # Try vision models as fallback
+                            logger.info("   Trying AutoModelForImageClassification as fallback")
+                            model = AutoModelForImageClassification.from_pretrained(model_id)
+                        except Exception as vision_error:
+                            logger.warning(f"   AutoModelForImageClassification failed ({vision_error}); falling back to AutoModel")
+                            model = AutoModel.from_pretrained(model_id)
+
                 model.eval()
+                logger.info(f"   Loaded model class: {model.__class__.__name__}")
             else:
                 return {
                     'status': 'error',
@@ -1077,7 +1456,6 @@ class DjinnServer:
             
             # Execute each model's batch
             from .hybrid_executor import get_hybrid_executor
-            from .session_manager import get_session_manager
             from .model_cache_v23 import get_model_cache_v23
             
             results = {}
@@ -1113,7 +1491,8 @@ class DjinnServer:
                     model=model,
                     inputs=batch_inputs,
                     session_id=session_id,
-                    return_lazy=False
+                    return_lazy=False,
+                    execution_phase=None
                 )
                 
                 # Split batch output back to individual results
@@ -1251,7 +1630,7 @@ class DjinnServer:
             }
 
     def _normalize_qos_metadata(self, request: Dict, extras: Optional[Dict[str, Any]] = None) -> None:
-        """Normalize QoS hints provided by client metadata."""
+        """Normalize QoS hints and semantic hints provided by client metadata."""
         extras = extras or {}
         raw_qos = extras.get('qos_class') or request.get('_qos_class') or request.get('qos_class')
         if raw_qos:
@@ -1265,6 +1644,52 @@ class DjinnServer:
                 request['_deadline_ms'] = int(deadline)
             except (TypeError, ValueError):
                 pass
+        
+        # Phase 3: Extract semantic hints from extras or request
+        execution_phase = extras.get('execution_phase') or request.get('execution_phase')
+        if execution_phase:
+            request['_execution_phase'] = str(execution_phase).strip().lower()
+        
+        priority = extras.get('priority') or request.get('priority')
+        if priority is not None:
+            # Priority can be int (enum value) or string
+            try:
+                request['_priority'] = int(priority)
+            except (TypeError, ValueError):
+                # Try to map string to enum value
+                priority_map = {'background': 0, 'normal': 1, 'interactive': 2, 'realtime': 3}
+                request['_priority'] = priority_map.get(str(priority).lower(), 1)
+        
+        kv_cache_size_mb = extras.get('kv_cache_size_mb') or request.get('kv_cache_size_mb')
+        if kv_cache_size_mb is not None:
+            try:
+                request['_kv_cache_size_mb'] = float(kv_cache_size_mb)
+            except (TypeError, ValueError):
+                pass
+        
+        expected_tokens = extras.get('expected_tokens') or request.get('expected_tokens')
+        if expected_tokens is not None:
+            try:
+                request['_expected_tokens'] = int(expected_tokens)
+            except (TypeError, ValueError):
+                pass
+
+    def _attach_stage_metadata(self, request: Dict, extras: Optional[Dict[str, Any]]) -> None:
+        """Attach stage-execution metadata derived from serializer extras."""
+        if not extras:
+            return
+        stage = extras.get('stage')
+        if stage:
+            request['_stage'] = stage
+        stage_opts = extras.get('stage_options')
+        if stage_opts:
+            request['_stage_options'] = stage_opts
+        state_handle = extras.get('state_handle')
+        if state_handle:
+            request['_state_handle'] = state_handle
+        session_id = extras.get('session_id')
+        if session_id:
+            request['_session_id'] = session_id
 
     def _ensure_request_id(self, request: Dict) -> None:
         """Attach a request identifier if the client did not supply one."""
@@ -1273,6 +1698,22 @@ class DjinnServer:
 
     def _classify_qos(self, request: Dict) -> QoSClass:
         """Derive QoS class from request metadata with deadline heuristics."""
+        # Phase 3: Check semantic hints priority first
+        priority = request.get('_priority')
+        if priority is not None:
+            # Map Priority enum to QoSClass
+            # Priority: BACKGROUND=0, NORMAL=1, INTERACTIVE=2, REALTIME=3
+            priority_to_qos = {
+                0: QoSClass.BATCH,      # BACKGROUND -> BATCH
+                1: QoSClass.BATCH,      # NORMAL -> BATCH
+                2: QoSClass.INTERACTIVE, # INTERACTIVE -> INTERACTIVE
+                3: QoSClass.REALTIME,   # REALTIME -> REALTIME
+            }
+            qos_from_priority = priority_to_qos.get(priority)
+            if qos_from_priority:
+                logger.debug(f"Using QoS class from semantic priority: {qos_from_priority.value}")
+                return qos_from_priority
+        
         explicit = QoSClass.from_string(request.get('_qos_class'))
         if explicit:
             return explicit
@@ -1284,47 +1725,175 @@ class DjinnServer:
             if deadline <= 250:
                 return QoSClass.INTERACTIVE
             return QoSClass.BATCH
+    
+    def _extract_past_key_values(self, execution_result: Any) -> Optional[Any]:
+        """Extract past_key_values from execution outputs."""
+        if execution_result is None:
+            return None
 
-        return self._default_qos_class
+        if isinstance(execution_result, dict):
+            return (
+                execution_result.get('past_key_values')
+                or execution_result.get('past_key_value')
+                or execution_result.get('pkv')
+            )
+
+        if hasattr(execution_result, 'past_key_values'):
+            return getattr(execution_result, 'past_key_values')
+
+        if isinstance(execution_result, (list, tuple)) and len(execution_result) >= 2:
+            candidate = execution_result[1]
+            if isinstance(candidate, (list, tuple)):
+                return candidate
+
+        return None
 
     async def _run_with_qos(self, request: Dict) -> Dict:
-        """Execute request via QoS scheduler if enabled."""
-        qos_class = self._classify_qos(request)
-        request['_resolved_qos_class'] = qos_class.value
-
-        if not self.qos_scheduler:
-            return await self._execute_model_impl(request)
-
-        metadata = {
-            'request_id': request.get('_request_id'),
-            'fingerprint': request.get('fingerprint'),
-            'deadline_ms': request.get('_deadline_ms')
-        }
-
-        return await self.qos_scheduler.run(
-            qos_class,
-            lambda: self._execute_model_impl(request),
-            metadata=metadata
+        """Execute request via QoS scheduler if enabled, with tenant resource checks."""
+        # Extract tenant_id from request (default to 'default' for backward compatibility)
+        tenant_id = request.get('tenant_id', 'default')
+        fingerprint = request.get('fingerprint', '')
+        inputs = request.get('inputs', {})
+        
+        # Estimate VRAM needed
+        vram_estimate = self._estimate_vram_usage(fingerprint, inputs)
+        
+        # Record VRAM usage (observability)
+        try:
+            from ..core.observability import record_vram_usage
+            usage_bytes = int(vram_estimate * 1024 * 1024 * 1024)  # Convert GB to bytes
+            record_vram_usage(tenant_id, 'estimated', usage_bytes)
+        except Exception as e:
+            logger.debug(f"Failed to record VRAM usage metric: {e}")
+        
+        # Check tenant admission
+        can_admit, reason = await self.tenant_resource_policy.check_admission(
+            tenant_id,
+            vram_estimate
         )
+        
+        if not can_admit:
+            logger.warning(
+                f"Request rejected for tenant {tenant_id}: {reason} "
+                f"(fingerprint={fingerprint[:8] if fingerprint else 'unknown'})"
+            )
+            return {
+                'status': 'error',
+                'error': 'ResourceQuotaError',
+                'message': reason,
+            }
+        
+        # Reserve resources
+        await self.tenant_resource_policy.reserve_resources(tenant_id, vram_estimate)
+        
+        try:
+            # Classify QoS
+            qos_class = self._classify_qos(request) or self._default_qos_class
+            request['_resolved_qos_class'] = qos_class.value
+            
+            if not self.qos_scheduler:
+                return await self._execute_model_impl(request)
+            
+            # INSTRUMENTATION: Record queue entry time
+            queue_entry_time = time.time()
+            
+            metadata = {
+                'request_id': request.get('_request_id'),
+                'fingerprint': fingerprint,
+                'deadline_ms': request.get('_deadline_ms'),
+                'tenant_id': tenant_id,
+                # Phase 3: Include semantic hints in scheduler metadata
+                'execution_phase': request.get('_execution_phase'),
+                'priority': request.get('_priority'),
+                'kv_cache_size_mb': request.get('_kv_cache_size_mb'),
+                'expected_tokens': request.get('_expected_tokens'),
+            }
+            
+            # PHASE 1.5 FIX: Store request reference in metadata so scheduler can update it
+            metadata['_request_ref'] = request
+            
+            async def execute_with_timing():
+                # Queue latency will be set in request by scheduler before this is called
+                return await self._execute_model_impl(request)
+            
+            result = await self.qos_scheduler.run(
+                qos_class,
+                execute_with_timing,
+                metadata=metadata
+            )
+            
+            return result
+        finally:
+            # Always release resources
+            await self.tenant_resource_policy.release_resources(tenant_id, vram_estimate)
+            
+            # Update VRAM usage after release
+            try:
+                from ..core.observability import record_vram_usage
+                usage = await self.tenant_resource_policy.get_current_usage(tenant_id)
+                usage_bytes = int(usage['vram_used_gb'] * 1024 * 1024 * 1024)
+                record_vram_usage(tenant_id, 'current', usage_bytes)
+            except Exception as e:
+                logger.debug(f"Failed to record VRAM usage after release: {e}")
 
     async def _execute_model_impl(self, request: Dict) -> Dict:
         """Internal implementation of model execution (non-blocking)."""
+        executor_start = time.time()
         try:
             fingerprint = request.get('fingerprint', '')
             inputs = request.get('inputs', {})
             profile_id = request.get('profile_id')
             
-            logger.info(f"🚀 Executing model {fingerprint[:8]} via HybridExecutor (v2.3)...")
+            # Phase 3: Log semantic hints if available
+            execution_phase = request.get('_execution_phase')
+            priority = request.get('_priority')
+            session_id_from_client = request.get('_session_id')  # Client-provided session ID for decode persistence
+            
+            if execution_phase or priority is not None:
+                logger.info(
+                    f"🚀 Executing model {fingerprint[:8]} via HybridExecutor (v2.3) "
+                    f"[phase={execution_phase}, priority={priority}, session={session_id_from_client[:12] if session_id_from_client else 'new'}]..."
+                )
+            else:
+                logger.info(f"🚀 Executing model {fingerprint[:8]} via HybridExecutor (v2.3)...")
             
             # Get v2.3 components
             from .hybrid_executor import get_hybrid_executor
-            from .session_manager import get_session_manager
             from .model_cache_v23 import get_model_cache_v23
             
-            # Get or create session
+            # Get or reuse session
             session_mgr = get_session_manager()
-            session_id = session_mgr.create_session()
+            # For semantic phases, reuse client-provided session_id to persist state
+            if execution_phase in ('decode', 'prefill') and session_id_from_client:
+                session_id = session_id_from_client
+                if session_id not in session_mgr.sessions:
+                    logger.debug(f"Creating session {session_id[:12]} for phase {execution_phase}")
+                    with session_mgr.lock:
+                        from .session_manager import SessionLease
+                        lease = SessionLease(
+                            session_id=session_id,
+                            created_at=time.time(),
+                            last_heartbeat=time.time(),
+                            timeout_secs=session_mgr.heartbeat_timeout_secs
+                        )
+                        session_mgr.sessions[session_id] = lease
+                        session_mgr.stats['sessions_created'] += 1
+                else:
+                    logger.debug(f"Reusing session {session_id[:12]} for phase {execution_phase}")
+            else:
+                session_id = session_mgr.create_session()
             
+            kv_manager = None
+            kv_session = None
+            gpu_index = self.capabilities.gpu_indices[0] if (self.capabilities and self.capabilities.gpu_indices) else 0
+
+            if execution_phase in ('prefill', 'decode') and session_id:
+                kv_manager = get_kv_session_manager()
+                kv_session = await kv_manager.get_or_create(session_id, gpu_index)
+                if execution_phase == 'decode' and kv_session.kv_cache is not None:
+                    inputs = dict(inputs)
+                    inputs['past_key_values'] = kv_session.kv_cache
+
             # Get model from cache
             model_cache = get_model_cache_v23()
             model = model_cache.get_model(fingerprint)
@@ -1341,15 +1910,39 @@ class DjinnServer:
                 model=model,
                 inputs=inputs,
                 session_id=session_id,
-                return_lazy=False  # Return concrete tensors over network
+                return_lazy=False,  # Return concrete tensors over network
+                execution_phase=execution_phase
             )
+
+            if kv_manager and execution_phase in ('prefill', 'decode'):
+                kv_cache = self._extract_past_key_values(execution_result)
+                if kv_cache is not None:
+                    await kv_manager.update_kv(session_id, kv_cache)
             
-            logger.info(f"✅ Execution complete: {execution_metrics.duration_ms:.2f}ms")
+            executor_time = (time.time() - executor_start) * 1000.0
+            # PHASE 1.5 FIX: Log slow executions for investigation
+            if executor_time > 1000.0:
+                logger.warning(
+                    f"⚠️  Slow execution detected: executor_time={executor_time:.2f}ms, "
+                    f"hybrid_executor_reported={execution_metrics.duration_ms:.2f}ms, "
+                    f"fingerprint={fingerprint[:8]}"
+                )
+            else:
+                logger.info(
+                    f"✅ Execution complete: executor_time={executor_time:.2f}ms, "
+                    f"hybrid_executor_reported={execution_metrics.duration_ms:.2f}ms"
+                )
             
             result_payload = self._sanitize_result_payload(execution_result)
             vmu_stats = get_vmu().get_stats()
+            
+            # INSTRUMENTATION: Extract queue latency from request metadata
+            queue_latency_ms = request.get('_queue_latency_ms', 0.0)
+            
             response_metrics = {
                 'duration_ms': getattr(execution_metrics, 'duration_ms', 0.0),
+                'executor_time_ms': executor_time,  # INSTRUMENTATION: Total executor time
+                'queue_latency_ms': queue_latency_ms,  # INSTRUMENTATION: Time spent in queue
                 'memory_peak_mb': getattr(execution_metrics, 'memory_peak_mb', 0.0),
                 'executor': 'hybrid_v23',
                 'session_id': session_id,
@@ -1459,6 +2052,75 @@ class DjinnServer:
             logger.info(f"✅ Result stored for task {task_id}")
             # Schedule cleanup after 60s
             asyncio.create_task(self._cleanup_task(task_id))
+
+    async def _handle_execute_stage(self, request: Dict) -> Dict:
+        """Execute a semantic stage (encoder/decoder) request."""
+        try:
+            from .hybrid_executor import get_hybrid_executor, StageType
+            from .model_cache_v23 import get_model_cache_v23
+            from .state_cache import StageHandle
+            from .session_manager import get_session_manager
+
+            fingerprint = request.get('fingerprint')
+            if not fingerprint:
+                return {'status': 'error', 'message': 'fingerprint required'}
+
+            stage_name = (request.get('_stage') or request.get('stage') or '').lower()
+            if not stage_name:
+                return {'status': 'error', 'message': 'stage metadata missing'}
+
+            try:
+                stage = StageType(stage_name)
+            except ValueError:
+                return {'status': 'error', 'message': f'Unsupported stage: {stage_name}'}
+
+            inputs = request.get('inputs', {})
+            session_mgr = get_session_manager()
+            session_id = request.get('_session_id') or request.get('session_id')
+            if not session_id:
+                session_id = session_mgr.create_session()
+
+            state_payload = request.get('_state_handle')
+            state_handle = StageHandle.from_dict(state_payload) if state_payload else None
+            stage_options = request.get('_stage_options') or {}
+
+            model_cache = get_model_cache_v23()
+            model = model_cache.get_model(fingerprint)
+            if model is None:
+                return {
+                    'status': 'error',
+                    'message': f'Model {fingerprint} not found in cache'
+                }
+
+            executor = get_hybrid_executor()
+            result = await executor.execute_stage(
+                model=model,
+                stage=stage,
+                inputs=inputs,
+                session_id=session_id,
+                state_handle=state_handle,
+                state_options=stage_options,
+            )
+
+            response: Dict[str, Any] = {
+                'status': 'success',
+                'stage': stage.value,
+                'session_id': session_id,
+            }
+            if result.state_handle is not None:
+                response['state_handle'] = result.state_handle.to_dict()
+            if result.outputs is not None:
+                response['result'] = self._sanitize_result_payload(result.outputs)
+            return response
+
+        except Exception as e:
+            logger.error(f"Stage execution failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return {
+                'status': 'error',
+                'message': str(e)
+            }
     
     async def _handle_register_model_chunked(
         self, 
@@ -1486,7 +2148,11 @@ class DjinnServer:
                 'deserialized_chunks': {},  # ✅ Progressive deserialization storage (binary protocol only)
                 'deserialization_tasks': {},  # ✅ Background deserialization tasks
                 'deserialization_lock': asyncio.Lock(),  # ✅ Thread-safe access
-                'start_time': time.time()  # time is imported at top of file
+                'start_time': time.time(),  # time is imported at top of file
+                # ✅ FIX: Store HuggingFace metadata for fallback loading
+                'model_id': request.get('model_id'),
+                'model_class': request.get('model_class', ''),
+                'config': request.get('config'),
             }
             
             arch_size = len(architecture_data) if architecture_data else 0
@@ -1742,6 +2408,64 @@ class DjinnServer:
             logger.info(f"Registering model with {len(uncached_weights)} weights...")
             register_start = time.time()
             
+            # ✅ FIX: Try HuggingFace loading first if model_id is available (same as _handle_register_model)
+            model_id = reg_state.get('model_id') or request.get('model_id')
+            model_class = reg_state.get('model_class', '') or request.get('model_class', '')
+            
+            if model_id and 'transformers' in model_class:
+                logger.info(f"   Finalize: Loading {model_id} from HuggingFace (skipping architecture reconstruction)")
+                try:
+                    from transformers import AutoConfig, AutoModelForImageClassification, AutoModel, AutoModelForCausalLM, AutoModelForSeq2SeqLM
+                    
+                    config = AutoConfig.from_pretrained(model_id)
+                    model_type = getattr(config, "model_type", "")
+                    
+                    model = None
+                    if model_type == "whisper":
+                        from transformers import WhisperForConditionalGeneration
+                        model = WhisperForConditionalGeneration.from_pretrained(model_id)
+                    elif getattr(config, "is_encoder_decoder", False):
+                        model = AutoModelForSeq2SeqLM.from_pretrained(model_id)
+                    elif model_type in {"resnet", "vit", "efficientnet", "convnext", "deit", "swin"}:
+                        model = AutoModelForImageClassification.from_pretrained(model_id)
+                    else:
+                        try:
+                            model = AutoModelForCausalLM.from_pretrained(model_id)
+                        except:
+                            try:
+                                model = AutoModelForImageClassification.from_pretrained(model_id)
+                            except:
+                                model = AutoModel.from_pretrained(model_id)
+                    
+                    if model is not None:
+                        model.eval()
+                        # Register directly with ModelCacheV23 (skip ResilientModelHandler)
+                        from .model_cache_v23 import get_model_cache_v23
+                        cache_v23 = get_model_cache_v23()
+                        cache_v23.register_model(fingerprint, model, model_id)
+                        logger.info(f"✅ Model {fingerprint[:8]} registered via HuggingFace (finalize)")
+                        register_time = time.time() - register_start
+                        logger.info(f"Model registration completed in {register_time:.1f}s")
+                        
+                        # Cleanup on success
+                        if fingerprint in self._chunked_registrations:
+                            del self._chunked_registrations[fingerprint]
+                            logger.info(f"✅ Cleaned up chunked registration state for {fingerprint}")
+                        
+                        elapsed = time.time() - reg_state['start_time']
+                        logger.info(
+                            f"Chunked registration complete: {fingerprint} "
+                            f"({total_chunks} chunks, {elapsed:.1f}s)"
+                        )
+                        
+                        return {
+                            'status': 'success',
+                            'fingerprint': fingerprint
+                        }
+                except Exception as hf_error:
+                    logger.warning(f"   HuggingFace loading failed ({hf_error}), falling back to architecture reconstruction")
+            
+            # Fallback to architecture reconstruction via ResilientModelHandler
             from .resilient_model_handler import ResilientModelHandler
             if self._model_handler is None:
                 self._model_handler = ResilientModelHandler(gpu_id=0)

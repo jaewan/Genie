@@ -184,7 +184,9 @@ class MemoryAwareModelCache:
         )
         
         # Add cached weights size (from Phase 1 cache)
-        for weight_id in weight_ids.values():
+        # ✅ FIX: Handle both dict and list formats for weight_ids
+        weight_ids_iter = weight_ids.values() if isinstance(weight_ids, dict) else weight_ids
+        for weight_id in weight_ids_iter:
             if weight_id in self.weight_cache.cache_new:
                 cached_tensor = self.weight_cache.cache_new[weight_id]
                 param_bytes += cached_tensor.numel() * cached_tensor.element_size()
@@ -220,9 +222,16 @@ class MemoryAwareModelCache:
                     streams = [torch.cuda.Stream() for _ in range(num_streams)]
                     
                     # Transfer uncached weights in parallel using streams
+                    # ✅ FIX: Handle both dict and list formats for weight_ids
+                    if isinstance(weight_ids, dict):
+                        weight_ids_iter = weight_ids.items()
+                    else:
+                        # List format: weight_ids is list of param names, use param name as weight_id
+                        weight_ids_iter = [(name, name) for name in weight_ids]
+                    
                     uncached_items = [
                         (param_name, weight_id, uncached_weights[param_name])
-                        for param_name, weight_id in weight_ids.items()
+                        for param_name, weight_id in weight_ids_iter
                         if param_name in uncached_weights
                     ]
                     
@@ -260,7 +269,14 @@ class MemoryAwareModelCache:
                         logger.info(f"✅ Transferred {len(uncached_items)} weights to GPU (CUDA streams): {gpu_transfer_time:.1f}ms")
                 else:
                     # Fallback: Sequential transfer (CPU, no CUDA, or single weight)
-                    for param_name, weight_id in weight_ids.items():
+                    # ✅ FIX: Handle both dict and list formats for weight_ids
+                    if isinstance(weight_ids, dict):
+                        weight_ids_iter = weight_ids.items()
+                    else:
+                        # List format: weight_ids is list of param names, use param name as weight_id
+                        weight_ids_iter = [(name, name) for name in weight_ids]
+                    
+                    for param_name, weight_id in weight_ids_iter:
                         if param_name in uncached_weights:
                             # New weight - add to Phase 1 cache
                             weight_tensor = uncached_weights[param_name]
@@ -326,7 +342,14 @@ class MemoryAwareModelCache:
                     raise
         
         # Add cached weights to state dict
-        for param_name, weight_id in weight_ids.items():
+        # ✅ FIX: Handle both dict and list formats for weight_ids
+        if isinstance(weight_ids, dict):
+            weight_ids_iter = weight_ids.items()
+        else:
+            # List format: weight_ids is list of param names, use param name as weight_id
+            weight_ids_iter = [(name, name) for name in weight_ids]
+        
+        for param_name, weight_id in weight_ids_iter:
             if param_name not in state_dict:
                 # Get from Phase 1 cache
                 if weight_id in self.weight_cache.cache_new:
@@ -366,6 +389,14 @@ class MemoryAwareModelCache:
             f"(total cached: {self.current_memory_bytes/1024**3:.2f}GB, "
             f"total time: {total_time:.1f}ms)"
         )
+    
+    def get_model_reference(self, fingerprint: str) -> Optional[nn.Module]:
+        """
+        Return a reference to the cached model if available.
+
+        Primarily used to bridge existing caches with the VMU-backed ModelCacheV23.
+        """
+        return self.models.get(fingerprint)
     
     def init_model(self, fingerprint: str) -> bool:
         """
@@ -711,12 +742,26 @@ class MemoryAwareModelCache:
         # Optimization: Use non_blocking=True for async transfer, pinned memory when possible
         deserialize_start = time.perf_counter()
         gpu_inputs = {}
+        
+        # Get model dtype for dtype matching (critical for float16 models)
+        model_dtype = None
+        if fingerprint in self.models:
+            model = self.models[fingerprint]
+            # Try to infer model dtype from first parameter
+            for param in model.parameters():
+                if param.dtype.is_floating_point:
+                    model_dtype = param.dtype
+                    break
+        
         for key, value in inputs.items():
             if isinstance(value, dict) and 'data' in value:
                 # Deserialize from dict format
                 tensor = self._deserialize_tensor(value)
-                # Use non_blocking transfer for async CPU→GPU
-                gpu_inputs[key] = tensor.to(self.device, non_blocking=True)
+                # Convert to GPU and match model dtype if needed
+                tensor = tensor.to(self.device, non_blocking=True)
+                if model_dtype and tensor.dtype.is_floating_point and tensor.dtype != model_dtype:
+                    tensor = tensor.to(dtype=model_dtype)
+                gpu_inputs[key] = tensor
             elif isinstance(value, torch.Tensor):
                 # Direct tensor - use non_blocking for async transfer
                 # Pin memory if tensor is on CPU (faster transfer)
@@ -728,7 +773,11 @@ class MemoryAwareModelCache:
                         except RuntimeError:
                             # Memory pinning failed, continue without pinning
                             pass
-                gpu_inputs[key] = value.to(self.device, non_blocking=True)
+                tensor = value.to(self.device, non_blocking=True)
+                # Match model dtype for floating point tensors
+                if model_dtype and tensor.dtype.is_floating_point and tensor.dtype != model_dtype:
+                    tensor = tensor.to(dtype=model_dtype)
+                gpu_inputs[key] = tensor
             else:
                 # Other types (e.g., lists, scalars)
                 gpu_inputs[key] = value
