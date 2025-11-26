@@ -1,26 +1,27 @@
 """
 Enhanced Model Manager: Client-side integration for model cache system.
 
-Integrates Week 1 & Week 2 components:
-- ModelFingerprint for stable identification
-- ModelRegistry for tensor identity
-- CacheQueryClient for efficient weight transfer
-- New model cache protocol (register + execute)
-
-This is part of the redesign plan (Week 3).
+Handles explicit model registration, fingerprinting, and execution routing for
+Djinn's semantic cache pipeline.
 """
+
+from __future__ import annotations
 
 import asyncio
 import logging
 import socket
 import threading
 from collections import defaultdict
-from typing import Dict, Optional, Any, List, Tuple
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Dict, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
 
+from .fingerprint_policy import FingerprintPolicy
+
 logger = logging.getLogger(__name__)
+
 
 class ModelNotRegisteredError(RuntimeError):
     """Raised when executing a model that hasn't been registered."""
@@ -29,7 +30,7 @@ class ModelNotRegisteredError(RuntimeError):
 class _UsageTracker:
     """Simple usage tracker to back future cache policies."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._lock = threading.Lock()
         self._usage: Dict[str, int] = defaultdict(int)
 
@@ -46,40 +47,38 @@ class _UsageTracker:
             return self._usage.get(fingerprint, 0)
 
 
+class _FingerprintAdapter:
+    """Wrap FingerprintPolicy with a legacy-compatible .compute() shim."""
+
+    def __init__(self, policy: FingerprintPolicy):
+        self._policy = policy
+
+    def compute(self, model: nn.Module, model_id: Optional[str] = None) -> str:
+        fingerprint, _ = self._policy.compute_fingerprint(
+            model=model,
+            model_id=model_id,
+        )
+        return fingerprint
+
+
 class EnhancedModelManager:
     """
-    Client-side model manager for the new model cache system.
-    
-    Handles:
-    - Model fingerprinting
-    - Explicit model registration (opt-in caching)
-    - Efficient execution requests (model ID + inputs only)
-    
-    **Design Philosophy**:
-    - Explicit registration is required to use the fast path
-    - No graph fallback exists in Phase 3 (fail fast with error)
+    Client-side model manager for the semantic cache system.
     """
-    
-    def __init__(self, coordinator=None, server_address=None):
-        """
-        Initialize enhanced model manager.
-        
-        Args:
-            coordinator: DjinnCoordinator instance (optional, will get global if None)
-            server_address: Optional server address (host:port). If None, uses runtime state or default.
-        """
-        from .model_fingerprint import ModelFingerprint
+
+    def __init__(self, coordinator=None, server_address: Optional[str] = None):
         from .model_registry import get_model_registry
         from .cache_query import get_cache_query_client
-        
-        self.fingerprint = ModelFingerprint
+
+        self.fingerprint_policy = FingerprintPolicy()
+        self.fingerprint = _FingerprintAdapter(self.fingerprint_policy)
         self.registry = get_model_registry()
         self.cache_client = get_cache_query_client()
-        self._server_address = server_address  # Store explicit server address
-        
-        # Get coordinator
+        self._server_address = server_address
+
         if coordinator is None:
             from .coordinator import get_coordinator
+
             try:
                 self.coordinator = get_coordinator()
             except RuntimeError:
@@ -87,260 +86,282 @@ class EnhancedModelManager:
                 logger.warning("Coordinator not available, will use direct TCP")
         else:
             self.coordinator = coordinator
-        
-        # Track registered models
-        self.registered_models: Dict[str, Dict] = {}  # fingerprint -> registration info
-        
-        # Connection pool for TCP requests (reuse connections)
-        # Changed to support multiple concurrent connections per target
-        self._connection_pool: Dict[str, List[tuple]] = {}  # target -> [(reader, writer, last_used, error_count), ...]
-        self._connection_lock = asyncio.Lock()
-        self._connection_timeout = 60.0  # Close idle connections after 60s
-        self._max_connection_errors = 3  # Close connection after N errors
-        self._max_connections_per_target = 20  # Allow up to 20 concurrent connections per target
-        
-        # Thread pool executor for CPU-bound serialization work
-        # Use a shared executor to avoid creating too many threads
-        self._serialization_executor = ThreadPoolExecutor(
-            max_workers=min(20, (asyncio.get_event_loop().get_debug() and 4) or 8),
-            thread_name_prefix="djinn-serialize"
-        )
-        
-        # Usage tracking for analytics and future cache policies
-        self.usage_tracker = _UsageTracker()
 
-        # ✅ Local TTL cache for server addresses (Phase 3 optimization)
-        # Cache key: (fingerprint, hints_hash) -> (server_address, expires_at)
-        self._server_address_cache: Dict[tuple, tuple] = {}  # (fingerprint, hints_hash) -> (address, expires_at)
+        self.registered_models: Dict[str, Dict[str, Any]] = {}
+        self._connection_pool: Dict[str, List[tuple]] = {}
+        self._connection_lock = asyncio.Lock()
+        self._connection_timeout = 60.0
+        self._max_connection_errors = 3
+        self._max_connections_per_target = 20
+
+        loop = None
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = None
+        debug_mode = bool(loop and loop.get_debug())
+        max_workers = 4 if debug_mode else 8
+        self._serialization_executor = ThreadPoolExecutor(
+            max_workers=min(20, max_workers),
+            thread_name_prefix="djinn-serialize",
+        )
+
+        self.usage_tracker = _UsageTracker()
+        self._server_address_cache: Dict[Tuple[str, str], Tuple[str, float]] = {}
         self._cache_lock = asyncio.Lock()
         self._last_execution_metrics: Dict[str, Any] = {}
-    
+
     def _optimize_tcp_socket(self, sock) -> None:
-        """
-        Optimize TCP socket for high-throughput tensor transfer.
-        
-        Optimizations:
-        1. TCP_NODELAY: Disable Nagle's algorithm (reduce latency)
-        2. Large send/recv buffers: 16MB (better TCP window utilization)
-        3. TCP window scaling: Enable via large buffers (better throughput)
-        
-        Args:
-            sock: Socket object from writer.get_extra_info('socket')
-        """
-        import socket
         try:
-            # 1. Disable Nagle's algorithm (reduce latency for large transfers)
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            
-            # 2. Increase send buffer to 16MB (better TCP window utilization)
-            # This allows TCP to send more data before waiting for ACK
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 16 * 1024 * 1024)
-            
-            # 3. Increase receive buffer to 16MB (better TCP window utilization)
-            # This allows TCP to receive more data before sending ACK
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16 * 1024 * 1024)
-            
-            # 4. Enable TCP window scaling (Linux automatically enables if buffers are large)
-            # Explicitly set window clamp for maximum throughput
             try:
-                # TCP_WINDOW_CLAMP is Linux-specific, may not exist on all systems
-                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_WINDOW_CLAMP, 64 * 1024 * 1024)  # 64MB window
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_WINDOW_CLAMP, 64 * 1024 * 1024)
             except (AttributeError, OSError):
-                # Not available on this system, skip (large buffers are enough)
                 pass
-            
-            # 5. Get actual buffer sizes (may be adjusted by OS)
             actual_sndbuf = sock.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF)
             actual_rcvbuf = sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
-            
             logger.debug(
-                f"✅ TCP optimized: NODELAY=1, SNDBUF={actual_sndbuf/(1024*1024):.1f}MB, "
-                f"RCVBUF={actual_rcvbuf/(1024*1024):.1f}MB"
+                "✅ TCP optimized: NODELAY=1, SNDBUF=%sMB, RCVBUF=%sMB",
+                f"{actual_sndbuf/(1024*1024):.1f}",
+                f"{actual_rcvbuf/(1024*1024):.1f}",
             )
-        except Exception as e:
-            logger.warning(f"⚠️  Failed to optimize TCP socket: {e} (continuing with defaults)")
-        
-        logger.info("EnhancedModelManager initialized")
-    
+        except Exception as exc:  # pragma: no cover - safety path
+            logger.warning(f"⚠️  Failed to optimize TCP socket: {exc}")
+
     def __del__(self):
-        """Cleanup thread pool executor on destruction."""
-        if hasattr(self, '_serialization_executor'):
+        if hasattr(self, "_serialization_executor"):
             try:
                 self._serialization_executor.shutdown(wait=False)
-            except:
+            except Exception:  # pragma: no cover - best effort cleanup
                 pass
-    
-    async def register_model(self, 
-                            model: nn.Module,
-                            model_id: Optional[str] = None) -> str:
-        """
-        Explicitly register model with server for caching (opt-in).
-        
-        Registered models use the fast cache path during execution.
-        Unregistered models automatically use graph execution fallback.
-        
-        **Note**: This is an explicit opt-in operation. Models are NOT
-        automatically registered during execution.
-        
-        Args:
-            model: PyTorch model
-            model_id: Optional explicit model identifier
-        
-        Returns:
-            Model fingerprint
-        
-        Example:
-            # Register production model (explicit opt-in)
-            fingerprint = await manager.register_model(production_model)
-            
-            # Execute uses cache (fast)
-            result = await manager.execute_model(production_model, inputs)
-        """
-        
-        # Compute fingerprint
-        fingerprint = self.fingerprint.compute(model, model_id)
-        
-        # Check if already registered locally
+
+    async def register_model(self, model: nn.Module, model_id: Optional[str] = None) -> str:
+        fingerprint, metadata = self._compute_fingerprint(model, model_id=model_id)
+
         if fingerprint in self.registered_models:
-            logger.debug(f"Model {fingerprint[:8]} already registered locally")
+            logger.debug("Model %s already registered locally", fingerprint[:8])
             return fingerprint
-            
-        # Store model object for local execution
-        # In production, server would load model by fingerprint
+
+        ghost_metadata = getattr(model, "_djinn_ghost_metadata", None)
         self.registered_models[fingerprint] = {
-            'model_id': model_id,
-            'model': model,  # Store reference to model
-            'registered_at': 0
+            "model_id": model_id,
+            "model": model,
+            "registered_at": 0,
+            "fingerprint_meta": metadata,
+            "ghost_metadata": ghost_metadata,
         }
-        
-        # If we have a coordinator, register with remote server
+
         if self.coordinator:
             try:
-                # Send model to server for caching
-                # Server will load it into VMU and keep it ready
                 await self.coordinator.register_remote_model(
                     fingerprint=fingerprint,
                     model=model,
-                    model_id=model_id
+                    model_id=model_id,
+                    ghost_metadata=ghost_metadata,
                 )
-                logger.info(f"✅ Model registered on server: {fingerprint[:8]}...")
-            except Exception as e:
-                logger.warning(f"Server registration failed: {e}, model cached locally only")
+                logger.info("✅ Model registered on server: %s", fingerprint[:8])
+            except Exception as exc:
+                logger.warning("Server registration failed: %s", exc)
         else:
-            logger.info(f"✅ Model registered locally: {fingerprint[:8]}...")
-        
+            logger.info("✅ Model registered locally: %s", fingerprint[:8])
+
         return fingerprint
 
-    async def execute_model(self,
-                           model: nn.Module,
-                           inputs: Dict[str, Any],
-                           model_id: Optional[str] = None,
-                           profile_id: Optional[str] = None,
-                           hints: Optional[Dict[str, Any]] = None) -> torch.Tensor:
-        """
-        Execute model using new cache system (or fallback to graph).
-        
-        **Phase 3 Compromise**: Unregistered models fall back to graph execution
-        with heavy warnings. Pre-trained models should be registered explicitly
-        for optimal performance (9-300x faster).
-        
-        Args:
-            model: PyTorch model
-            inputs: Input tensors dict
-            model_id: Optional explicit model identifier
-            profile_id: Optional profile identifier (Phase 0 inert placeholder)
-            hints: Optional execution hints (e.g., {'qos_class': 'realtime', 'deadline_ms': 50})
-        
-        Returns:
-            Output tensor
-        """
-        
-        fingerprint = self.fingerprint.compute(model, model_id)
+    async def execute_model(
+        self,
+        model: nn.Module,
+        inputs: Dict[str, Any],
+        model_id: Optional[str] = None,
+        profile_id: Optional[str] = None,
+        hints: Optional[Dict[str, Any]] = None,
+    ) -> torch.Tensor:
+        fingerprint, _ = self._compute_fingerprint(model, model_id=model_id)
 
         if fingerprint not in self.registered_models:
             logger.warning(
-                f"⚠️  Model {fingerprint[:16]}... is not registered. "
-                f"Auto-registering now (first execution will be slow)..."
+                "⚠️  Model %s not registered; auto-registering (first run may be slow)...",
+                fingerprint[:16],
             )
-            # Auto-register on first use (shadow path)
             await self.register_model(model, model_id)
-            logger.info(f"✅ Model {fingerprint[:8]} auto-registered")
+            logger.info("✅ Model %s auto-registered", fingerprint[:8])
 
-        profile_id = None  # Phase 2 will populate this from hints/annotations
         return await self._execute_via_cache(
-            fingerprint,
-            inputs,
+            fingerprint=fingerprint,
+            inputs=inputs,
             hints=hints,
-            profile_id=profile_id
+            profile_id=profile_id,
         )
-    
-    async def _execute_via_graph(self, model, inputs):
-        # Placeholder for graph execution fallback
-        # In real implementation, this would use SubgraphExecutor
+
+    async def _execute_via_graph(self, model: nn.Module, inputs: Dict[str, Any]):
         logger.info("Executing via graph fallback (SLOW)...")
-        # Simulate network delay
         await asyncio.sleep(0.5)
-        
-        # For local simulation, just run the model
-        # This creates a valid tensor to return
         if isinstance(model, nn.Module):
-            if 'input_ids' in inputs:
-                return model(inputs['input_ids'])
-            elif 'x' in inputs:
-                return model(inputs['x'])
-            else:
-                # Try passing kwargs
-                return model(**inputs)
+            if "input_ids" in inputs:
+                return model(inputs["input_ids"])
+            if "x" in inputs:
+                return model(inputs["x"])
+            return model(**inputs)
         return torch.zeros(1)
 
-    async def _execute_via_cache(self, fingerprint, inputs, hints=None, profile_id=None):
-        # Execute model via server using model cache
-        logger.info(f"Executing via cache for {fingerprint[:8]} (FAST)...")
-        
-        # Get model from registered models
+    async def _execute_via_cache(
+        self,
+        fingerprint: str,
+        inputs: Dict[str, Any],
+        hints: Optional[Dict[str, Any]] = None,
+        profile_id: Optional[str] = None,
+    ) -> torch.Tensor:
         if fingerprint not in self.registered_models:
-            raise RuntimeError(f"Model {fingerprint} not found in registered models")
-        
-        model_info = self.registered_models[fingerprint]
-        
-        # Try remote execution first if coordinator is available
+            raise ModelNotRegisteredError(f"Model {fingerprint} not registered")
+
         if self.coordinator:
             try:
-                logger.info(f"🌐 Executing model {fingerprint[:8]} remotely...")
                 qos_hints = hints or {}
                 result, metrics = await self.coordinator.execute_remote_model(
                     fingerprint=fingerprint,
                     inputs=inputs,
                     profile_id=profile_id,
-                    qos_class=qos_hints.get('qos_class'),
-                    deadline_ms=qos_hints.get('deadline_ms'),
-                    return_metrics=True
+                    qos_class=qos_hints.get("qos_class"),
+                    deadline_ms=qos_hints.get("deadline_ms"),
+                    return_metrics=True,
                 )
                 self._last_execution_metrics = metrics or {}
                 return result
-            except Exception as e:
-                logger.warning(f"Remote execution failed: {e}, falling back to local")
-                # Fall through to local execution
-        
-        # No coordinator available - cannot execute remotely
-        # Client should not execute locally as it doesn't have the model weights
+            except Exception as exc:
+                logger.warning("Remote execution failed: %s", exc)
+
         raise RuntimeError(
             f"Cannot execute model {fingerprint}: no coordinator available. "
             "Ensure Djinn server is running and client is connected."
         )
 
+    async def execute_encoder_stage(
+        self,
+        model: nn.Module,
+        encoder_inputs: Dict[str, Any],
+        model_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        handle_metadata: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[Dict[str, Any], Optional[str]]:
+        if not self.coordinator:
+            raise RuntimeError("Coordinator unavailable for stage execution")
+
+        fingerprint, _ = self._compute_fingerprint(model, model_id=model_id)
+        if fingerprint not in self.registered_models:
+            await self.register_model(model, model_id)
+
+        result = await self.coordinator.execute_remote_stage(
+            fingerprint=fingerprint,
+            stage="encoder",
+            inputs=encoder_inputs,
+            session_id=session_id,
+            stage_options=handle_metadata,
+        )
+        return result.get("state_handle"), result.get("session_id") or session_id
+
+    async def execute_decoder_stage(
+        self,
+        model: nn.Module,
+        decoder_inputs: Dict[str, Any],
+        state_handle: Optional[Dict[str, Any]],
+        model_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> Tuple[Any, Optional[str]]:
+        if not self.coordinator:
+            raise RuntimeError("Coordinator unavailable for stage execution")
+
+        fingerprint, _ = self._compute_fingerprint(model, model_id=model_id)
+        if fingerprint not in self.registered_models:
+            await self.register_model(model, model_id)
+
+        result = await self.coordinator.execute_remote_stage(
+            fingerprint=fingerprint,
+            stage="decoder",
+            inputs=decoder_inputs,
+            session_id=session_id,
+            state_handle=state_handle,
+        )
+        return result.get("result"), result.get("session_id") or session_id
+
+    def _compute_fingerprint(
+        self,
+        model: nn.Module,
+        model_id: Optional[str] = None,
+        tenant_id: str = "default",
+        version_tag: Optional[str] = None,
+    ) -> Tuple[str, Dict[str, Any]]:
+        return self.fingerprint_policy.compute_fingerprint(
+            model=model,
+            model_id=model_id,
+            tenant_id=tenant_id,
+            version_tag=version_tag,
+        )
+
+    def _detect_framework(self, model: nn.Module) -> Optional[str]:
+        module_name = model.__class__.__module__
+        if module_name.startswith("transformers"):
+            return "transformers"
+        if module_name.startswith("torchvision"):
+            return "torchvision"
+        return None
+
+    def _serialize_tensor(self, tensor: torch.Tensor) -> Dict[str, Any]:
+        tensor_cpu = tensor.detach().cpu()
+        return {
+            "data": tensor_cpu.tolist(),
+            "shape": list(tensor_cpu.shape),
+            "dtype": str(tensor_cpu.dtype).replace("torch.", ""),
+        }
+
+    def _serialize_weights(self, weights: Dict[str, torch.Tensor]) -> Dict[str, Dict[str, Any]]:
+        return {name: self._serialize_tensor(tensor) for name, tensor in weights.items()}
+
+    def _serialize_inputs(self, inputs: Dict[str, torch.Tensor]) -> Dict[str, Dict[str, Any]]:
+        return {name: self._serialize_tensor(tensor) for name, tensor in inputs.items()}
+
+    def _deserialize_tensor(self, data: Dict[str, Any]) -> torch.Tensor:
+        dtype = self._dtype_from_string(data.get("dtype", "float32"))
+        tensor = torch.tensor(data["data"], dtype=dtype)
+        return tensor.reshape(data["shape"])
+
+    @staticmethod
+    def _dtype_from_string(dtype_str: str) -> torch.dtype:
+        mapping = {
+            "float32": torch.float32,
+            "float": torch.float32,
+            "float16": torch.float16,
+            "half": torch.float16,
+            "bfloat16": torch.bfloat16,
+            "float64": torch.float64,
+            "double": torch.float64,
+            "int64": torch.int64,
+            "long": torch.int64,
+            "int32": torch.int32,
+            "int": torch.int32,
+            "int16": torch.int16,
+            "short": torch.int16,
+            "int8": torch.int8,
+            "uint8": torch.uint8,
+            "bool": torch.bool,
+        }
+        return mapping.get(dtype_str, torch.float32)
+
     @property
     def last_execution_metrics(self) -> Dict[str, Any]:
-        """Return metrics from the most recent remote execution (if available)."""
         return self._last_execution_metrics
 
 
-# Global instance
-_global_manager: Optional[EnhancedModelManager] = None
-
 def get_model_manager() -> EnhancedModelManager:
-    """Get or create global model manager."""
     global _global_manager
-    if _global_manager is None:
-        _global_manager = EnhancedModelManager()
-    return _global_manager
+    try:
+        manager = _global_manager
+    except NameError:
+        manager = None
+    if manager is None:
+        manager = EnhancedModelManager()
+        globals()["_global_manager"] = manager
+    return manager
+
+
+_global_manager: Optional[EnhancedModelManager] = None

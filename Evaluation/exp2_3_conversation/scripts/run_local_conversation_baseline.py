@@ -29,6 +29,8 @@ if str(REPO_ROOT) not in sys.path:
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from djinn.core.ghost_loader import create_hf_ghost_model
+
 from Evaluation.common.djinn_remote import configure_remote_backend
 
 try:
@@ -132,6 +134,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sample-gpu", action="store_true")
     parser.add_argument("--nvml-interval", type=float, default=0.02)
     parser.add_argument("--save-turn-text", action="store_true")
+    parser.add_argument("--semantic-aware", action="store_true", default=True, help="Use semantic hints (default: True)")
+    parser.add_argument("--no-semantic-aware", dest="semantic_aware", action="store_false", help="Disable semantic hints (semantic-blind mode)")
+    parser.add_argument("--semantic-session", dest="semantic_use_session", action="store_true", default=True, help="Reuse session IDs for KV persistence (default: True)")
+    parser.add_argument("--no-semantic-session", dest="semantic_use_session", action="store_false", help="Disable session reuse for semantics")
     return parser.parse_args()
 
 
@@ -149,16 +155,19 @@ def prepare_model(args: argparse.Namespace):
     tokenizer = AutoTokenizer.from_pretrained(args.model_id)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_id,
-        torch_dtype=torch_dtype,
-        low_cpu_mem_usage=True,
-    )
-    # For remote execution, keep model on CPU
-    device = args.device if args.backend != "djinn" else "cpu"
-    if device != "cpu":
-        model.to(device)
+    if args.backend == "djinn":
+        model = create_hf_ghost_model(args.model_id, task="causal-lm")
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model_id,
+            torch_dtype=torch_dtype,
+            low_cpu_mem_usage=True,
+        )
+        device = args.device
+        if device != "cpu":
+            model.to(device)
     model.eval()
+    # For remote execution we keep tensors on CPU; ghost models have no weights.
     return model, tokenizer
 
 
@@ -317,6 +326,7 @@ async def generate_turn_remote(
         tokenizer,
         input_ids,
         args.max_new_tokens,
+        args,
     )
     total_ms = (time.perf_counter() - start) * 1000.0
 
@@ -344,6 +354,7 @@ async def _remote_generate_sequence(
     tokenizer,
     prompt_ids: torch.Tensor,
     new_tokens: int,
+    args: argparse.Namespace,
 ) -> tuple[torch.Tensor, int, int]:
     """Generate sequence token-by-token using remote execution."""
     generated = prompt_ids.clone()
@@ -353,14 +364,49 @@ async def _remote_generate_sequence(
     if new_tokens <= 0:
         return generated, bytes_sent, bytes_received
 
+    import djinn
+    import uuid
+    
+    semantic_aware = getattr(args, 'semantic_aware', True)
+    semantic_session_enabled = getattr(args, 'semantic_use_session', True)
+    can_persist = semantic_aware and semantic_session_enabled
+    decode_session_id = f"decode_{uuid.uuid4().hex[:12]}" if can_persist else None
+
     with torch.no_grad():
-        for _ in range(new_tokens):
-            inputs = {
-                "input_ids": generated,
-            }
+        for token_idx in range(new_tokens):
+            if can_persist:
+                if token_idx == 0:
+                    # Prefill: send entire prompt
+                    inputs = {
+                        "input_ids": generated,
+                    }
+                    phase = "prefill"
+                else:
+                    # Decode: send only the most recent token
+                    inputs = {
+                        "input_ids": generated[:, -1:],
+                    }
+                    phase = "decode"
+            else:
+                # Semantic-blind: always send full sequence
+                inputs = {
+                    "input_ids": generated,
+                }
+                phase = "decode"
+            
             bytes_sent += bytes_of_tensor(inputs["input_ids"])
 
-            result = await manager.execute_model(model, inputs)
+            if semantic_aware:
+                with djinn.session(
+                    phase=phase,
+                    priority="normal",
+                    session_id=decode_session_id if can_persist else None,
+                    expected_tokens=new_tokens - token_idx,
+                ):
+                    result = await manager.execute_model(model, inputs)
+            else:
+                result = await manager.execute_model(model, inputs)
+            
             logits = _extract_logits_from_result(result)
             bytes_received += bytes_of_tensor(logits)
 

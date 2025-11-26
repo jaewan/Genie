@@ -143,6 +143,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--nvml-interval", type=float, default=0.02)
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--save-chunk-text", action="store_true")
+    parser.add_argument("--semantic-aware", action="store_true", default=True, help="Use semantic hints (default: True)")
+    parser.add_argument("--no-semantic-aware", dest="semantic_aware", action="store_false", help="Disable semantic hints (semantic-blind mode)")
+    parser.add_argument("--semantic-session", dest="semantic_use_session", action="store_true", default=True, help="Reuse session IDs for state persistence (default: True)")
+    parser.add_argument("--no-semantic-session", dest="semantic_use_session", action="store_false", help="Disable session reuse for semantics")
     return parser.parse_args()
 
 
@@ -425,18 +429,32 @@ async def transcribe_chunks_remote(
         }.get(args.dtype, torch.float16)
         input_features = inputs_dict.input_features.to(dtype=model_dtype).contiguous()
 
+        semantic_aware = getattr(args, 'semantic_aware', True)
+        semantic_use_session = getattr(args, 'semantic_use_session', True)
+        
         if encoder_handle is None:
             encoder_inputs = {
                 "input_features": input_features,
             }
             encode_start = time.perf_counter()
-            encoder_handle, remote_session = await manager.execute_encoder_stage(
-                model,
-                encoder_inputs=encoder_inputs,
-                model_id=args.model_id,
-                session_id=remote_session,
-                handle_metadata={"chunk_id": chunk_id},
-            )
+            import djinn
+            if semantic_aware and semantic_use_session:
+                with djinn.session(phase="encode", priority="normal"):
+                    encoder_handle, remote_session = await manager.execute_encoder_stage(
+                        model,
+                        encoder_inputs=encoder_inputs,
+                        model_id=args.model_id,
+                        session_id=remote_session,
+                        handle_metadata={"chunk_id": chunk_id},
+                    )
+            else:
+                encoder_handle, remote_session = await manager.execute_encoder_stage(
+                    model,
+                    encoder_inputs=encoder_inputs,
+                    model_id=args.model_id,
+                    session_id=remote_session if semantic_use_session else None,
+                    handle_metadata={"chunk_id": chunk_id},
+                )
             encode_total_ms = (time.perf_counter() - encode_start) * 1000.0
             host_to_device_mb = bytes_of_tensor(input_features) / (1024**2)
             device_to_host_mb = 0.0
@@ -448,17 +466,28 @@ async def transcribe_chunks_remote(
             decoder_input_ids = decoder_prompt.clone()
             start = time.perf_counter()
             generated_ids = decoder_input_ids.clone()
-            for _ in range(args.max_new_tokens):
+            import djinn
+            for token_idx in range(args.max_new_tokens):
                 inputs = {
                     "decoder_input_ids": generated_ids,
                 }
-                result_payload, remote_session = await manager.execute_decoder_stage(
-                    model,
-                    decoder_inputs=inputs,
-                    state_handle=encoder_handle,
-                    model_id=args.model_id,
-                    session_id=remote_session,
-                )
+                if semantic_aware and semantic_use_session:
+                    with djinn.session(phase="decode", priority="normal", expected_tokens=args.max_new_tokens - token_idx):
+                        result_payload, remote_session = await manager.execute_decoder_stage(
+                            model,
+                            decoder_inputs=inputs,
+                            state_handle=encoder_handle,
+                            model_id=args.model_id,
+                            session_id=remote_session,
+                        )
+                else:
+                    result_payload, remote_session = await manager.execute_decoder_stage(
+                        model,
+                        decoder_inputs=inputs,
+                        state_handle=encoder_handle,
+                        model_id=args.model_id,
+                        session_id=remote_session if semantic_use_session else None,
+                    )
                 logits = _stage_payload_to_tensor(result_payload)
 
                 next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)

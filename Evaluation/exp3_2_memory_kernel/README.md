@@ -18,16 +18,23 @@ stateful sessions). Mirrors §6.3 in `docs/EvaluationPlan.md`.
 ## Usage
 ```bash
 source .venv/bin/activate
+
+# Synthetic harness (fast dev loop)
 python Evaluation/exp3_2_memory_kernel/scripts/run_memory_stress.py \
   --config Evaluation/exp3_2_memory_kernel/configs/session_stress.yaml \
-  --allocator vmu --duration 30 --output Evaluation/exp3_2_memory_kernel/results/vmu_run1.json
+  --allocator vmu --duration 30 \
+  --output Evaluation/exp3_2_memory_kernel/results/vmu_synthetic.json
+
+# Real GPU-backed harness (captures VMU metrics + diagnostics)
+python Evaluation/exp3_2_memory_kernel/scripts/run_memory_kernel.py \
+  --config Evaluation/exp3_2_memory_kernel/configs/session_stress.yaml \
+  --allocator vmu --duration 20 \
+  --output Evaluation/exp3_2_memory_kernel/results/vmu_real.json
 ```
 
-You can swap `--allocator` between `vmu`, `cudacache`, and `torch_cache`.
-
-## Next steps
-- Integrate with actual VMU API (current script uses simulated allocators to
-  confirm harness behavior).
-- Plug in device telemetry to capture real fragmentation data on the GPU.
+You can swap `--allocator` between `vmu` and `torch` for the real runner to
+compare Djinn’s segmented VMU against PyTorch’s caching allocator on the same
+GPU. The JSON payloads include timeline events, per-session fragmentation stats,
+and final VMU diagnostics for plotting.
 
 

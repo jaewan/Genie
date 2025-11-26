@@ -376,26 +376,30 @@ async def _genie_init_async_impl(
                 logger.info(f"  ✓ Connected to remote server")
                 
                 # ✅ NEW: Warm up GPU on server (one-time, benefits all clients)
-                logger.info("[6/7] Warming up GPU on server...")
-                try:
-                    # Add timeout to prevent hanging
-                    warmup_response = await asyncio.wait_for(
-                        coordinator.warmup_remote_gpu(),
-                        timeout=5.0  # 5 second timeout
-                    )
-                    if warmup_response.get('status') == 'success':
-                        if warmup_response.get('already_warmed'):
-                            logger.info("  ✓ GPU already warmed up (shared across clients)")
+                skip_warmup = os.getenv("GENIE_SKIP_REMOTE_WARMUP") in {"1", "true", "TRUE"}
+                if skip_warmup:
+                    logger.info("[6/7] Skipping GPU warmup (GENIE_SKIP_REMOTE_WARMUP set)")
+                else:
+                    logger.info("[6/7] Warming up GPU on server...")
+                    try:
+                        # Add timeout to prevent hanging
+                        warmup_response = await asyncio.wait_for(
+                            coordinator.warmup_remote_gpu(),
+                            timeout=5.0  # 5 second timeout
+                        )
+                        if warmup_response.get('status') == 'success':
+                            if warmup_response.get('already_warmed'):
+                                logger.info("  ✓ GPU already warmed up (shared across clients)")
+                            else:
+                                logger.info("  ✓ GPU warmed up successfully (one-time, shared)")
                         else:
-                            logger.info("  ✓ GPU warmed up successfully (one-time, shared)")
-                    else:
-                        logger.warning(f"  ⚠️  GPU warmup failed: {warmup_response.get('message', 'Unknown error')}")
-                except asyncio.TimeoutError:
-                    logger.warning("  ⚠️  GPU warmup timed out (non-critical, continuing)")
-                    # Don't fail initialization - warmup is optional
-                except Exception as e:
-                    logger.warning(f"  ⚠️  GPU warmup failed: {e}")
-                    # Don't fail initialization - warmup is optional
+                            logger.warning(f"  ⚠️  GPU warmup failed: {warmup_response.get('message', 'Unknown error')}")
+                    except asyncio.TimeoutError:
+                        logger.warning("  ⚠️  GPU warmup timed out (non-critical, continuing)")
+                        # Don't fail initialization - warmup is optional
+                    except Exception as e:
+                        logger.warning(f"  ⚠️  GPU warmup failed: {e}")
+                        # Don't fail initialization - warmup is optional
 
             except Exception as e:
                 logger.warning(f"  ✗ Failed to connect: {e}")

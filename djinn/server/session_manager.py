@@ -31,6 +31,9 @@ from typing import Dict, Set, Optional, Tuple, Callable, List
 from dataclasses import dataclass, field
 from enum import Enum
 
+from djinn.backend.runtime.unified_vmu import UnifiedVMU, get_vmu
+from djinn.server.memory_metrics import get_metrics as get_memory_metrics
+
 logger = logging.getLogger(__name__)
 
 
@@ -77,7 +80,12 @@ class SessionManager:
     - Memory tracking per session
     """
     
-    def __init__(self, vmu=None, heartbeat_timeout_secs: float = 300.0):
+    def __init__(
+        self,
+        vmu: Optional[UnifiedVMU] = None,
+        heartbeat_timeout_secs: float = 300.0,
+        monitor_interval_secs: float = 5.0,
+    ):
         """
         Initialize session manager.
         
@@ -85,11 +93,16 @@ class SessionManager:
             vmu: Unified VMU for memory tracking
             heartbeat_timeout_secs: Session timeout
         """
-        self.vmu = vmu
+        self.vmu = vmu or self._try_get_vmu()
+        self.metrics = get_memory_metrics()
+        self._default_session_bytes = 0
+        if self.vmu:
+            self._default_session_bytes = getattr(self.vmu, "default_session_arena_bytes", 0)
         self.heartbeat_timeout_secs = heartbeat_timeout_secs
         self.sessions: Dict[str, SessionLease] = {}
         self.lock = threading.Lock()
         self.cleanup_callbacks: List[Callable[[str], None]] = []
+        self.monitor_interval_secs = monitor_interval_secs
         
         # Statistics
         self.stats = {
@@ -126,7 +139,13 @@ class SessionManager:
                 return
             self.cleanup_callbacks.append(callback)
     
-    def create_session(self) -> str:
+    def create_session(
+        self,
+        max_session_bytes: Optional[int] = None,
+        *,
+        model_kv_bytes: Optional[int] = None,
+        expected_tokens: Optional[int] = None,
+    ) -> str:
         """
         Create new session.
         
@@ -143,7 +162,22 @@ class SessionManager:
                 timeout_secs=self.heartbeat_timeout_secs
             )
             self.stats['sessions_created'] += 1
-        
+
+        try:
+            self._reserve_session_arena(
+                session_id,
+                max_session_bytes,
+                model_kv_bytes=model_kv_bytes,
+                expected_tokens=expected_tokens,
+            )
+        except Exception as exc:
+            logger.error("Failed to reserve session arena for %s: %s", session_id, exc)
+            with self.lock:
+                self.sessions.pop(session_id, None)
+                self.stats['sessions_created'] -= 1
+            raise
+
+        self._record_session_created()
         logger.debug(f"Created session: {session_id}")
         return session_id
     
@@ -266,6 +300,8 @@ class SessionManager:
 
             # Mark as dead
             lease.state = SessionState.DEAD
+            # Increment refs_released counter for all refs being cleaned up
+            self.stats['refs_released'] += count
             lease.refs.clear()
             lease.reference_count.clear()
 
@@ -284,13 +320,21 @@ class SessionManager:
                     f"Session cleanup callback failed for {session_id}: {exc}"
                 )
 
+        if self.vmu:
+            try:
+                self.vmu.free_session_data(session_id)
+            except Exception as exc:
+                logger.error("Failed to free VMU arena for session %s: %s", session_id, exc)
+
+        self._record_session_closed(time.time() - lease.created_at)
+
         return count
     
     def _monitor_loop(self):
         """Background thread monitoring heartbeats."""
         while True:
             try:
-                time.sleep(5)  # Check every 5 seconds
+                time.sleep(self.monitor_interval_secs)
                 
                 expired_sessions = []
                 
@@ -347,15 +391,107 @@ class SessionManager:
     def cleanup_all(self) -> int:
         """Cleanup all sessions (for shutdown)."""
         with self.lock:
-            total_refs = 0
-            
-            for session_id in list(self.sessions.keys()):
-                total_refs += self.kill_session(session_id)
-            
+            sessions_to_kill = list(self.sessions.keys())
+        
+        total_refs = 0
+        for session_id in sessions_to_kill:
+            total_refs += self.kill_session(session_id)
+
+        with self.lock:
             self.sessions.clear()
         
+        self._update_session_metrics()
         logger.info(f"Cleaned up all sessions ({total_refs} refs)")
         return total_refs
+
+    def _active_session_count(self) -> int:
+        with self.lock:
+            return sum(1 for lease in self.sessions.values() if lease.state == SessionState.ACTIVE)
+
+    def _record_session_created(self) -> None:
+        if not self.metrics:
+            return
+        self.metrics.record_session_created()
+        self._update_session_metrics()
+
+    def _record_session_closed(self, lifetime_secs: float) -> None:
+        if not self.metrics:
+            return
+        self.metrics.record_session_closed(lifetime_secs)
+        self._update_session_metrics()
+
+    def _update_session_metrics(self) -> None:
+        if not self.metrics:
+            return
+        active = self._active_session_count()
+        self.metrics.set_active_sessions(active)
+        self._update_kv_pinned_bytes()
+
+    def _update_kv_pinned_bytes(self) -> None:
+        if not (self.metrics and self.vmu):
+            return
+        try:
+            vmu_metrics = self.vmu.get_metrics()
+            # Update existing KV pinned bytes metric
+            self.metrics.set_pinned_kv_bytes(vmu_metrics.data_reserved_bytes)
+            # Update new VMU metrics
+            self.metrics.set_vmu_text_metrics(
+                vmu_metrics.text_used_bytes,
+                vmu_metrics.text_capacity_bytes
+            )
+            self.metrics.set_vmu_data_metrics(
+                vmu_metrics.data_reserved_bytes,
+                vmu_metrics.data_capacity_bytes,
+                vmu_metrics.data_internal_waste_bytes,
+                vmu_metrics.data_external_gap_bytes
+            )
+            self.metrics.set_vmu_stack_metrics(
+                vmu_metrics.stack_allocated_bytes,
+                vmu_metrics.stack_capacity_bytes,
+                vmu_metrics.stack_reset_count
+            )
+            self.metrics.set_vmu_session_metrics(
+                vmu_metrics.active_sessions,
+                vmu_metrics.models_loaded
+            )
+        except Exception as exc:
+            logger.debug(f"Failed to update VMU metrics: {exc}")
+
+    def _try_get_vmu(self) -> Optional[UnifiedVMU]:
+        try:
+            return get_vmu()
+        except Exception as exc:
+            logger.warning(f"SessionManager could not initialize VMU: {exc}")
+            return None
+
+    def _estimate_session_bytes(
+        self,
+        max_session_bytes: Optional[int],
+        model_kv_bytes: Optional[int] = None,
+        expected_tokens: Optional[int] = None,
+    ) -> int:
+        if max_session_bytes:
+            return max_session_bytes
+        estimate = self._default_session_bytes
+        if model_kv_bytes and expected_tokens:
+            estimate = int(model_kv_bytes * expected_tokens * 1.2)
+        elif model_kv_bytes:
+            estimate = int(model_kv_bytes * 1.2)
+        return max(estimate, self._default_session_bytes)
+
+    def _reserve_session_arena(
+        self,
+        session_id: str,
+        max_session_bytes: Optional[int],
+        model_kv_bytes: Optional[int] = None,
+        expected_tokens: Optional[int] = None,
+    ) -> None:
+        if not self.vmu:
+            return
+        size = self._estimate_session_bytes(max_session_bytes, model_kv_bytes, expected_tokens)
+        if size <= 0:
+            return
+        self.vmu.reserve_session_arena(session_id, size)
 
 
 # Global session manager instance

@@ -21,6 +21,8 @@ from typing import Any, Dict, Optional, Set
 import torch
 import torch.nn as nn
 
+from .architecture_registry import get_architecture_registry
+
 logger = logging.getLogger(__name__)
 
 
@@ -79,8 +81,7 @@ class MemoryAwareModelCache:
         self._initialized_models: Set[str] = set()
         
         # Architecture registry
-        from .architecture_registry import HybridArchitectureRegistry
-        self.architecture_registry = HybridArchitectureRegistry()
+        self.architecture_registry = get_architecture_registry()
         
         # Reuse Phase 1 weight cache
         from .gpu_cache import get_global_cache

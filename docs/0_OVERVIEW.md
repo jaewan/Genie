@@ -1,8 +1,8 @@
 
 # Djinn: The Semantic Tensor Operating System
 
-**Status**: Production Ready (v2.3.15)  
-**Last Updated**: November 24, 2025
+**Status**: Production Ready (v2.3.15, OSDI snapshot)  
+**Last Updated**: November 25, 2025
 **Target Audience**: Systems Researchers, ML Infrastructure Engineers, Platform Architects
 
 ---
@@ -47,6 +47,8 @@ A driver-level approach (e.g., modifying CUDA) fails because it lacks semantic c
 
 ### The Framework as the Kernel
 Djinn implements the **Library OS** architecture (similar to Exokernels). It embeds itself within the application layer—specifically **PyTorch**—to bridge the gap between high-level user intent and low-level hardware execution. By intercepting execution at the framework level, Djinn acts as a **Semantic Hypervisor**, translating Python intent into optimized OS primitives.
+
+Applications express semantic intent via lightweight annotations (`djinn.session(phase='decode', priority='interactive', session_id=...)`), which the runtime translates into phase, QoS, and session metadata for the backend scheduler and memory kernel. This enables the OS to optimize placement, scheduling, and memory management based on workload semantics rather than treating all requests as generic compute.
 
 ### 2.x Theoretical Foundation
 
@@ -100,7 +102,7 @@ Djinn's implementation mirrors a classic OS pipeline: **syscalls → planner →
    The client serializes the request `(fingerprint, inputs, semantic hints)` with `ModelExecutionSerializer` into a **length-prefixed binary message**. Tensors are sent via a hybrid TCP transport that coalesces small messages and streams large ones, just as an OS network stack manages packetization and DMA.
 
 5. **Scheduler (QoS + Meta-Simulation):**  
-   On the server, each execution request is wrapped with metadata: `tenant_id`, `_qos_class` (Realtime / Interactive / Batch), and semantic hints such as `execution_phase`, `priority`, `expected_tokens`, `kv_cache_size_mb`. The **BasicQosScheduler** maintains per-class queues, enforces configurable concurrency shares, and records per-request `queue_latency_ms`. This is the analogue of a kernel runqueue with multi-class priorities and per-class concurrency limits.
+   On the server, each execution request carries semantic hints (extracted from `djinn.session()` context or explicitly provided): `execution_phase` (prefill/decode/vision), `priority`, `session_id`, `expected_tokens`, `kv_cache_size_mb`. These hints are normalized into `qos_class` (Realtime / Interactive / Batch) and used by the **BasicQosScheduler** to maintain per-class queues, enforce configurable concurrency shares, and record per-request `queue_latency_ms`. This is the analogue of a kernel runqueue with multi-class priorities and per-class concurrency limits.
 
 6. **Execution on the GPU Slab (HybridExecutor):**  
    The `HybridExecutor` takes the plan and reads weights from the **Text Segment**, allocates activations in the **Stack Slab** according to the memory plan, and writes persistent state (e.g., updated KV cache) into the **Data Segment** for the next request. When the graph completes, it **copies out** only the requested outputs from the slab, then resets the slab pointer, reclaiming the full activation region in O(1) time.
@@ -147,7 +149,7 @@ Standard allocators (like `cudaMalloc`) fragment memory when handling concurrent
 | Memory Segment | OS Analogy | Lifecycle | Implementation |
 | :--- | :--- | :--- | :--- |
 | **Text Segment** | Shared Libs | **Read-Only** | **Model Weights.** Loaded once. Mapped into the virtual address space of every user running that model. Zero duplication. |
-| **Data Segment** | Heap | **Private** | **KV-Cache & Outputs.** Owned by a specific Session ID. Persists between requests to support stateful inference (e.g., Notebooks). Security is logically enforced by Session ID checks. |
+| **Data Segment** | Heap | **Private** | **KV-Cache & Outputs.** Owned by a specific Session ID (`session_id`). KV cache is keyed by `session_id` and persists across decode tokens within the same session, enabling efficient autoregressive generation. Outputs persist between requests to support stateful inference (e.g., Notebooks). Security is logically enforced by Session ID checks. |
 | **Stack Slab** | Stack | **Volatile** | **Activations.** A massive, **256-byte aligned** scratchpad for intermediate compute. |
 
 This segmentation minimizes duplication and maximizes cache efficiency: weights (shared, immutable) in Text; session state (private, persistent) in Data; activations (private, ephemeral) in the Stack with watermark reset, guaranteeing **zero external fragmentation** for intermediate computations.
@@ -168,6 +170,14 @@ Djinn employs a hybrid concurrency model:
     *   **Text Segment:** Read-only, accessed concurrently by multiple CUDA streams.
     *   **Stack Slab:** Protected by stream synchronization. One user executes at a time per GPU stream, preventing data corruption.
 
+### 5.4 VMU v2 Enhancements (Nov 2025)
+*   **Dynamic safe capacity:** At startup the VMU now queries NVML (via `nvidia-ml-py`) to derive a `safe_capacity = min(total_free - os_reserve - safety_margin, total_memory - os_reserve)`. The new `ServerConfig` knobs (`os_reserve_gb`, `safety_margin_gb`, `min_viable_vmu_gb`, and per-segment ratios) guarantee we never enter Djinn with insufficient headroom.
+*   **Per-session arenas:** The Data segment is now an arena allocator keyed by `session_id`. Each arena enforces quotas (`kv_cache_size_mb`, per-session bytes) and can be reclaimed instantly when a session ends (`gc_session`). When the most recent arena is freed, VRAM is physically returned to the segment tail, avoiding external fragmentation entirely.
+*   **Admission control + preflight:** Evaluation entry points call `check_gpu_memory()` before launching Djinn so we abort fast if reservations cannot be honored. On the server we keep the same logic when sizing the VMU, so decode KV growth never starves the Text/Stack segments.
+*   **Observability:** The new `vmu_metrics` hook exports Text/Data/Stack utilization, session counts, and fragmentation gaps after every request. These metrics feed both the OSDI paper and our alerting pipeline.
+
+Together these upgrades explain why the CLIP "index is on cpu" bug disappeared (every buffer is now pinned into the Text segment) and why the Phase 4 load test sustained low tail latency even while LLM sessions expanded their KV caches.
+
 ---
 
 ## 6. The Virtualization Layer: Ghost Loading & Skeletonization
@@ -180,42 +190,20 @@ When a user loads a model, Djinn employs one of two strategies based on the sour
 *   **Strategy A: Ghost Interception (HuggingFace):** Djinn hooks `from_pretrained`. The client creates a "Ghost Model" on the `meta` device (0 bytes RAM). The server downloads the weights directly to the **Text Segment**.
 *   **Strategy B: Shadow Sync (Custom Models):** For user-defined architectures (e.g., `class MyNet(nn.Module)`), Djinn computes a structural hash, serializes the weights, and uploads them to the server's Text Segment in the background. This creates a "Ghost" replica for future runs.
 
-Djinn now streams those uploads asynchronously: each state dict is pinned on the CPU, copied over a dedicated CUDA stream, and the new `MetaSimulator` summaries (phase hint + lifecycle bytes + input bucket) are cached with the memory plan. This keeps registration efficient while still populating the segmented VMU slab with zero-copy transfers.
+Djinn streams those uploads asynchronously: each state dict is pinned on the CPU, copied over a dedicated CUDA stream, and the new `MetaSimulator` summaries (phase hint + lifecycle bytes + input bucket) are cached with the memory plan. This keeps registration efficient while still populating the segmented VMU slab with zero-copy transfers.
 
 ### 6.2 Output Skeletonization (Lazy I/O)
 
 LazyTensor and the SRG decide **when** and **what** to execute on the remote GPU; they do not, by themselves, control **how much** of the result is brought back to the client. For that, Djinn introduces an orthogonal optimization: **output skeletonization**.
 
-**Problem:**  
-Even with a perfectly planned execution, naïvely returning full tensors across the network is wasteful:
-*   An LLM decode step produces a `[batch, seq, vocab]` logits tensor, but the client may only ever look at `argmax(logits)` or `logits[:, -1, :]`.
-*   A CLIP or vision model produces dense feature maps, but the application typically uses a pooled embedding or a small set of scores.
+**The Problem:**  
+Even with perfectly planned execution, naïvely returning full tensors across the network is wasteful. An LLM decode step produces a `[batch, seq, vocab]` logits tensor, but the client may only need `argmax(logits)` or the sampled token. Similarly, vision models produce dense feature maps, but applications typically use pooled embeddings or classification scores.
 
-**Skeleton vs. LazyTensor:**  
-*   **LazyTensor / SRG (Frontend):** lives on the client; delays and batches *PyTorch operations* so we can plan and place compute before touching the GPU.
-*   **Skeletonization (I/O Layer):** lives on the server→network→client path; decides how much of the *already-computed* result to serialize and ship.
-*   They are complementary:
-    *   LazyTensor: "Don't execute this yet; record it."
-    *   Skeleton: "We've executed; don't ship everything yet."
+**The Solution:**  
+When skeletonization is enabled, Djinn returns the **structure** of the result (dicts/tuples) with heavy tensors replaced by **remote references**. The client can operate on these references transparently; materialization occurs only when the user accesses specific data (e.g., `logits.argmax()` or `embedding.norm()`), triggering a remote fetch of only the needed slice or reduction.
 
-**The Skeleton:**  
-When skeletonization is enabled, Djinn returns:
-*   The **structure** of the result (Python dicts/tuples/lists),
-*   With heavy tensors replaced by **remote references** (e.g., `RemoteRef` / lazy tensor stubs) that know:
-    *   Which model fingerprint and session produced them,
-    *   Which region of the VMU slab holds the data,
-    *   How to request slices or reductions on demand.
-
-**Lazy Materialization:**  
-A call like `logits.argmax(dim=-1)` or `embedding.norm()` triggers **remote materialization** of only the data actually needed: a single row, a small window, or a scalar summary. The client "thinks" it has a normal tensor-like object; Djinn ensures that the real bytes move only when the user crosses a **materialization boundary**.
-
-**Bandwidth and CPU savings:**  
-For interactive workloads, this cuts network traffic by orders of magnitude:
-*   Instead of `[batch, seq, vocab]` every token, we ship **just** top-k logits or the sampled token.
-*   For vision/multimodal models, we ship short embeddings or labels instead of full feature volumes.
-
-**Current status (v2.3):**  
-The **HybridExecutor** already supports a "lazy output mode" and can stream skeletons instead of dense tensors. For the Phase 4 evaluation harness, we mostly return concrete tensors to keep measurements and analysis straightforward. The skeletonization path is thus **implemented but not yet the default**; we treat it as an optimization tier that can be selectively enabled in future experiments and in the artifact.
+**Current Status:**  
+The **HybridExecutor** supports lazy output mode and can stream skeletons instead of dense tensors. For evaluation, we primarily return concrete tensors to keep measurements straightforward. Skeletonization is **implemented but not yet the default**; it serves as an optimization tier that can be selectively enabled.
 
 In summary, LazyTensor and the SRG minimize *compute- and allocator-side overhead*, while skeletonization minimizes *network and client materialization overhead*. Both are necessary to make a disaggregated GPU system competitive with a local, monolithic GPU.
 
@@ -238,13 +226,13 @@ Simulating the graph takes time (~50ms). To achieve sub-millisecond latency, Dji
 *   **Result:** Reduces scheduling latency from 50ms to **<0.5ms**.
 
 ### 7.3 Basic QoS Classes (Realtime / Interactive / Batch)
-Multi-tenant performance collapses when every request fights for the same slot. Djinn now exposes **three QoS classes** that can be selected explicitly (`hints={'qos_class': 'realtime'}`) or inferred from deadlines:
+Multi-tenant performance collapses when every request fights for the same slot. Djinn exposes **three QoS classes** that can be selected explicitly (`hints={'qos_class': 'realtime'}`) or inferred from deadlines:
 
 *   **Realtime:** Strict priority, capped latency, intended for token-by-token decoding or streaming speech. Reserved concurrency slices ensure a realtime request is never starved by batch uploads.
 *   **Interactive:** Default class for chatbots, notebook users, or dashboards. Shares the bulk of concurrency slots and is protected from background drains.
 *   **Batch:** Background work (offline evals, artifact builds). Runs opportunistically and yields whenever higher classes arrive.
 
-Under the hood a **Basic QoS Scheduler** keeps per-class queues, enforces configurable concurrency shares, and records per-request queue latency so we can chart SLA compliance. The scheduler is on by default (`GENIE_ENABLE_QOS=1`) but can be tuned via `GENIE_QOS_MAX_CONCURRENCY` and `GENIE_QOS_CLASS_SHARES` for different fleet profiles.
+Under the hood a **Basic QoS Scheduler** keeps per-class queues, enforces configurable concurrency shares, and records per-request queue latency so we can chart SLA compliance. The scheduler is on by default (`GENIE_ENABLE_QOS=1`) but can be tuned via `GENIE_QOS_MAX_CONCURRENCY`, `GENIE_QOS_CLASS_SHARES` (e.g., `4,3,1` for realtime/interactive/batch), and `GENIE_QOS_ESCALATION_DELAY_MS` (configured at 300 ms for the latest load test) to keep P99 in check without sacrificing throughput.
 
 ---
 
@@ -284,13 +272,18 @@ By moving from a "Network Wrapper" to a "Tensor Operating System," Djinn achieve
 | **Bandwidth** | 100% (Full Return) | **0.3%** | **99.7% Reduction** (via Skeletonization) |
 | **Fragmentation** | High (Standard Allocator) | **Zero (External)** | **Unified VMU (Slab)** |
 
-**Production Load Test Results (Phase 4):**  
-Under mixed multi-tenant workloads (LLM decode, vision classification, multimodal embeddings) with 14 concurrent users, Djinn achieves:
-*   **P50 latency:** 97.5ms
-*   **P99 latency:** 353.7ms (meets SLA target < 4000ms)
-*   **Throughput:** 4.6 req/s
-*   **Queue latency:** P50 = 5.8ms (fully instrumented)
-*   **Zero registration blocking** during steady-state execution (all models pre-registered during warmup)
+**Production Load Test Results (Phase 4 Smoke, Nov 25, 2025):**  
+With 14 concurrent users issuing LLM decode, CLIP classification, and multimodal embedding workloads through the QoS scheduler, Djinn delivered:
+*   **P50 latency:** 78.6 ms
+*   **P99 latency:** 703.8 ms (well below the 1 s realtime SLA and dramatically lower than the >4 s spikes we saw pre-fix)
+*   **Throughput:** 4.6 req/s sustained with zero failed requests (568/568 successes)
+*   **GPU utilization / memory:** 0.9 % SM, 14.6 GB VRAM in use thanks to shared Text segments
+*   **Per-class P99:** 710 ms (LLM), 608 ms (vision), <10 ms (multimodal semantic lookups), showing the class shares and escalation delay working as intended
+*   **Registration behavior:** Warmup pre-registers all 14 models in 20.7 s; zero registration stalls during steady state due to model fingerprinting + VMU pinning
+
+**Semantic-aware evaluation highlights (Week 2 refresh):**
+*   **Streaming audio (Exp 2.2, Whisper-Medium):** Fully semantic Djinn delivers ~12 % lower latency vs semantic-blind and ~99 % faster than native PyTorch thanks to encoder/decoder session reuse.
+*   **Conversational AI (Exp 2.3, DialoGPT-Small):** Semantic Djinn is ~12× faster than semantic-blind and reduces data transfer by 96 %, demonstrating the power of KV-cache placement plus Lazy Reference Engine.
 
 These results demonstrate that Djinn's OS-style architecture—with unified VMU memory management, QoS-aware scheduling, and semantic-aware planning—delivers predictable, low-latency performance even under concurrent multi-tenant load, validating the "Tensor Operating System" design philosophy.
 

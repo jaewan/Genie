@@ -274,6 +274,66 @@ learned_optimal_budgets = Gauge(
 
 
 # ============================================================================
+# VMU METRICS (PHASE 4)
+# ============================================================================
+
+vmu_text_used_bytes = Gauge(
+    'genie_vmu_text_used_bytes',
+    'VMU Text segment used bytes'
+)
+
+vmu_text_capacity_bytes = Gauge(
+    'genie_vmu_text_capacity_bytes',
+    'VMU Text segment capacity bytes'
+)
+
+vmu_data_reserved_bytes = Gauge(
+    'genie_vmu_data_reserved_bytes',
+    'VMU Data segment reserved bytes'
+)
+
+vmu_data_capacity_bytes = Gauge(
+    'genie_vmu_data_capacity_bytes',
+    'VMU Data segment capacity bytes'
+)
+
+vmu_data_internal_waste_bytes = Gauge(
+    'genie_vmu_data_internal_waste_bytes',
+    'VMU Data segment internal waste bytes'
+)
+
+vmu_data_external_gap_bytes = Gauge(
+    'genie_vmu_data_external_gap_bytes',
+    'VMU Data segment external gap bytes'
+)
+
+vmu_stack_allocated_bytes = Gauge(
+    'genie_vmu_stack_allocated_bytes',
+    'VMU Stack segment allocated bytes'
+)
+
+vmu_stack_capacity_bytes = Gauge(
+    'genie_vmu_stack_capacity_bytes',
+    'VMU Stack segment capacity bytes'
+)
+
+vmu_stack_reset_count = Gauge(
+    'genie_vmu_stack_reset_count',
+    'VMU Stack segment reset count'
+)
+
+vmu_active_sessions = Gauge(
+    'genie_vmu_active_sessions',
+    'VMU active sessions count'
+)
+
+vmu_models_loaded = Gauge(
+    'genie_vmu_models_loaded',
+    'VMU models loaded count'
+)
+
+
+# ============================================================================
 # METRICS COLLECTION HELPER
 # ============================================================================
 
@@ -439,6 +499,35 @@ class MetricsCollector:
         if self.prometheus_enabled:
             learned_optimal_budgets.labels(phase=phase, category=category).set(percent)
 
+    # VMU Metrics
+    def set_vmu_text_metrics(self, used_bytes: int, capacity_bytes: int) -> None:
+        """Set VMU Text segment metrics."""
+        if self.prometheus_enabled:
+            vmu_text_used_bytes.set(used_bytes)
+            vmu_text_capacity_bytes.set(capacity_bytes)
+
+    def set_vmu_data_metrics(self, reserved_bytes: int, capacity_bytes: int,
+                           internal_waste_bytes: int, external_gap_bytes: int) -> None:
+        """Set VMU Data segment metrics."""
+        if self.prometheus_enabled:
+            vmu_data_reserved_bytes.set(reserved_bytes)
+            vmu_data_capacity_bytes.set(capacity_bytes)
+            vmu_data_internal_waste_bytes.set(internal_waste_bytes)
+            vmu_data_external_gap_bytes.set(external_gap_bytes)
+
+    def set_vmu_stack_metrics(self, allocated_bytes: int, capacity_bytes: int, reset_count: int) -> None:
+        """Set VMU Stack segment metrics."""
+        if self.prometheus_enabled:
+            vmu_stack_allocated_bytes.set(allocated_bytes)
+            vmu_stack_capacity_bytes.set(capacity_bytes)
+            vmu_stack_reset_count.set(reset_count)
+
+    def set_vmu_session_metrics(self, active_sessions: int, models_loaded: int) -> None:
+        """Set VMU session and model metrics."""
+        if self.prometheus_enabled:
+            vmu_active_sessions.set(active_sessions)
+            vmu_models_loaded.set(models_loaded)
+
 
 # Global metrics collector instance
 _metrics: Optional[MetricsCollector] = None
@@ -450,3 +539,75 @@ def get_metrics() -> MetricsCollector:
     if _metrics is None:
         _metrics = MetricsCollector()
     return _metrics
+
+
+def export_metrics_to_json(filepath: str) -> None:
+    """
+    Export current metrics to a JSON file for evaluation scripts.
+
+    This is useful for evaluation scripts that need to capture VMU and memory
+    metrics without setting up a full Prometheus scraping infrastructure.
+
+    Args:
+        filepath: Path to write the JSON metrics file
+    """
+    import json
+    from datetime import datetime
+
+    metrics = get_metrics()
+    if not metrics.prometheus_enabled:
+        logger.warning("Prometheus not available, cannot export metrics")
+        return
+
+    try:
+        # Import prometheus_client to get current metric values
+        from prometheus_client import CollectorRegistry, generate_latest
+        from prometheus_client.core import REGISTRY
+
+        # Generate the latest metrics in Prometheus format
+        metrics_data = generate_latest(REGISTRY).decode('utf-8')
+
+        # Parse the Prometheus format into a simple dict
+        # This is a basic parser - for production, consider using prometheus_client.parser
+        parsed_metrics = {}
+        current_metric = None
+        current_help = None
+
+        for line in metrics_data.split('\n'):
+            line = line.strip()
+            if not line or line.startswith('#'):
+                if line.startswith('# HELP '):
+                    parts = line.split(' ', 2)
+                    if len(parts) >= 2:
+                        current_metric = parts[1]
+                        current_help = parts[2] if len(parts) > 2 else ""
+                continue
+
+            if current_metric and line:
+                # Simple parsing - assumes no labels for now
+                parts = line.split(' ')
+                if len(parts) >= 2:
+                    try:
+                        value = float(parts[1])
+                        parsed_metrics[current_metric] = {
+                            'value': value,
+                            'help': current_help or ""
+                        }
+                    except (ValueError, IndexError):
+                        continue
+
+        # Create export structure
+        export_data = {
+            'timestamp': datetime.utcnow().isoformat(),
+            'metrics': parsed_metrics
+        }
+
+        # Write to file
+        with open(filepath, 'w') as f:
+            json.dump(export_data, f, indent=2)
+
+        logger.info(f"Exported metrics to {filepath}")
+
+    except Exception as exc:
+        logger.error(f"Failed to export metrics to {filepath}: {exc}")
+        # Don't raise - evaluation scripts shouldn't fail if metrics export fails

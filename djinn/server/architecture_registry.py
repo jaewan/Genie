@@ -14,6 +14,7 @@ This is part of the redesign plan (Week 1).
 import io
 import logging
 import pickle
+import threading
 from typing import Any, Callable, Dict, Optional, Set
 
 import torch
@@ -44,6 +45,8 @@ class HybridArchitectureRegistry:
         
         # Cached architectures (fingerprint -> serialized architecture)
         self.architecture_cache: Dict[str, bytes] = {}
+        # Lightweight config cache for fast metadata lookups
+        self.config_cache: Dict[str, Dict[str, Any]] = {}
         
         # Security whitelist
         self.allowed_modules: Set[str] = {
@@ -150,18 +153,22 @@ class HybridArchitectureRegistry:
         # For now, use structure serialization (more reliable than torch.jit)
         # torch.jit.save() requires file paths, not BytesIO, so we use structure fallback
         # In production, models should be pre-registered anyway
-        architecture_bytes = pickle.dumps({
+        config = self._extract_config(model)
+        architecture_payload = {
             'type': 'structure',
             'class_name': model.__class__.__name__,
             'class_module': model.__class__.__module__,
-            'config': self._extract_config(model),
+            'config': config,
             'module_structure': self._extract_module_structure(model)
-        })
+        }
+
+        architecture_bytes = pickle.dumps(architecture_payload)
         
         logger.debug(f"Saved architecture for {fingerprint} using structure serialization")
         
         # Cache architecture
         self.architecture_cache[fingerprint] = architecture_bytes
+        self.config_cache[fingerprint] = config
         
         return architecture_bytes
     
@@ -376,8 +383,58 @@ class HybridArchitectureRegistry:
         """Check if module is in security whitelist."""
         return any(module_path.startswith(allowed) for allowed in self.allowed_modules)
     
+    def get_model_config(self, fingerprint: str) -> Optional[Dict[str, Any]]:
+        """
+        Get model configuration for a given fingerprint.
+
+        Returns extracted config attributes like num_layers, num_heads, hidden_size, etc.
+        """
+        # Fast path: cached config
+        if fingerprint in self.config_cache:
+            return self.config_cache[fingerprint]
+
+        # Try to load from cached architecture payload
+        architecture_bytes = self.architecture_cache.get(fingerprint)
+        if architecture_bytes:
+            try:
+                payload = pickle.loads(architecture_bytes)
+                config = payload.get('config')
+                if config:
+                    self.config_cache[fingerprint] = config
+                    return config
+            except Exception as exc:
+                logger.debug(f"Failed to decode cached architecture for {fingerprint}: {exc}")
+
+        # Fallback: inspect live model from cache if loaded
+        try:
+            from .model_cache_v23 import get_model_cache_v23
+            cache = get_model_cache_v23()
+            model = cache.get_model(fingerprint)
+            if model is None:
+                return None
+            config = self._extract_config(model)
+            self.config_cache[fingerprint] = config
+            return config
+        except Exception as exc:
+            logger.debug(f"Failed to get model config for {fingerprint}: {exc}")
+            return None
+
     def clear_cache(self):
         """Clear architecture cache (for testing)."""
         self.architecture_cache.clear()
         logger.debug("Architecture cache cleared")
+
+
+_global_registry: Optional[HybridArchitectureRegistry] = None
+_registry_lock = threading.Lock()
+
+
+def get_architecture_registry() -> HybridArchitectureRegistry:
+    """Return shared HybridArchitectureRegistry instance."""
+    global _global_registry
+    if _global_registry is None:
+        with _registry_lock:
+            if _global_registry is None:
+                _global_registry = HybridArchitectureRegistry()
+    return _global_registry
 

@@ -2,7 +2,7 @@
 
 **Status**: Production Technical Reference
 **Version**: 2.3.15
-**Last Updated**: November 21, 2025
+**Last Updated**: November 25, 2025
 **Target Audience**: System Architects, Core Developers, Platform Engineers
 
 ---
@@ -368,17 +368,21 @@ Djinn supports comprehensive model handling across all PyTorch model types:
 **Key Implementation**:
 - **DMA Pipeline**: Network → Pinned staging → GPU slab with `stream.synchronize()`
 - **Dual-Lifecycle**: Persistent (weights/KV) + Volatile (activations) with watermark
-- **OOM Protection**: Pre-flight checks prevent allocation failures
+- **Dynamic Safe Capacity**: At boot we interrogate NVML (via `nvidia-ml-py`) to derive safe bytes = `free - os_reserve - safety_margin`, clamped by `min_viable_vmu_gb`. These knobs live in `ServerConfig` so operators can keep headroom for CUDA context, peer copies, or MIG.
+- **Per-Session Arenas**: The Data segment acts as an arena allocator keyed by `session_id`, enforcing quotas derived from `kv_cache_size_mb` hints. This makes session teardown O(1) and eliminates external fragmentation when decode traffic churns.
+- **OOM Protection**: Pre-flight checks prevent allocation failures both on the client (Capability Interlock) and in the VMU (admission control before carving segments).
 - **256B Alignment**: Zero fragmentation through byte-aligned allocations
 - **Thread Safety**: Lock-protected concurrent access across sessions
 - **Async Weight Streaming**: Model registrations pin each state dict, stream it into the Text segment via a dedicated CUDA copy stream, and attach the resulting plan summary to the memory plan for tooling.
 - **ServerState Initialization**: The singleton is brought up on the preferred GPU before the VMU or executor runs, so warmup and diagnostics always see CUDA.
+- **Observability**: `vmu_metrics` snapshots publish Text/Data/Stack utilization, arena counts, and fragmentation gaps each time a plan executes, backing both dashboards and the OSDI artifact.
 
 **Benefits**:
 - Zero fragmentation through watermark-based management
 - DMA synchronization prevents data corruption
 - Efficient KV cache growth without reallocation
-- **Prevents OOM** during prefill → decode transitions
+- **Prevents OOM** during prefill → decode transitions (safe capacity + quotas)
+- Instant session reclamation when arenas are freed, which in turn keeps long-running fleets from accumulating "dead" KV cache bytes
 
 ### 3.7 Component 7: Hybrid Executor (Server)
 
@@ -974,6 +978,32 @@ class MaterializationOptimizer:
 - Value-based eviction (access frequency, size, execution time)
 - Phase-aware memory budgets (prefill/decode/vision) via PhaseAwareMemoryManager
 - **Impact**: Eliminates 99.7% of network transfer overhead (fingerprint vs graph)
+
+### 9.3 QoS Scheduler (Realtime / Interactive / Batch)
+
+The backend ships with a Basic QoS Scheduler that keeps three independent queues (Realtime, Interactive, Batch) and enforces weighted concurrency slices. Operators configure the policy entirely via environment variables:
+
+```text
+GENIE_ENABLE_QOS=1
+GENIE_QOS_MAX_CONCURRENCY=8          # Total slots per GPU
+GENIE_QOS_CLASS_SHARES=4,3,1         # Realtime / Interactive / Batch
+GENIE_QOS_ESCALATION_DELAY_MS=300    # Break share if a request waits too long
+```
+
+Realtime traffic (LLM decode, streaming audio) gets strict priority and a 300 ms escalation timer so that P99 stays sub-second even if Interactive jobs momentarily saturate the queue. Interactive traffic (chat, CLIP classification) inherits the default shares, while Batch traffic yields instantly whenever higher classes arrive.
+
+**Measured impact (Phase‑4 smoke test, Nov 25):**
+- 568/568 successful requests in 123 s with 4.6 req/s throughput.
+- P50/P99 latencies of 78.6 ms / 703.8 ms overall, with per-class P99s of 710 ms (LLM), 608 ms (vision), and <10 ms (semantic multimodal lookups).
+- No starvation or registration stalls: warmup registers all models in ~21 s, after which scheduler instrumentation reported zero queue overflows.
+
+This scheduler is intentionally simple, but because it runs alongside the VMU telemetry we can already visualize queue latency, per-class utilization, and SLA compliance for OSDI artifacts or production dashboards.
+
+### 9.4 Week‑2 Evaluation Highlights
+
+- **Exp 2.2 – Streaming Audio (Whisper-Medium):** Semantic Djinn (encoder/decoder sessions + QoS hints) cuts end-to-end latency by ~12 % relative to the semantic-blind baseline and is ~99 % faster than native PyTorch thanks to server-side weight residency.
+- **Exp 2.3 – Conversational AI (DialoGPT-Small):** Semantic Djinn is ~12× faster than semantic-blind and reduces data transfer by 96 % due to KV-cache co-location plus Lazy Reference Engine.
+- **Phase‑4 Load Test – Mixed workloads:** 14 concurrent users maintained sub-second P99 latency with the new VMU + QoS stack, validating the “Tensor Operating System” story under realistic load.
 
 ---
 

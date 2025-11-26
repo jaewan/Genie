@@ -135,6 +135,34 @@ class PerformanceConfig:
 
 
 @dataclass
+class VmuConfig:
+    """Configuration for the Unified VMU (Text/Data/Stack segments)."""
+    os_reserve_gb: float = 2.0
+    safety_margin_gb: float = 1.0
+    min_viable_vmu_gb: float = 6.0
+
+    text_ratio: float = 0.5
+    data_ratio: float = 0.35
+    stack_ratio: float = 0.15
+
+    workload_profile: str = "balanced"  # llm_inference / vision / balanced
+    default_session_arena_mb: float = 256.0
+
+    @classmethod
+    def from_env(cls) -> "VmuConfig":
+        return cls(
+            os_reserve_gb=float(os.getenv("GENIE_VMU_OS_RESERVE_GB", 2.0)),
+            safety_margin_gb=float(os.getenv("GENIE_VMU_SAFETY_MARGIN_GB", 1.0)),
+            min_viable_vmu_gb=float(os.getenv("GENIE_VMU_MIN_VIABLE_GB", 6.0)),
+            text_ratio=float(os.getenv("GENIE_VMU_TEXT_RATIO", 0.5)),
+            data_ratio=float(os.getenv("GENIE_VMU_DATA_RATIO", 0.35)),
+            stack_ratio=float(os.getenv("GENIE_VMU_STACK_RATIO", 0.15)),
+            workload_profile=os.getenv("GENIE_VMU_PROFILE", "balanced"),
+            default_session_arena_mb=float(os.getenv("GENIE_VMU_SESSION_ARENA_MB", 256.0)),
+        )
+
+
+@dataclass
 class RuntimeConfig:
     """Runtime initialization configuration."""
     # Thread pool settings
@@ -338,6 +366,7 @@ class DjinnConfig:
     optimization: OptimizationConfig = field(default_factory=OptimizationConfig)
     security: SecurityConfig = field(default_factory=SecurityConfig)
     fleet: FleetConfig = field(default_factory=FleetConfig)
+    vmu: VmuConfig = field(default_factory=VmuConfig)
 
     # Global settings
     debug_mode: bool = False
@@ -390,6 +419,7 @@ class DjinnConfig:
         config.logging = LoggingConfig.from_env()
         config.optimization = OptimizationConfig.from_env()
         config.fleet = FleetConfig.from_env()
+        config.vmu = VmuConfig.from_env()
 
         # Global environment overrides
         config.debug_mode = os.getenv('GENIE_DEBUG', 'false').lower() == 'true'

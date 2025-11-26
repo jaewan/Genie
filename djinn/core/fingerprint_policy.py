@@ -336,6 +336,9 @@ class FingerprintPolicy:
         - Module hierarchy
         - Config if available
         """
+        if hasattr(model, "_djinn_ghost_arch_hash"):
+            return getattr(model, "_djinn_ghost_arch_hash")
+
         arch_desc = {
             'class': model.__class__.__name__,
             'module': model.__class__.__module__,
@@ -370,6 +373,17 @@ class FingerprintPolicy:
     
     def _estimate_model_size_gb(self, model: nn.Module) -> float:
         """Estimate model size in GB."""
+        if hasattr(model, "_djinn_ghost_metadata"):
+            cfg = getattr(model, "_djinn_ghost_metadata", {}).get("config", {}) or {}
+            param_count = (
+                cfg.get("num_parameters")
+                or cfg.get("n_parameters")
+                or cfg.get("n_params")
+            )
+            if isinstance(param_count, (int, float)) and param_count > 0:
+                size_bytes = int(param_count) * 4
+                return size_bytes / (1024 ** 3)
+            return 0.0
         total_params = sum(p.numel() for p in model.parameters())
         # Assume float32 (4 bytes per param) - conservative estimate
         size_bytes = total_params * 4

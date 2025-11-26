@@ -56,6 +56,39 @@ import threading
 import socket
 from typing import Tuple, Dict, List, Optional
 from dataclasses import dataclass
+@dataclass
+class VMUMetrics:
+    """Aggregated memory statistics for VMU segments."""
+
+    text_used_bytes: int
+    text_capacity_bytes: int
+    data_reserved_bytes: int
+    data_capacity_bytes: int
+    data_internal_waste_bytes: int
+    data_external_gap_bytes: int
+    stack_allocated_bytes: int
+    stack_capacity_bytes: int
+    stack_reset_count: int
+    active_sessions: int
+    models_loaded: int
+
+    def to_dict(self) -> Dict[str, float]:
+        return {
+            "text_used_bytes": self.text_used_bytes,
+            "text_capacity_bytes": self.text_capacity_bytes,
+            "data_reserved_bytes": self.data_reserved_bytes,
+            "data_capacity_bytes": self.data_capacity_bytes,
+            "data_internal_waste_bytes": self.data_internal_waste_bytes,
+            "data_external_gap_bytes": self.data_external_gap_bytes,
+            "stack_allocated_bytes": self.stack_allocated_bytes,
+            "stack_capacity_bytes": self.stack_capacity_bytes,
+            "stack_reset_count": self.stack_reset_count,
+            "active_sessions": self.active_sessions,
+            "models_loaded": self.models_loaded,
+        }
+
+
+from djinn.config import VmuConfig
 
 logger = logging.getLogger(__name__)
 
@@ -268,6 +301,27 @@ class TextSegment(MemorySegment):
             }
 
 
+@dataclass
+class SessionArena:
+    """Arena reserved for a single session."""
+    session_id: str
+    base_offset: int
+    capacity: int
+    used: int = 0
+
+    def alloc(self, size_bytes: int, alignment: int = 256) -> int:
+        """Bump-pointer allocation within the arena."""
+        aligned_used = ((self.used + alignment - 1) // alignment) * alignment
+        if aligned_used + size_bytes > self.capacity:
+            raise RuntimeError(
+                f"Arena overflow for session {self.session_id}: "
+                f"used={self.used}, requested={size_bytes}, capacity={self.capacity}"
+            )
+        offset_within_arena = aligned_used
+        self.used = aligned_used + size_bytes
+        return self.base_offset + offset_within_arena
+
+
 class DataSegment(MemorySegment):
     """
     Data Segment: Private session data (OS analogy: heap).
@@ -281,9 +335,8 @@ class DataSegment(MemorySegment):
     def __init__(self, capacity: int, device: torch.device):
         super().__init__("Data", capacity, device)
         self.buffer = None  # Lazy allocation
-        self.allocated_size = 0
-        self.current_offset = 0  # For tracking allocations
-        self.session_data: Dict[str, Dict[str, any]] = {}  # session_id -> data
+        self.sessions: Dict[str, SessionArena] = {}
+        self.next_offset = 0
 
     @property
     def slab(self):
@@ -306,64 +359,77 @@ class DataSegment(MemorySegment):
             Offset in Data Segment buffer
         """
         with self.lock:
-            aligned_offset = self._align(self.current_offset)
-            if aligned_offset + size_bytes > self.capacity:
-                raise RuntimeError(f"Data Segment out of memory: requested {size_bytes} bytes")
+            if session_id not in self.sessions:
+                raise RuntimeError(f"Session {session_id} has no reserved arena")
 
-            # Record allocation
-            if session_id not in self.session_data:
-                self.session_data[session_id] = {}
+            arena = self.sessions[session_id]
+            offset = arena.alloc(size_bytes)
 
-            self.session_data[session_id][name] = {
-                'offset': aligned_offset,
-                'size': size_bytes,
-                'allocated_at': threading.current_thread().ident
-            }
-
-            self.current_offset = aligned_offset + size_bytes
-
-            logger.debug(f"✅ Allocated {size_bytes} bytes for session {session_id} at offset {aligned_offset}")
-            return aligned_offset
+            logger.debug(f"✅ Allocated {size_bytes} bytes for session {session_id} at offset {offset}")
+            return offset
 
     def get_session_view(self, session_id: str, offset: int, size: int, dtype: torch.dtype) -> torch.Tensor:
         """Get a view of session data from the buffer."""
         with self.lock:
-            if session_id not in self.session_data:
+            if session_id not in self.sessions:
                 raise RuntimeError(f"Session {session_id} not found in Data Segment")
 
             if offset + size > self.capacity:
                 raise RuntimeError(f"Invalid offset/size for session {session_id}")
 
-            # Ensure buffer is allocated (lazy allocation)
             buffer = self.slab
             return buffer[offset:offset + size].view(dtype)
 
     def free_session(self, session_id: str) -> bool:
         """Free all data for a session (called during session cleanup)."""
         with self.lock:
-            if session_id not in self.session_data:
+            arena = self.sessions.pop(session_id, None)
+            if arena is None:
                 return False
 
-            # [BLOCKING-P0] TODO: Implement actual memory compaction or mark as free
-            # [BLOCKING-P0] Required for Phase 2 - prevents memory leaks in Data Segment
-            # [BLOCKING-P0] For now, just remove metadata (memory stays allocated until compaction)
-            del self.session_data[session_id]
+            if arena.base_offset + arena.capacity == self.next_offset:
+                self.next_offset = arena.base_offset
 
             logger.info(f"✅ Freed session {session_id} data from Data Segment")
             return True
 
+    def reserve_arena(self, session_id: str, size_bytes: int) -> SessionArena:
+        """Reserve contiguous arena for a session. Raises if insufficient space."""
+        with self.lock:
+            if session_id in self.sessions:
+                raise RuntimeError(f"Session {session_id} already exists")
+
+            aligned_size = self._align(size_bytes)
+            if self.next_offset + aligned_size > self.capacity:
+                raise RuntimeError(f"Data Segment cannot reserve {aligned_size} bytes")
+
+            arena = SessionArena(
+                session_id=session_id,
+                base_offset=self.next_offset,
+                capacity=aligned_size
+            )
+            self.sessions[session_id] = arena
+            self.next_offset += aligned_size
+            logger.debug(f"✅ Reserved {aligned_size} bytes arena for session {session_id}")
+            return arena
+
     def get_stats(self) -> Dict[str, any]:
         """Return Data Segment statistics."""
         with self.lock:
-            active_sessions = len(self.session_data)
-            allocated_bytes = self.current_offset
+            active_sessions = len(self.sessions)
+            reserved_bytes = self.next_offset
+            total_used = sum(arena.used for arena in self.sessions.values())
+            internal_waste = max(reserved_bytes - total_used, 0)
+            external_gaps = max(self.capacity - reserved_bytes, 0)
             return {
                 'segment_name': self.name,
                 'capacity_bytes': self.capacity,
-                'allocated_bytes': allocated_bytes,
-                'free_bytes': self.capacity - allocated_bytes,
+                'reserved_bytes': reserved_bytes,
+                'free_bytes': self.capacity - reserved_bytes,
                 'active_sessions': active_sessions,
-                'utilization_percent': (allocated_bytes / self.capacity * 100) if self.capacity > 0 else 0,
+                'data_internal_waste_bytes': internal_waste,
+                'data_external_gap_bytes': external_gaps,
+                'utilization_percent': (reserved_bytes / self.capacity * 100) if self.capacity > 0 else 0,
             }
 
 
@@ -457,10 +523,8 @@ class UnifiedVMU:
     def __init__(
         self,
         device_id: int = 0,
-        text_capacity_ratio: float = 0.6,
-        data_capacity_ratio: float = 0.2,
-        stack_capacity_ratio: float = 0.2,
-        os_reserve_gb: float = 4.0,
+        *,
+        vmu_config: Optional[VmuConfig] = None,
         alignment: int = 256
     ):
         """
@@ -479,24 +543,53 @@ class UnifiedVMU:
         self.alignment = alignment
         self.lock = threading.Lock()  # Global concurrency control
 
-        # Get device properties and calculate capacities
+        config = vmu_config or VmuConfig.from_env()
+        text_ratio = config.text_ratio
+        data_ratio = config.data_ratio
+        stack_ratio = config.stack_ratio
+
+        ratio_sum = text_ratio + data_ratio + stack_ratio
+        if abs(ratio_sum - 1.0) > 1e-6:
+            logger.warning(f"VMU ratios do not sum to 1 ({ratio_sum:.3f}), normalizing.")
+            text_ratio /= ratio_sum
+            data_ratio /= ratio_sum
+            stack_ratio /= ratio_sum
+
         props = torch.cuda.get_device_properties(device_id)
         total_memory = props.total_memory
-        os_reserve_bytes = int(os_reserve_gb * 1024**3)
-        vmu_capacity = total_memory - os_reserve_bytes
+        reserved = torch.cuda.memory_reserved(device_id)
+        free_memory = max(total_memory - reserved, 0)
 
-        # Calculate segment capacities
-        text_capacity = int(vmu_capacity * text_capacity_ratio)
-        data_capacity = int(vmu_capacity * data_capacity_ratio)
-        stack_capacity = int(vmu_capacity * stack_capacity_ratio)
+        os_reserve_bytes = int(config.os_reserve_gb * 1024**3)
+        safety_margin_bytes = int(config.safety_margin_gb * 1024**3)
+        safe_capacity = min(total_memory - os_reserve_bytes, free_memory - safety_margin_bytes)
+        safe_capacity = max(safe_capacity, 0)
+
+        min_viable_bytes = int(config.min_viable_vmu_gb * 1024**3)
+        if safe_capacity < min_viable_bytes:
+            raise RuntimeError(
+                f"Insufficient GPU memory for VMU: need {min_viable_bytes / 1024**3:.1f} GB, "
+                f"have only {safe_capacity / 1024**3:.1f} GB "
+                f"(total={total_memory / 1024**3:.1f} GB, reserved={reserved / 1024**3:.1f} GB)"
+            )
+
+        text_capacity = int(safe_capacity * text_ratio)
+        data_capacity = int(safe_capacity * data_ratio)
+        stack_capacity = int(safe_capacity * stack_ratio)
+        self.default_session_arena_bytes = max(
+            int(config.default_session_arena_mb * 1024**2),
+            alignment
+        )
 
         logger.info(f"Initializing Segmented VMU on cuda:{device_id}")
         logger.info(f"  Total GPU memory: {total_memory / 1024**3:.1f} GB")
-        logger.info(f"  OS reserve: {os_reserve_gb} GB")
-        logger.info(f"  VMU capacity: {vmu_capacity / 1024**3:.1f} GB")
-        logger.info(f"  Text Segment:  {text_capacity / 1024**3:.1f} GB ({text_capacity_ratio:.0%})")
-        logger.info(f"  Data Segment:  {data_capacity / 1024**3:.1f} GB ({data_capacity_ratio:.0%})")
-        logger.info(f"  Stack Segment: {stack_capacity / 1024**3:.1f} GB ({stack_capacity_ratio:.0%})")
+        logger.info(f"  Reserved by system: {reserved / 1024**3:.1f} GB")
+        logger.info(f"  OS reserve: {config.os_reserve_gb} GB")
+        logger.info(f"  Safety margin: {config.safety_margin_gb} GB")
+        logger.info(f"  Safe VMU capacity: {safe_capacity / 1024**3:.1f} GB")
+        logger.info(f"  Text Segment:  {text_capacity / 1024**3:.1f} GB ({text_ratio:.0%})")
+        logger.info(f"  Data Segment:  {data_capacity / 1024**3:.1f} GB ({data_ratio:.0%})")
+        logger.info(f"  Stack Segment: {stack_capacity / 1024**3:.1f} GB ({stack_ratio:.0%})")
 
         # Initialize segments
         try:
@@ -523,6 +616,34 @@ class UnifiedVMU:
             except RuntimeError as e2:
                 logger.error(f"❌ Failed to allocate staging buffer: {e2}")
                 raise
+
+    # Session arena helpers
+    def reserve_session_arena(self, session_id: str, max_bytes: Optional[int] = None) -> SessionArena:
+        """
+        Reserve an arena in the Data segment for a session.
+        """
+        size = max_bytes or self.default_session_arena_bytes
+        return self.data_segment.reserve_arena(session_id, size)
+
+    def get_metrics(self) -> VMUMetrics:
+        """Collect aggregated metrics from all segments."""
+        text_stats = self.text_segment.get_stats()
+        data_stats = self.data_segment.get_stats()
+        stack_stats = self.stack_segment.get_stats()
+
+        return VMUMetrics(
+            text_used_bytes=int(text_stats.get("loaded_bytes", 0)),
+            text_capacity_bytes=int(text_stats.get("capacity_bytes", 0)),
+            data_reserved_bytes=int(data_stats.get("reserved_bytes", 0)),
+            data_capacity_bytes=int(data_stats.get("capacity_bytes", 0)),
+            data_internal_waste_bytes=int(data_stats.get("data_internal_waste_bytes", 0)),
+            data_external_gap_bytes=int(data_stats.get("data_external_gap_bytes", 0)),
+            stack_allocated_bytes=int(stack_stats.get("allocated_bytes", 0)),
+            stack_capacity_bytes=int(stack_stats.get("capacity_bytes", 0)),
+            stack_reset_count=int(stack_stats.get("reset_count", 0)),
+            active_sessions=int(data_stats.get("active_sessions", 0)),
+            models_loaded=int(text_stats.get("loaded_models_count", 0)),
+        )
     
     # Text Segment API
     def load_model_to_text(self, model_id: str, state_dict: Dict[str, torch.Tensor]) -> bool:
@@ -559,6 +680,8 @@ class UnifiedVMU:
         Returns:
             Offset in Data Segment buffer
         """
+        if session_id not in self.data_segment.sessions:
+            self.reserve_session_arena(session_id)
         return self.data_segment.allocate_session_data(session_id, size_bytes, name)
 
     def get_session_data_view(self, session_id: str, offset: int, size: int, dtype: torch.dtype) -> torch.Tensor:

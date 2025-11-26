@@ -12,6 +12,7 @@ import threading
 import logging
 import time
 import json
+import os
 from dataclasses import dataclass
 from typing import Optional, Dict, Callable, Any, List
 import asyncio
@@ -1427,7 +1428,13 @@ class DjinnCoordinator:
             writer.close()
             await writer.wait_closed()
     
-    async def register_remote_model(self, fingerprint: str, model, model_id: Optional[str] = None):
+    async def register_remote_model(
+        self,
+        fingerprint: str,
+        model,
+        model_id: Optional[str] = None,
+        ghost_metadata: Optional[Dict[str, Any]] = None,
+    ):
         """
         Register model with remote server.
         
@@ -1462,6 +1469,62 @@ class DjinnCoordinator:
                 "Model ID is required for remote registration. "
                 "Provide model_id when calling register_model."
             )
+
+        ghost_info = ghost_metadata or getattr(model, "_djinn_ghost_metadata", None)
+        if ghost_info:
+            hf_token = os.environ.get("HUGGINGFACE_HUB_TOKEN")
+            descriptor = ghost_info.get("descriptor") or {
+                "framework": ghost_info.get("framework"),
+                "model_class": ghost_info.get("model_class", model_class),
+                "config": ghost_info.get("config"),
+                "ghost": True,
+            }
+            request = {
+                'type': 'REGISTER_MODEL',
+                'fingerprint': fingerprint,
+                'model_id': ghost_info.get("model_id", resolved_model_id),
+                'model_class': ghost_info.get("model_class", model_class),
+                'config': ghost_info.get("config"),
+                'revision': ghost_info.get("revision"),
+                'descriptor': descriptor,
+                'ghost': True,
+                'weight_ids': ghost_info.get("weight_ids") or [],
+                '_request_id': str(uuid.uuid4()),
+            }
+            if hf_token:
+                request['hf_access_token'] = hf_token
+            server_address = self.config.server_address or 'localhost:5556'
+            try:
+                serialize_start = time.perf_counter()
+                serialized = SecureSerializer.serialize_request(request)
+                serialize_time = (time.perf_counter() - serialize_start) * 1000.0
+                logger.info(f"✅ Ghost request serialized in {serialize_time:.1f}ms ({len(serialized) / (1024*1024):.2f} MB total)")
+
+                send_start = time.perf_counter()
+                response_msg_type, response_data = await self._send_tcp_request(
+                    server_address,
+                    MessageType.REGISTER_MODEL,
+                    serialized
+                )
+                send_time = (time.perf_counter() - send_start) * 1000.0
+                logger.info(f"✅ Ghost request sent and response received in {send_time:.1f}ms")
+
+                if response_msg_type == MessageType.ERROR:
+                    error = SecureSerializer.deserialize_response(response_data)
+                    raise RuntimeError(error.get('message', 'Unknown error'))
+
+                response = SecureSerializer.deserialize_response(response_data)
+                if response.get('status') == 'success':
+                    total_time = (time.perf_counter() - start_time) * 1000.0
+                    logger.info(f"✅ Ghost model {fingerprint[:8]} registered on server (total: {total_time:.1f}ms)")
+                    return
+                raise RuntimeError(response.get('message', 'Unknown error'))
+            except Exception as e:
+                total_time = (time.perf_counter() - start_time) * 1000.0
+                logger.warning(f"Failed to register ghost model after {total_time:.1f}ms: {e}")
+                import traceback
+                logger.debug(traceback.format_exc())
+                raise
         
         # Extract model weights
         weights_start = time.perf_counter()

@@ -30,6 +30,13 @@ from ..backend.runtime.unified_vmu import get_vmu
 from .qos import BasicQosScheduler, QoSClass
 from .session_manager import get_session_manager
 from .multi_tenant.kv_session_manager import get_kv_session_manager
+from .diagnostics_server import DiagnosticsServer
+from .architecture_registry import get_architecture_registry
+from .kv_cache_estimator import (
+    build_transformer_kv_spec,
+    kv_bytes_per_token,
+    normalize_config_sources,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +107,9 @@ class DjinnServer:
         self._pending_tasks: Dict[str, asyncio.Task] = {}  # task_id -> Task
         self._task_results: Dict[str, Any] = {}  # task_id -> result
         self._task_lock = asyncio.Lock()
+        self._kv_overhead_ratio = 0.2
+        self._kv_per_token_cache: Dict[str, int] = {}
+        self._diagnostics_server: Optional[DiagnosticsServer] = None
         
         # : Server health reporter for fleet coordination
         self._health_reporter = None
@@ -294,6 +304,151 @@ class DjinnServer:
             # Very conservative default: assume 1GB
             return 1.0
 
+    def _estimate_kv_bytes(self, fingerprint: str, request: Dict) -> Optional[int]:
+        """
+        Estimate KV arena size (bytes) using semantic hints and model metadata.
+
+        Uses model architecture information for accurate KV cache sizing when available.
+        Falls back to heuristics if model metadata unavailable.
+        """
+        # First priority: explicit hint from client
+        kv_cache_mb = request.get('_kv_cache_size_mb')
+        if kv_cache_mb is not None:
+            try:
+                return int(float(kv_cache_mb) * 1024 * 1024)
+            except (TypeError, ValueError):
+                pass
+
+        expected_tokens = request.get('_expected_tokens')
+        if expected_tokens is not None:
+            try:
+                tokens = max(int(expected_tokens), 0)
+                if tokens > 0:
+                    # Try to get accurate estimate from model metadata
+                    model_kv_bytes = self._estimate_kv_bytes_from_model(fingerprint, tokens)
+                    if model_kv_bytes is not None:
+                        return model_kv_bytes
+
+                    # Fallback: heuristic of ~1 MB per token
+                    return tokens * 1024 * 1024
+            except (TypeError, ValueError):
+                pass
+
+        return None
+
+    def _estimate_kv_bytes_from_model(self, fingerprint: str, expected_tokens: int) -> Optional[int]:
+        """
+        Estimate KV cache size using architecture metadata and runtime model info.
+        """
+        if not fingerprint or expected_tokens <= 0:
+            return None
+
+        per_token_cached = self._kv_per_token_cache.get(fingerprint)
+        if per_token_cached is not None:
+            return int(per_token_cached * expected_tokens * (1 + self._kv_overhead_ratio))
+
+        registry = get_architecture_registry()
+        base_config = registry.get_model_config(fingerprint) or {}
+        runtime_config = self._gather_runtime_model_config(fingerprint)
+        merged_config = normalize_config_sources(base_config, runtime_config)
+
+        spec = build_transformer_kv_spec(merged_config)
+        if not spec:
+            return None
+
+        per_token_bytes = kv_bytes_per_token(spec)
+        self._kv_per_token_cache[fingerprint] = per_token_bytes
+        total_kv_bytes = int(per_token_bytes * expected_tokens * (1 + self._kv_overhead_ratio))
+
+        logger.debug(
+            "KV cache estimate for %s: %d layers, %d heads (%d kv-heads), head_dim=%d, dtype=%d bytes "
+            "-> %.1f MB for %d tokens",
+            fingerprint[:8],
+            spec.num_layers,
+            spec.num_heads,
+            spec.num_kv_heads,
+            spec.head_dim,
+            spec.dtype_bytes,
+            total_kv_bytes / 1024**2,
+            expected_tokens,
+        )
+
+        return total_kv_bytes
+
+    def _gather_runtime_model_config(self, fingerprint: str) -> Dict[str, Any]:
+        config: Dict[str, Any] = {}
+        if not fingerprint:
+            return config
+
+        try:
+            from .model_cache_v23 import get_model_cache_v23
+
+            cache = get_model_cache_v23()
+            model = cache.get_model(fingerprint)
+            if model is None:
+                return config
+        except Exception as exc:
+            logger.debug("Failed to load model %s for KV estimation: %s", fingerprint[:8], exc)
+            return config
+
+        hf_config = getattr(model, "config", None)
+        config.update(self._extract_hf_config(hf_config))
+        config.update(self._extract_module_config(model))
+
+        dtype = self._infer_model_dtype(model)
+        if dtype is not None:
+            config["dtype"] = dtype
+        return config
+
+    @staticmethod
+    def _extract_hf_config(hf_config: Any) -> Dict[str, Any]:
+        if hf_config is None:
+            return {}
+
+        mapping = {
+            "num_layers": ["num_hidden_layers", "n_layer", "num_layers"],
+            "num_heads": ["num_attention_heads", "n_head", "num_heads"],
+            "num_key_value_heads": ["num_key_value_heads", "n_head_kv", "num_kv_heads"],
+            "hidden_size": ["hidden_size", "n_embd", "d_model", "embed_dim"],
+            "head_dim": ["head_dim", "attention_head_size"],
+        }
+
+        normalized: Dict[str, Any] = {}
+        for target, aliases in mapping.items():
+            for attr in aliases:
+                if hasattr(hf_config, attr):
+                    value = getattr(hf_config, attr)
+                    if value is not None:
+                        normalized[target] = value
+                        break
+
+        torch_dtype = getattr(hf_config, "torch_dtype", None)
+        if torch_dtype is not None:
+            normalized["dtype"] = torch_dtype
+
+        return normalized
+
+    @staticmethod
+    def _extract_module_config(model: Any) -> Dict[str, Any]:
+        attributes = ["num_layers", "num_heads", "num_key_value_heads", "hidden_size", "head_dim"]
+        config: Dict[str, Any] = {}
+        for attr in attributes:
+            if hasattr(model, attr):
+                value = getattr(model, attr)
+                if value is not None:
+                    config[attr] = value
+        return config
+
+    @staticmethod
+    def _infer_model_dtype(model: Any):
+        try:
+            first_param = next(model.parameters())
+            return getattr(first_param, "dtype", None)
+        except StopIteration:
+            return None
+        except Exception:
+            return None
+
     async def start(self) -> bool:
         """Start the Djinn server."""
         try:
@@ -438,6 +593,7 @@ class DjinnServer:
             
             # ✅ Phase 3: Start health reporting to global coordinator
             await self._start_health_reporting()
+            await self._start_diagnostics_server()
 
             return True
 
@@ -492,6 +648,8 @@ class DjinnServer:
         # ✅ Phase 3: Stop health reporting
         if self._health_reporter:
             await self._health_reporter.stop()
+        
+        await self._stop_diagnostics_server()
 
         logger.info("✓ Server stopped")
 
@@ -1276,6 +1434,8 @@ class DjinnServer:
             model_id = request.get('model_id', '')
             model_class = request.get('model_class', '')
             config_dict = request.get('config')
+            revision = request.get('revision')
+            hf_access_token = request.get('hf_access_token')
             
             logger.info(f"📝 Registering model {fingerprint[:8]} (v2.3) - NON-BINARY PATH")
             logger.info(f"   Model class: {model_class}")
@@ -1291,10 +1451,15 @@ class DjinnServer:
             if model_id and 'transformers' in model_class:
                 logger.info(f"   Loading from HuggingFace: {model_id}")
                 from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, AutoModelForSeq2SeqLM, AutoModelForImageClassification
-
+                hf_common_kwargs = {}
+                if revision:
+                    hf_common_kwargs['revision'] = revision
+                if hf_access_token:
+                    hf_common_kwargs['token'] = hf_access_token
+                    hf_common_kwargs['use_auth_token'] = hf_access_token
                 config = None
                 try:
-                    config = AutoConfig.from_pretrained(model_id)
+                    config = AutoConfig.from_pretrained(model_id, **hf_common_kwargs)
                     logger.info(
                         "   AutoConfig loaded: model_type=%s is_encoder_decoder=%s",
                         getattr(config, "model_type", "unknown"),
@@ -1309,32 +1474,64 @@ class DjinnServer:
                     if model_type == "whisper":
                         logger.info("   Detected Whisper model; using WhisperForConditionalGeneration")
                         from transformers import WhisperForConditionalGeneration
-
-                        model = WhisperForConditionalGeneration.from_pretrained(model_id)
+                        model = WhisperForConditionalGeneration.from_pretrained(
+                            model_id,
+                            torch_dtype=torch.float16,
+                            low_cpu_mem_usage=True,
+                            **hf_common_kwargs,
+                        )
                     elif getattr(config, "is_encoder_decoder", False):
                         logger.info("   Detected encoder-decoder architecture; using AutoModelForSeq2SeqLM")
-                        model = AutoModelForSeq2SeqLM.from_pretrained(model_id)
+                        model = AutoModelForSeq2SeqLM.from_pretrained(
+                            model_id,
+                            torch_dtype=torch.float16,
+                            low_cpu_mem_usage=True,
+                            **hf_common_kwargs,
+                        )
                     elif model_type in {"resnet", "vit", "efficientnet", "convnext", "deit", "swin"}:
                         # Vision classification models
                         logger.info(f"   Detected vision model (type={model_type}); using AutoModelForImageClassification")
                         try:
-                            model = AutoModelForImageClassification.from_pretrained(model_id)
+                            model = AutoModelForImageClassification.from_pretrained(
+                                model_id,
+                                torch_dtype=torch.float16,
+                                low_cpu_mem_usage=True,
+                                **hf_common_kwargs,
+                            )
                         except Exception as vision_error:
                             logger.warning(f"   AutoModelForImageClassification failed ({vision_error}); falling back to AutoModel")
-                            model = AutoModel.from_pretrained(model_id)
+                            model = AutoModel.from_pretrained(
+                                model_id,
+                                low_cpu_mem_usage=True,
+                                **hf_common_kwargs,
+                            )
 
                 if model is None:
                     try:
                         # Try AutoModelForCausalLM first (for GPT-style decoder-only models)
-                        model = AutoModelForCausalLM.from_pretrained(model_id)
+                        model = AutoModelForCausalLM.from_pretrained(
+                            model_id,
+                            torch_dtype=torch.float16,
+                            low_cpu_mem_usage=True,
+                            **hf_common_kwargs,
+                        )
                     except Exception as causal_error:
                         try:
                             # Try vision models as fallback
                             logger.info("   Trying AutoModelForImageClassification as fallback")
-                            model = AutoModelForImageClassification.from_pretrained(model_id)
+                            model = AutoModelForImageClassification.from_pretrained(
+                                model_id,
+                                torch_dtype=torch.float16,
+                                low_cpu_mem_usage=True,
+                                **hf_common_kwargs,
+                            )
                         except Exception as vision_error:
                             logger.warning(f"   AutoModelForImageClassification failed ({vision_error}); falling back to AutoModel")
-                            model = AutoModel.from_pretrained(model_id)
+                            model = AutoModel.from_pretrained(
+                                model_id,
+                                low_cpu_mem_usage=True,
+                                **hf_common_kwargs,
+                            )
 
                 model.eval()
                 logger.info(f"   Loaded model class: {model.__class__.__name__}")
@@ -1486,7 +1683,14 @@ class DjinnServer:
                         batch_inputs[key] = values[0]  # Use first value for non-tensors
                 
                 # Execute batch
-                session_id = session_mgr.create_session()
+                first_req = indexed_reqs[0][1]
+                kv_bytes = self._estimate_kv_bytes(fingerprint, first_req)
+                expected_tokens = first_req.get('_expected_tokens')
+                session_id = session_mgr.create_session(
+                    max_session_bytes=kv_bytes,
+                    model_kv_bytes=kv_bytes,
+                    expected_tokens=expected_tokens,
+                )
                 batch_output, metrics = await executor.execute_with_lazy_outputs(
                     model=model,
                     inputs=batch_inputs,
@@ -1858,6 +2062,22 @@ class DjinnServer:
                 logger.info(f"🚀 Executing model {fingerprint[:8]} via HybridExecutor (v2.3)...")
             
             # Get v2.3 components
+            if logger.isEnabledFor(logging.DEBUG):
+                try:
+                    from djinn.backend.runtime.unified_vmu import get_vmu
+                    vmu_metrics = get_vmu().get_metrics().to_dict()
+                    logger.debug(
+                        "VMU metrics: text_used=%.2f%%, data_reserved=%.2f%%, stack_used=%.2f%%, sessions=%d",
+                        (vmu_metrics["text_used_bytes"] / vmu_metrics["text_capacity_bytes"] * 100)
+                        if vmu_metrics["text_capacity_bytes"] else 0.0,
+                        (vmu_metrics["data_reserved_bytes"] / vmu_metrics["data_capacity_bytes"] * 100)
+                        if vmu_metrics["data_capacity_bytes"] else 0.0,
+                        (vmu_metrics["stack_allocated_bytes"] / vmu_metrics["stack_capacity_bytes"] * 100)
+                        if vmu_metrics["stack_capacity_bytes"] else 0.0,
+                        vmu_metrics["active_sessions"],
+                    )
+                except Exception as metric_exc:
+                    logger.debug("Unable to collect VMU metrics: %s", metric_exc)
             from .hybrid_executor import get_hybrid_executor
             from .model_cache_v23 import get_model_cache_v23
             
@@ -2573,6 +2793,80 @@ class DjinnServer:
             logger.warning(f"⚠️  Failed to start health reporting: {e}")
             import traceback
             logger.debug(f"Traceback: {traceback.format_exc()}")
+
+    async def _start_diagnostics_server(self) -> None:
+        """Expose VMU metrics over a lightweight HTTP endpoint for experiments."""
+        if os.getenv("GENIE_DISABLE_DIAGNOSTICS", "false").lower() == "true":
+            logger.info("Diagnostics server disabled via GENIE_DISABLE_DIAGNOSTICS")
+            return
+
+        if self._diagnostics_server is not None:
+            return
+
+        metrics_port = getattr(self._central_config.network, "metrics_port", None)
+        if not metrics_port:
+            logger.debug("No diagnostics port configured; skipping diagnostics server")
+            return
+
+        host = os.getenv("GENIE_DIAGNOSTICS_HOST", "0.0.0.0")
+        self._diagnostics_server = DiagnosticsServer(
+            self._collect_vmu_metrics_snapshot,
+            host=host,
+            port=metrics_port,
+        )
+
+        try:
+            await self._diagnostics_server.start()
+        except OSError as exc:
+            logger.warning("Failed to start diagnostics server on %s:%s: %s", host, metrics_port, exc)
+            self._diagnostics_server = None
+
+    async def _stop_diagnostics_server(self) -> None:
+        if not self._diagnostics_server:
+            return
+        await self._diagnostics_server.stop()
+        self._diagnostics_server = None
+
+    def _collect_vmu_metrics_snapshot(self) -> Dict[str, Any]:
+        snapshot: Dict[str, Any] = {
+            "node_id": self.node_id,
+            "timestamp": time.time(),
+        }
+        try:
+            vmu = get_vmu()
+            vmu_metrics = vmu.get_metrics().to_dict()
+            snapshot["status"] = "ok"
+            snapshot["vmu"] = vmu_metrics
+            snapshot["summary"] = self._summarize_vmu_metrics(vmu_metrics)
+        except Exception as exc:  # pragma: no cover - defensive
+            snapshot["status"] = "error"
+            snapshot["error"] = str(exc)
+        return snapshot
+
+    @staticmethod
+    def _summarize_vmu_metrics(metrics: Dict[str, Any]) -> Dict[str, float]:
+        def pct(used: int, capacity: int) -> float:
+            if not capacity:
+                return 0.0
+            return round((used / capacity) * 100.0, 2)
+
+        summary = {
+            "text_utilization_pct": pct(
+                metrics.get("text_used_bytes", 0),
+                metrics.get("text_capacity_bytes", 0),
+            ),
+            "data_utilization_pct": pct(
+                metrics.get("data_reserved_bytes", 0),
+                metrics.get("data_capacity_bytes", 0),
+            ),
+            "stack_utilization_pct": pct(
+                metrics.get("stack_allocated_bytes", 0),
+                metrics.get("stack_capacity_bytes", 0),
+            ),
+            "active_sessions": float(metrics.get("active_sessions", 0)),
+            "models_loaded": float(metrics.get("models_loaded", 0)),
+        }
+        return summary
 
     async def _transfer_handler_loop(self):
         """Handle incoming transfer requests and execute operations."""
