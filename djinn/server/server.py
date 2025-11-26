@@ -2064,7 +2064,6 @@ class DjinnServer:
             # Get v2.3 components
             if logger.isEnabledFor(logging.DEBUG):
                 try:
-                    from djinn.backend.runtime.unified_vmu import get_vmu
                     vmu_metrics = get_vmu().get_metrics().to_dict()
                     logger.debug(
                         "VMU metrics: text_used=%.2f%%, data_reserved=%.2f%%, stack_used=%.2f%%, sessions=%d",

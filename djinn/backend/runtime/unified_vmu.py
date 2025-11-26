@@ -425,6 +425,7 @@ class DataSegment(MemorySegment):
                 'segment_name': self.name,
                 'capacity_bytes': self.capacity,
                 'reserved_bytes': reserved_bytes,
+                'allocated_bytes': total_used,
                 'free_bytes': self.capacity - reserved_bytes,
                 'active_sessions': active_sessions,
                 'data_internal_waste_bytes': internal_waste,
@@ -1013,8 +1014,16 @@ class UnifiedVMU:
         data_stats = self.data_segment.get_stats()
         stack_stats = self.stack_segment.get_stats()
 
-        total_capacity = text_stats['capacity_bytes'] + data_stats['capacity_bytes'] + stack_stats['capacity_bytes']
-        total_allocated = text_stats['loaded_bytes'] + data_stats['allocated_bytes'] + stack_stats['allocated_bytes']
+        total_capacity = (
+            text_stats.get('capacity_bytes', 0)
+            + data_stats.get('capacity_bytes', 0)
+            + stack_stats.get('capacity_bytes', 0)
+        )
+        total_allocated = (
+            text_stats.get('loaded_bytes', 0)
+            + data_stats.get('allocated_bytes', data_stats.get('reserved_bytes', 0))
+            + stack_stats.get('allocated_bytes', 0)
+        )
         total_free = total_capacity - total_allocated
 
         return {

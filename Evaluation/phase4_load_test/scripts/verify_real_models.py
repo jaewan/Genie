@@ -67,10 +67,9 @@ async def test_model(model_name: str, implementation: str, model_id: str, server
         manager = EnhancedModelManager(coordinator=coordinator, server_address=server_address)
         print(f"✅ Manager initialized")
         
-        # Register model
-        model_id_for_reg = f"test_{model_name.lower().replace('-', '_')}"
-        print(f"Registering model as {model_id_for_reg}...")
-        fingerprint = await manager.register_model(model, model_id=model_id_for_reg)
+        # Register model using the actual HuggingFace model ID for proper server-side loading
+        print(f"Registering model as {model_id}...")
+        fingerprint = await manager.register_model(model, model_id=model_id)
         print(f"✅ Model registered: {fingerprint[:16]}...")
         
         # Prepare inputs
